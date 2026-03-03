@@ -23,16 +23,35 @@ class ShapeService {
     async createShape(userId, data) {
         return await prisma.shape.create({
             data: {
-                ...data,
+                name: data.name,
+                type: data.type,
+                content: data.content,
+                textAlignment: data.textAlignment,
+                groupId: data.groupId,
+                category: data.category,
+                xmlContent: data.xmlContent,
+                thumbnail: data.thumbnail,
+                isPublic: data.isPublic || false,
                 ownerId: userId
             }
         });
     }
 
     async updateShape(id, userId, data) {
+        const updateData = {};
+        if (data.name !== undefined) updateData.name = data.name;
+        if (data.type !== undefined) updateData.type = data.type;
+        if (data.content !== undefined) updateData.content = data.content;
+        if (data.textAlignment !== undefined) updateData.textAlignment = data.textAlignment;
+        if (data.groupId !== undefined) updateData.groupId = data.groupId;
+        if (data.category !== undefined) updateData.category = data.category;
+        if (data.xmlContent !== undefined) updateData.xmlContent = data.xmlContent;
+        if (data.thumbnail !== undefined) updateData.thumbnail = data.thumbnail;
+        if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
+
         return await prisma.shape.updateMany({
             where: { id, ownerId: userId },
-            data
+            data: updateData
         });
     }
 

@@ -1,3 +1,14 @@
+// ============================================================
+// UNIFIED PRISMA SCHEMA
+// Merges 3 legacy MySQL databases into 1 PostgreSQL database:
+//   1. value_stream       (master auth/billing)
+//   2. ent_value_chart    (enterprise app data)
+//   3. ind_value_chart    (individual/pro app data)
+//
+// Built on top of existing NextAuth + Prisma foundation.
+// Includes legacy_* fields for data migration traceability.
+// ============================================================
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,18 +18,118 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum AppType {
+  individual
+  enterprise
+}
+
+enum UserType {
+  free_user
+  pro_user
+  admin
+}
+
+enum UserStatus {
+  draft
+  success
+  deleted
+}
+
+enum ClientType {
+  android
+  ios
+  web
+}
+
+enum PlanDuration {
+  monthly
+  yearly
+}
+
+enum PlanStatus {
+  active
+  inactive
+}
+
+enum SubType {
+  users
+  flows
+}
+
+enum ProductType {
+  pro_monthly
+  team_monthly
+  pro_yearly
+  team_yearly
+}
+
+enum MessageType {
+  text
+  image
+  audio
+  video
+  docs
+  others
+}
+
+enum ShapeType {
+  img
+  stencil
+  html
+  shape
+}
+
+enum TextAlignment {
+  top
+  center
+  bottom
+}
+
+enum YesNo {
+  yes
+  no
+}
+
+enum VsmOptionType {
+  integer
+  decimal
+  numeric
+  text
+}
+
+enum VsmUnit {
+  None
+  Seconds
+  Minutes
+  Hours
+  Percentage
+}
+
+enum FeedbackType {
+  feedback
+  query
+}
+
+// ============================================================
+// 1. NEXTAUTH MODELS (kept from your existing schema)
+// ============================================================
+
 model Account {
   id                 String  @id @default(cuid())
   userId             String
   type               String
-  provider           String
+  provider           String  // google, facebook, linkedin, credentials, apple
   providerAccountId  String
-  refresh_token      String?  @db.Text
-  access_token       String?  @db.Text
+  refresh_token      String? @db.Text
+  access_token       String? @db.Text
   expires_at         Int?
   token_type         String?
   scope              String?
-  id_token           String?  @db.Text
+  id_token           String? @db.Text
   session_state      String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -34,93 +145,892 @@ model Session {
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
-model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String?   @unique
-  emailVerified DateTime?
-  image         String?
-  password      String?
-  role          String    @default("Viewer")
-  accounts      Account[]
-  sessions      Session[]
-  flows         Flow[]
-  shapeGroups   ShapeGroup[]
-  shapes        Shape[]
-  subscription  Subscription?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-}
-
-model Flow {
-  id            String    @id @default(cuid())
-  name          String
-  description   String?
-  thumbnail     String?
-  diagramData   String?   @db.Text @default("")
-  isPublic      Boolean   @default(false)
-  ownerId       String
-  owner         User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  version       Int       @default(1)
-}
-
-model ShapeGroup {
-  id        String   @id @default(cuid())
-  name      String
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  shapes    Shape[]
-  createdAt DateTime @default(now())
-}
-
-model Shape {
-  id            String      @id @default(cuid())
-  name          String
-  type          String      @default("stencil") // stencil, image, html, shape
-  content       String?     @db.Text // SVG/HTML content or Base64 image
-  textAlignment String      @default("bottom") // top, center, bottom
-  
-  groupId       String?
-  group         ShapeGroup? @relation(fields: [groupId], references: [id])
-  
-  ownerId       String
-  owner         User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  
-  // Legacy fields (keeping for compatibility/migration if needed, or reusing)
-  category      String?     // Can be used as fallback or deprecated
-  xmlContent    String?     @db.Text // Keeping this as alias/legacy for now, can migrate to content
-  thumbnail     String?
-  isPublic      Boolean     @default(false)
-  createdAt     DateTime    @default(now())
-}
-
-model Plan {
-  id          String         @id @default(cuid())
-  name        String         @unique
-  price       Float
-  features    Json
-  tier        Int
-  subscriptions Subscription[]
-}
-
-model Subscription {
-  id        String   @id @default(cuid())
-  userId    String   @unique
-  planId    String
-  user      User     @relation(fields: [userId], references: [id])
-  plan      Plan     @relation(fields: [planId], references: [id])
-  status    String
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
 model VerificationToken {
   identifier String
-  token      String   @unique
+  token      String @unique
   expires    DateTime
 
   @@unique([identifier, token])
+}
+
+// ============================================================
+// 2. USER (UNIFIED)
+// Source: value_stream.users (auth master)
+//         ent_value_chart.users (login_type, client, status, chat)
+//         ind_value_chart.users (company_id)
+// Merged with your existing NextAuth User model
+// ============================================================
+
+model User {
+  id            String      @id @default(cuid())
+  name          String?
+  email         String?     @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  rememberToken String?     @map("remember_token")
+  role          String      @default("Viewer")  // App-level role (Viewer, Editor, Admin)
+
+  // --- Legacy migration traceability ---
+  legacyVsId    Int?        @map("legacy_vs_id")   // Original value_stream.users.id
+  legacyEntId   Int?        @map("legacy_ent_id")  // Original ent_value_chart.users.id
+  legacyIndId   Int?        @map("legacy_ind_id")  // Original ind_value_chart.users.id
+
+  // --- Fields from legacy value_stream.users ---
+  contactNo     String?     @map("contact_no")
+  photo         String?
+  userType      UserType    @default(free_user) @map("user_type")
+  userStatus    UserStatus  @default(success)   @map("user_status")
+  clientType    ClientType  @default(web)       @map("client_type")
+  welcomeUser   Boolean     @default(true)      @map("welcome_user")
+  companyId     Int?        @map("company_id")  // From ind_value_chart.users
+
+  // --- Granular permissions (from legacy) ---
+  pFlowRead     Boolean     @default(false)     @map("p_flow_read")
+  pFlowModify   Boolean     @default(false)     @map("p_flow_modify")
+  pUserRead     Boolean     @default(false)     @map("p_user_read")
+  pUserModify   Boolean     @default(false)     @map("p_user_modify")
+  pShapeRead    Boolean     @default(false)     @map("p_shape_read")
+  pShapeModify  Boolean     @default(false)     @map("p_shape_modify")
+  chatEnabled   Boolean     @default(false)     @map("chat_enabled")
+
+  // --- Role reference (legacy) ---
+  roleId        String?     @map("role_id")
+  userRole      Role?       @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
+  // --- Timestamps ---
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt      @map("updated_at")
+
+  // --- Relations ---
+  accounts            Account[]
+  sessions            Session[]
+  flows               Flow[]
+  shapeGroups         ShapeGroup[]
+  shapes              Shape[]
+  subscription        Subscription?
+  firebaseUser        FirebaseUser?
+  usersApps           UserApp[]
+  ownedTeams          Team[]
+  teamMemberships     TeamMember[]
+  flowGroupUsers      FlowGroupUser[]       @relation("FlowGroupUserUser")
+  flowGroupCreated    FlowGroupUser[]       @relation("FlowGroupUserCreator")
+  flowLimits          FlowLimit[]
+  flowPublishes       FlowPublish[]
+  chatGroupsCreated   ChatGroup[]
+  chatGroupMembers    ChatGroupUser[]
+  chatMessagesSent    ChatMessage[]
+  chatMsgSender       ChatMessageUser[]     @relation("ChatMsgSender")
+  chatMsgReceiver     ChatMessageUser[]     @relation("ChatMsgReceiver")
+  conversations       ConversationUser[]
+  messages            Message[]
+  messageNotifications MessageNotification[]
+  userActions         UserAction[]
+  userInterests       UserInterest[]
+  userFreeTrial       UserFreeTrial?
+  feedbackQueries     FeedbackQuery[]
+  vsmOptions          VsmOption[]
+  issuesCreated       IssueItem[]
+  subQueue            SubscriptionQueue[]
+  addUserSubs         AddUserSubscription[]
+
+  @@index([legacyVsId])
+  @@index([companyId])
+  @@map("users")
+}
+
+// ============================================================
+// 3. ROLE (Legacy roles table)
+// Source: value_stream.roles
+// ============================================================
+
+model Role {
+  id        String   @id @default(cuid())
+  legacyId  Int?     @unique @map("legacy_id")
+  title     String
+  users     User[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt      @map("updated_at")
+
+  @@map("roles")
+}
+
+// ============================================================
+// 4. PERMISSION
+// Source: value_stream.permissions
+// ============================================================
+
+model Permission {
+  id        String    @id @default(cuid())
+  name      String?
+  createdAt DateTime? @map("created_at")
+  updatedAt DateTime? @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  @@map("permissions")
+}
+
+// ============================================================
+// 5. FIREBASE USER
+// Source: value_stream.firebase_user
+// ============================================================
+
+model FirebaseUser {
+  id          String    @id @default(cuid())
+  userId      String    @unique @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fcmUsername  String?   @map("fcm_username")
+  fcmPassword  String?  @map("fcm_password")
+  fcmUserId    String?  @map("fcm_user_id")
+  fcmToken     String?  @db.Text @map("fcm_token")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime? @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  @@map("firebase_users")
+}
+
+// ============================================================
+// 6. APP REGISTRY
+// Source: value_stream.apps
+// ============================================================
+
+model App {
+  id        String    @id @default(cuid())
+  legacyId  Int?      @unique @map("legacy_id")
+  appName   String?   @map("app_name")
+  dbName    String?   @map("db_name")   // Legacy reference
+  userApps  UserApp[]
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime? @map("updated_at")
+
+  @@map("apps")
+}
+
+// ============================================================
+// 7. USER - APP MAPPING
+// Source: value_stream.users_app
+// ============================================================
+
+model UserApp {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  appId     String    @map("app_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app       App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime? @map("updated_at")
+
+  @@index([userId])
+  @@index([appId])
+  @@map("users_app")
+}
+
+// ============================================================
+// 8. PLAN (UNIFIED)
+// Source: value_stream.plan (full) + ind_value_chart.plan (simpler)
+// ============================================================
+
+model Plan {
+  id               String          @id @default(cuid())
+  legacyId         Int?            @map("legacy_id")
+  legacySource     String?         @map("legacy_source")
+  name             String          @unique
+  duration         PlanDuration    @default(monthly)
+  noDuration       String?         @map("no_duration")
+  price            Float
+  freeTrial        Int?            @default(0) @map("free_trial")
+  gracePeriod      Int?            @default(0) @map("grace_period")
+  userAccess       Boolean         @default(false) @map("user_access")
+  userCount        Int?            @map("user_count")
+  userCost         Float?          @map("user_cost")
+  status           PlanStatus      @default(active)
+  permissionAccess Json?           @map("permission_access")  // JSONB
+  features         Json?                                       // Benefits/features as JSON
+  tier             Int             @default(0)
+  colorPick        String?         @map("color_pick")
+  fontname         String?
+  subPlanId        Json?           @map("sub_plan_id")
+  subTopId         String?         @map("sub_top_id")
+  appType          AppType?        @map("app_type")
+  subscriptions    Subscription[]
+  subQueue         SubscriptionQueue[]
+  addUserSubs      AddUserSubscription[]
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime?       @map("updated_at")
+  deletedAt        DateTime?       @map("deleted_at")
+
+  @@index([appType])
+  @@map("plans")
+}
+
+// ============================================================
+// 9. SUBSCRIPTION (UNIFIED)
+// Source: value_stream.subscription (full) + ind_value_chart.subscription (simpler)
+// ============================================================
+
+model Subscription {
+  id            String        @id @default(cuid())
+  legacyId      Int?          @map("legacy_id")
+  legacySource  String?       @map("legacy_source")
+  userId        String        @unique @map("user_id")
+  planId        String        @map("plan_id")
+  user          User          @relation(fields: [userId], references: [id])
+  plan          Plan          @relation(fields: [planId], references: [id])
+  paymentId     String?       @map("payment_id")
+  price         Float         @default(0)
+  currency      String?       @default("usd")
+  permission    Json?                                    // JSON array of permission strings
+  isRecurring   Boolean       @default(false) @map("is_recurring")
+  deviceType    ClientType    @default(web)   @map("device_type")
+  appType       AppType?      @map("app_type")
+  usersCount    Int?          @map("users_count")
+  flowsCount    String?       @map("flows_count")
+  subType       SubType?      @map("sub_type")
+  productType   ProductType?  @map("product_type")
+  paidApp       Boolean       @default(false) @map("paid_app")
+  freeTrial     Int?          @map("free_trial")
+  gracePeriod   Int?          @map("grace_period")
+  startedAt     DateTime?     @map("started_at")
+  status        String        @default("active")
+  expiresAt     DateTime?     @map("expires_at")         // was plan_endat
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt      @map("updated_at")
+  deletedAt     DateTime?     @map("deleted_at")
+
+  @@index([appType])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+// ============================================================
+// 10. SUBSCRIPTION QUEUE
+// Source: value_stream.sub_queue
+// ============================================================
+
+model SubscriptionQueue {
+  id           String        @id @default(cuid())
+  userId       String        @map("user_id")
+  planId       String        @map("plan_id")
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan         Plan          @relation(fields: [planId], references: [id])
+  paymentId    String        @map("payment_id")
+  price        Float
+  currency     String?
+  permission   Json?
+  deviceType   ClientType    @default(web) @map("device_type")
+  appType      AppType?      @map("app_type")
+  usersCount   Int?          @map("users_count")
+  flowsCount   String?       @map("flows_count")
+  subType      SubType?      @map("sub_type")
+  productType  ProductType?  @map("product_type")
+  startDate    DateTime?     @map("start_date")
+  planEndat    DateTime?     @map("plan_endat")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime?     @map("updated_at")
+
+  @@map("subscription_queue")
+}
+
+// ============================================================
+// 11. ADD USER SUBSCRIPTION
+// Source: value_stream.add_user_subscription
+// ============================================================
+
+model AddUserSubscription {
+  id              String    @id @default(cuid())
+  paymentId       String?   @map("payment_id")
+  subscriptionId  String?   @map("subscription_id")
+  teamId          String?   @map("team_id")
+  planId          String?   @map("plan_id")
+  userId          String    @map("user_id")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan            Plan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
+  price           Float?
+  currency        String?
+  usersAdd        Int?      @map("users_add")
+  payDate         DateTime? @map("pay_date")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime? @map("updated_at")
+
+  @@map("add_user_subscriptions")
+}
+
+// ============================================================
+// 12. TEAM
+// Source: value_stream.usersteam
+// ============================================================
+
+model Team {
+  id            String        @id @default(cuid())
+  legacyId      Int?          @map("legacy_id")
+  teamOwnerId   String        @map("team_owner_id")
+  owner         User          @relation(fields: [teamOwnerId], references: [id], onDelete: Cascade)
+  teamMem       Int           @default(0)  @map("team_mem")     // Max members allowed
+  countMem      Int           @default(0)  @map("count_mem")    // Current member count
+  appType       AppType?      @map("app_type")
+  verifyTeam    String?       @map("verify_team")
+  status        PlanStatus    @default(active)
+  members       TeamMember[]
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime?     @map("updated_at")
+  deletedAt     DateTime?     @map("deleted_at")
+
+  @@index([teamOwnerId])
+  @@map("teams")
+}
+
+// ============================================================
+// 13. TEAM MEMBER
+// Source: value_stream.team_members
+// ============================================================
+
+model TeamMember {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  teamId    String    @map("team_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  appType   AppType?  @map("app_type")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime? @map("updated_at")
+
+  @@index([userId])
+  @@index([teamId])
+  @@map("team_members")
+}
+
+// ============================================================
+// 14. FLOW (UNIFIED)
+// Source: ent_value_chart.flows + ind_value_chart.flows
+// Extended from your existing Flow model
+// ============================================================
+
+model Flow {
+  id            String          @id @default(cuid())
+  legacyId      Int?            @map("legacy_id")
+  legacySource  String?         @map("legacy_source")  // ent_value_chart or ind_value_chart
+  name          String
+  description   String?
+  thumbnail     String?
+  diagramData   String?         @db.Text @default("") @map("diagram_data")  // was flow_data
+  isPublic      Boolean         @default(false) @map("is_public")
+  ownerId       String          @map("owner_id")
+  owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  appType       AppType?        @map("app_type")
+  version       Int             @default(1)
+  flowGroupUsers FlowGroupUser[]
+  flowPublishes  FlowPublish[]
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt      @map("updated_at")
+  deletedAt     DateTime?       @map("deleted_at")
+
+  @@index([ownerId])
+  @@index([appType])
+  @@index([legacyId, legacySource])
+  @@map("flows")
+}
+
+// ============================================================
+// 15. FLOW GROUP USER (UNIFIED)
+// Source: ent + ind flow_group_user
+// ind extras: type_flow_share, type_flow_chat, team_id, created_by_id
+// ============================================================
+
+model FlowGroupUser {
+  id              String      @id @default(cuid())
+  legacyId        Int?        @map("legacy_id")
+  legacySource    String?     @map("legacy_source")
+  flowId          String      @map("flow_id")
+  flow            Flow        @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  userId          String      @map("user_id")
+  user            User        @relation("FlowGroupUserUser", fields: [userId], references: [id], onDelete: Cascade)
+  groupId         String?     @map("group_id")
+  group           ShapeGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  typeFlowShare   YesNo       @default(no) @map("type_flow_share")
+  typeFlowChat    YesNo       @default(no) @map("type_flow_chat")
+  teamId          Int         @default(0)  @map("team_id")
+  createdById     String?     @map("created_by_id")
+  createdBy       User?       @relation("FlowGroupUserCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  appType         AppType     @map("app_type")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime?   @map("updated_at")
+  deletedAt       DateTime?   @map("deleted_at")
+
+  @@index([flowId])
+  @@index([userId])
+  @@map("flow_group_users")
+}
+
+// ============================================================
+// 16. FLOW LIMIT (UNIFIED)
+// Source: ent + ind flow_limit
+// Tracks: Pro first 10 free, then paid
+// ============================================================
+
+model FlowLimit {
+  id            String    @id @default(cuid())
+  legacyId      Int?      @map("legacy_id")
+  legacySource  String?   @map("legacy_source")
+  userId        String    @map("user_id")
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  totCount      Int?      @map("tot_count")      // Total allowed flows
+  flowUsed      Int?      @map("flow_used")      // Currently used
+  flowIds       String?   @map("flow_ids")       // Comma-separated flow IDs
+  appType       AppType   @map("app_type")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime? @map("updated_at")
+
+  @@index([userId])
+  @@map("flow_limits")
+}
+
+// ============================================================
+// 17. FLOW PUBLISH (UNIFIED)
+// Source: ent + ind flow_publishes
+// ============================================================
+
+model FlowPublish {
+  id            String    @id @default(cuid())
+  legacyId      Int?      @map("legacy_id")
+  legacySource  String?   @map("legacy_source")
+  flowId        String    @map("flow_id")
+  flow          Flow      @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  userId        String    @map("user_id")
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flowData      String?   @db.Text @map("flow_data")
+  appType       AppType   @map("app_type")
+  createdAt     DateTime? @map("created_at")
+  updatedAt     DateTime? @map("updated_at")
+
+  @@index([flowId])
+  @@map("flow_publishes")
+}
+
+// ============================================================
+// 18. SHAPE GROUP (UNIFIED)
+// Source: ent + ind groups
+// ind extras: is_predefined, team_id
+// ============================================================
+
+model ShapeGroup {
+  id            String          @id @default(cuid())
+  legacyId      Int?            @map("legacy_id")
+  legacySource  String?         @map("legacy_source")
+  name          String
+  userId        String          @map("user_id")
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isPredefined  Boolean         @default(false) @map("is_predefined")
+  teamId        Int             @default(0) @map("team_id")
+  appType       AppType?        @map("app_type")
+  shapes        Shape[]
+  flowGroupUsers FlowGroupUser[]
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime?       @map("updated_at")
+  deletedAt     DateTime?       @map("deleted_at")
+
+  @@map("shape_groups")
+}
+
+// ============================================================
+// 19. SHAPE (UNIFIED)
+// Source: ent + ind shapes
+// ind extras: ratio_lock, text_alignment, shape_type
+// ============================================================
+
+model Shape {
+  id            String          @id @default(cuid())
+  legacyId      Int?            @map("legacy_id")
+  legacySource  String?         @map("legacy_source")
+  name          String
+  type          String          @default("stencil")
+  content       String?         @db.Text              // SVG/HTML/Base64 (was 'shape' in MySQL)
+  textAlignment String          @default("bottom") @map("text_alignment")
+  ratioLock     Boolean         @default(true) @map("ratio_lock")
+  shapeType     ShapeType       @default(img)    @map("shape_type")
+  groupId       String?         @map("group_id")
+  group         ShapeGroup?     @relation(fields: [groupId], references: [id])
+  ownerId       String          @map("owner_id")
+  owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  appType       AppType?        @map("app_type")
+  category      String?
+  xmlContent    String?         @db.Text @map("xml_content")  // Legacy
+  thumbnail     String?
+  isPublic      Boolean         @default(false) @map("is_public")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime?       @map("updated_at")
+  deletedAt     DateTime?       @map("deleted_at")
+
+  @@index([groupId])
+  @@map("shapes")
+}
+
+// ============================================================
+// 20. CHAT GROUP (UNIFIED)
+// Source: value_stream + ent (team_id) + ind (company_id) tbl_chat_group
+// ============================================================
+
+model ChatGroup {
+  id            String            @id @default(cuid())
+  legacyId      Int?              @map("legacy_id")
+  legacySource  String?           @map("legacy_source")
+  title         String
+  picture       String?
+  userId        String            @map("user_id")
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId        Int?              @map("team_id")
+  companyId     Int?              @map("company_id")
+  flowId        Int               @default(0) @map("flow_id")
+  flowItemId    String            @default("") @map("flow_item_id")
+  appType       AppType?          @map("app_type")
+  members       ChatGroupUser[]
+  messages      ChatMessage[]
+  msgUsers      ChatMessageUser[]
+  createdAt     DateTime?         @map("created_at")
+  updatedAt     DateTime?         @map("updated_at")
+  deletedAt     DateTime?         @map("deleted_at")
+
+  @@index([userId])
+  @@map("chat_groups")
+}
+
+// ============================================================
+// 21. CHAT GROUP USER (UNIFIED)
+// ent/vs has: chat_clear | ind does NOT
+// ============================================================
+
+model ChatGroupUser {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  groupId   String    @map("group_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group     ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  chatClear DateTime? @map("chat_clear")
+  createdAt DateTime? @map("created_at")
+  updatedAt DateTime? @map("updated_at")
+
+  @@index([userId])
+  @@index([groupId])
+  @@map("chat_group_users")
+}
+
+// ============================================================
+// 22. CHAT MESSAGE (UNIFIED)
+// ent/vs has: team_id | ind does NOT
+// ============================================================
+
+model ChatMessage {
+  id            String            @id @default(cuid())
+  legacyId      Int?              @map("legacy_id")
+  legacySource  String?           @map("legacy_source")
+  message       String            @db.Text
+  groupId       String            @map("group_id")
+  group         ChatGroup         @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  type          MessageType       @default(text)
+  userId        String            @map("user_id")
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId        Int?              @map("team_id")
+  attachPath    String?           @map("attach_path")
+  appType       AppType?          @map("app_type")
+  msgUsers      ChatMessageUser[]
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime?         @map("updated_at")
+  deletedAt     DateTime?         @map("deleted_at")
+
+  @@index([userId])
+  @@index([groupId])
+  @@map("chat_messages")
+}
+
+// ============================================================
+// 23. CHAT MESSAGE USER (UNIFIED)
+// Read receipts - ent/vs has: team_id | ind does NOT
+// ============================================================
+
+model ChatMessageUser {
+  id          String       @id @default(cuid())
+  msgId       String       @map("msg_id")
+  msg         ChatMessage  @relation(fields: [msgId], references: [id], onDelete: Cascade)
+  senderId    String       @map("sender_id")
+  sender      User         @relation("ChatMsgSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiverId  String       @map("receiver_id")
+  receiver    User         @relation("ChatMsgReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  isRead      Boolean      @default(false) @map("is_read")
+  groupId     String       @map("group_id")
+  group       ChatGroup    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  teamId      Int?         @map("team_id")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime?    @map("updated_at")
+  deletedAt   DateTime?    @map("deleted_at")
+
+  @@index([msgId])
+  @@index([receiverId])
+  @@map("chat_message_users")
+}
+
+// ============================================================
+// 24. CONVERSATION (Master-level mc_* chat)
+// Source: value_stream.mc_conversations
+// ============================================================
+
+model Conversation {
+  id          String             @id @default(cuid())
+  private     Boolean            @default(true)
+  data        String?            @db.Text
+  users       ConversationUser[]
+  messages    Message[]
+  createdAt   DateTime?          @map("created_at")
+  updatedAt   DateTime?          @map("updated_at")
+
+  @@map("conversations")
+}
+
+model ConversationUser {
+  userId         String       @map("user_id")
+  conversationId String       @map("conversation_id")
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime?    @map("created_at")
+  updatedAt      DateTime?    @map("updated_at")
+
+  @@id([userId, conversationId])
+  @@map("conversation_users")
+}
+
+model Message {
+  id              String                @id @default(cuid())
+  body            String                @db.Text
+  conversationId  String                @map("conversation_id")
+  conversation    Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId          String                @map("user_id")
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type            String                @default("text")
+  notifications   MessageNotification[]
+  createdAt       DateTime?             @map("created_at")
+  updatedAt       DateTime?             @map("updated_at")
+
+  @@index([conversationId])
+  @@index([userId])
+  @@map("messages")
+}
+
+model MessageNotification {
+  id              String       @id @default(cuid())
+  messageId       String       @map("message_id")
+  message         Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  conversationId  String       @map("conversation_id")
+  userId          String       @map("user_id")
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isSeen          Boolean      @default(false) @map("is_seen")
+  isSender        Boolean      @default(false) @map("is_sender")
+  flagged         Boolean      @default(false)
+  createdAt       DateTime?    @map("created_at")
+  updatedAt       DateTime?    @map("updated_at")
+  deletedAt       DateTime?    @map("deleted_at")
+
+  @@index([userId, messageId])
+  @@map("message_notifications")
+}
+
+// ============================================================
+// 25. ISSUE ITEM (UNIFIED)
+// Source: ent + ind tbl_issue_list
+// ============================================================
+
+model IssueItem {
+  id            String    @id @default(cuid())
+  legacyId      Int?      @map("legacy_id")
+  legacySource  String?   @map("legacy_source")
+  title         String
+  flowId        Int       @map("flow_id")
+  flowItemId    String    @default("") @map("flow_item_id")
+  companyId     Int?      @map("company_id")
+  isChecked     Boolean   @default(false) @map("is_checked")
+  createdById   String?   @map("created_by")
+  createdBy     User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  appType       AppType?  @map("app_type")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([flowId])
+  @@map("issue_list")
+}
+
+// ============================================================
+// 26. TRANSACTION LOG (UNIFIED)
+// Source: value_stream + ent + ind transaction_log
+// ============================================================
+
+model TransactionLog {
+  id              String    @id @default(cuid())
+  legacyId        Int?      @map("legacy_id")
+  legacySource    String?   @map("legacy_source")
+  chargeId        String?   @map("charge_id")
+  txnId           String?   @map("txn_id")
+  amountCharged   Int?      @map("amount_charged")  // In cents
+  paymentMethod   String?   @map("payment_method")
+  holderName      String?   @map("holder_name")
+  currency        String?
+  status          String?
+  appType         AppType?  @map("app_type")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime? @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  @@index([chargeId])
+  @@map("transaction_logs")
+}
+
+// ============================================================
+// 27. VSM OPTIONS (UNIFIED)
+// Source: value_stream/ent (integer/decimal/text, company_id)
+//         ind (numeric/text, unit, team_id)
+// ============================================================
+
+model VsmOption {
+  id            String         @id @default(cuid())
+  legacyId      Int?           @map("legacy_id")
+  legacySource  String?        @map("legacy_source")
+  title         String
+  type          VsmOptionType  @default(text)
+  unit          VsmUnit?       @default(None)
+  companyId     Int?           @map("company_id")
+  teamId        Int?           @map("team_id")
+  createdById   String         @map("created_by_id")
+  createdBy     User           @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  appType       AppType?       @map("app_type")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime?      @map("updated_at")
+
+  @@map("vsm_options")
+}
+
+// ============================================================
+// 28. USER INTEREST (UNIFIED)
+// Source: value_stream + ent + ind user_interests
+// ============================================================
+
+model UserInterest {
+  id             String    @id @default(cuid())
+  userId         String    @map("user_id")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userOccupation String?   @db.Text @map("user_occupation")
+  userInterest   Json?     @map("user_interest")  // JSONB
+  legacySource   String?   @map("legacy_source")
+  createdAt      DateTime? @map("created_at")
+  updatedAt      DateTime? @map("updated_at")
+
+  @@index([userId])
+  @@map("user_interests")
+}
+
+// ============================================================
+// 29. OFFER
+// Source: value_stream.offers
+// ============================================================
+
+model Offer {
+  id            String     @id @default(cuid())
+  offName       String?    @map("off_name")
+  type          String?
+  planOffer     String     @map("plan_offer")
+  userOffer     String?    @map("user_offer")
+  startDate     DateTime?  @map("start_date")
+  expiredDate   DateTime?  @map("expired_date")
+  status        PlanStatus @default(active)
+  afterOfferId  Int?       @map("after_offer_id")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime?  @map("updated_at")
+  deletedAt     DateTime?  @map("deleted_at")
+
+  @@map("offers")
+}
+
+// ============================================================
+// 30. PROMO CODE (UNIFIED)
+// Source: value_stream + ent + ind promocodes
+// ============================================================
+
+model PromoCode {
+  id                  String    @id @default(cuid())
+  promoCode           String?   @map("promo_code")
+  validUpto           DateTime? @map("valid_upto") @db.Date
+  discountPercentage  Float?    @map("discount_percentage")
+  legacySource        String?   @map("legacy_source")
+  createdAt           DateTime? @map("created_at")
+  updatedAt           DateTime? @map("updated_at")
+  deletedAt           DateTime? @map("deleted_at")
+
+  @@map("promocodes")
+}
+
+// ============================================================
+// 31. USER ACTION (Audit Log)
+// Source: value_stream.user_actions
+// ============================================================
+
+model UserAction {
+  id           String    @id @default(cuid())
+  action       String
+  actionModel  String?   @map("action_model")
+  actionId     Int?      @map("action_id")
+  userId       String?   @map("user_id")
+  user         User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime? @map("created_at")
+  updatedAt    DateTime? @map("updated_at")
+
+  @@index([userId])
+  @@map("user_actions")
+}
+
+// ============================================================
+// 32. PASSWORD RESET
+// Source: value_stream.password_resets
+// ============================================================
+
+model PasswordReset {
+  id        String    @id @default(cuid())
+  email     String
+  token     String
+  createdAt DateTime? @map("created_at")
+
+  @@index([email])
+  @@map("password_resets")
+}
+
+// ============================================================
+// 33. USER FREE TRIAL
+// Source: value_stream.user_free_trail
+// ============================================================
+
+model UserFreeTrial {
+  id           String    @id @default(cuid())
+  userId       String    @unique @map("user_id")
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  proMonthly   Boolean   @default(false) @map("pro_monthly")
+  teamMonthly  Boolean   @default(false) @map("team_monthly")
+  proYearly    Boolean   @default(false) @map("pro_yearly")
+  teamYearly   Boolean   @default(false) @map("team_yearly")
+  createdAt    DateTime? @map("created_at")
+  updatedAt    DateTime? @map("updated_at")
+
+  @@map("user_free_trials")
+}
+
+// ============================================================
+// 34. FEEDBACK QUERY
+// Source: value_stream.tbl_feedback_query
+// ============================================================
+
+model FeedbackQuery {
+  id        String       @id @default(cuid())
+  message   String?      @db.Text
+  userId    String       @map("user_id")
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  msgType   FeedbackType @default(feedback) @map("msg_type")
+  appType   AppType      @default(enterprise) @map("app_type")
+  appDevice ClientType   @default(android)    @map("app_device")
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime?    @map("updated_at")
+
+  @@map("feedback_queries")
 }

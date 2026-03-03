@@ -1,64 +1,43 @@
 const shapeService = require('../services/shape.service');
+const asyncHandler = require('../utils/asyncHandler');
 
 class ShapeController {
-    async getAllShapes(req, res) {
-        try {
-            const userId = req.user.id;
-            const shapes = await shapeService.getAllShapes(userId);
-            res.json(shapes);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    getAllShapes = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const shapes = await shapeService.getAllShapes(userId);
+        res.json({ success: true, data: shapes });
+    });
 
-    async getShapeById(req, res) {
-        try {
-            const shape = await shapeService.getShapeById(req.params.id);
-            if (!shape) return res.status(404).json({ error: 'Shape not found' });
-            res.json(shape);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
+    getShapeById = asyncHandler(async (req, res) => {
+        const shape = await shapeService.getShapeById(req.params.id);
+        if (!shape) {
+            return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Shape not found' } });
         }
-    }
+        res.json({ success: true, data: shape });
+    });
 
-    async createShape(req, res) {
-        try {
-            const userId = req.user.id;
-            const shape = await shapeService.createShape(userId, req.body);
-            res.status(201).json(shape);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    createShape = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const shape = await shapeService.createShape(userId, req.body);
+        res.status(201).json({ success: true, data: shape });
+    });
 
-    async updateShape(req, res) {
-        try {
-            const userId = req.user.id;
-            await shapeService.updateShape(req.params.id, userId, req.body);
-            res.json({ message: 'Shape updated successfully' });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    updateShape = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        await shapeService.updateShape(req.params.id, userId, req.body);
+        res.json({ success: true, data: { message: 'Shape updated successfully' } });
+    });
 
-    async deleteShape(req, res) {
-        try {
-            const userId = req.user.id;
-            await shapeService.deleteShape(req.params.id, userId);
-            res.json({ message: 'Shape deleted successfully' });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    deleteShape = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        await shapeService.deleteShape(req.params.id, userId);
+        res.json({ success: true, data: { message: 'Shape deleted successfully' } });
+    });
 
-    async getCategories(req, res) {
-        try {
-            const categories = await shapeService.getCategories();
-            res.json(categories);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    getCategories = asyncHandler(async (req, res) => {
+        const categories = await shapeService.getCategories();
+        res.json({ success: true, data: categories });
+    });
 }
 
 module.exports = new ShapeController();

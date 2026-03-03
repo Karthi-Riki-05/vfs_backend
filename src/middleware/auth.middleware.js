@@ -1,25 +1,35 @@
 const jwt = require('jsonwebtoken');
+const AppError = require('../utils/AppError');
+const logger = require('../utils/logger');
 
 const authenticate = (req, res, next) => {
     const authHeader = req.headers.authorization;
 
     if (!authHeader) {
-        return res.status(401).json({ error: 'Authorization header missing' });
+        return next(new AppError('Authorization header missing', 401, 'AUTH_HEADER_MISSING'));
     }
 
     const token = authHeader.split(' ')[1];
 
-    try {
-        // Since we are using NextAuth JWT strategy, the token is encrypted with NEXTAUTH_SECRET
-        // However, for direct backend communication if we want to be simple for now
-        // we can expect a token that contains the user id.
-        // In a real decoupled app, we might use a shared secret.
+    if (!token) {
+        return next(new AppError('Token not provided', 401, 'TOKEN_MISSING'));
+    }
 
-        const decoded = jwt.verify(token, process.env.NEXTAUTH_SECRET || 'supersecret');
+    const secret = process.env.NEXTAUTH_SECRET;
+    if (!secret) {
+        logger.error('NEXTAUTH_SECRET environment variable is not set');
+        return next(new AppError('Server configuration error', 500, 'CONFIG_ERROR'));
+    }
+
+    try {
+        const decoded = jwt.verify(token, secret);
         req.user = { id: decoded.sub, ...decoded };
         next();
     } catch (error) {
-        return res.status(401).json({ error: 'Invalid or expired token' });
+        if (error.name === 'TokenExpiredError') {
+            return next(new AppError('Token has expired', 401, 'TOKEN_EXPIRED'));
+        }
+        return next(new AppError('Invalid or expired token', 401, 'INVALID_TOKEN'));
     }
 };
 

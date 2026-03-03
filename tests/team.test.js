@@ -1,0 +1,105 @@
+const request = require('supertest');
+const { mockPrisma } = require('./setup');
+const { generateTestToken } = require('./helpers');
+const app = require('../index');
+
+describe('Team Routes', () => {
+    const token = generateTestToken('owner-1', 'Viewer');
+
+    beforeEach(() => jest.clearAllMocks());
+
+    describe('GET /api/v1/teams', () => {
+        it('should list user teams', async () => {
+            mockPrisma.team.findMany.mockResolvedValue([
+                { id: 'team-1', teamOwnerId: 'owner-1', owner: { id: 'owner-1', name: 'Owner' }, _count: { members: 3 } },
+            ]);
+            mockPrisma.team.count.mockResolvedValue(1);
+
+            const res = await request(app)
+                .get('/api/v1/teams')
+                .set('Authorization', `Bearer ${token}`);
+
+            expect(res.status).toBe(200);
+            expect(res.body.data.teams).toHaveLength(1);
+        });
+
+        it('should return 401 without auth', async () => {
+            const res = await request(app).get('/api/v1/teams');
+            expect(res.status).toBe(401);
+        });
+    });
+
+    describe('POST /api/v1/teams', () => {
+        it('should create a team', async () => {
+            mockPrisma.team.create.mockResolvedValue({
+                id: 'team-new', teamOwnerId: 'owner-1', status: 'active',
+                owner: { id: 'owner-1', name: 'Owner', email: 'test@test.com' },
+            });
+
+            const res = await request(app)
+                .post('/api/v1/teams')
+                .set('Authorization', `Bearer ${token}`)
+                .send({ appType: 'enterprise' });
+
+            expect(res.status).toBe(201);
+            expect(res.body.success).toBe(true);
+        });
+    });
+
+    describe('GET /api/v1/teams/:id', () => {
+        it('should get team with members', async () => {
+            mockPrisma.team.findFirst.mockResolvedValue({
+                id: 'team-1', teamOwnerId: 'owner-1',
+                owner: { id: 'owner-1', name: 'Owner', email: 'test@test.com' },
+                members: [],
+            });
+
+            const res = await request(app)
+                .get('/api/v1/teams/team-1')
+                .set('Authorization', `Bearer ${token}`);
+
+            expect(res.status).toBe(200);
+            expect(res.body.data.id).toBe('team-1');
+        });
+
+        it('should return 404 for non-existent team', async () => {
+            mockPrisma.team.findFirst.mockResolvedValue(null);
+
+            const res = await request(app)
+                .get('/api/v1/teams/nonexistent')
+                .set('Authorization', `Bearer ${token}`);
+
+            expect(res.status).toBe(404);
+        });
+    });
+
+    describe('POST /api/v1/teams/:id/members', () => {
+        it('should add a member', async () => {
+            mockPrisma.team.findFirst.mockResolvedValue({ id: 'team-1', teamOwnerId: 'owner-1', teamMem: 10 });
+            mockPrisma.teamMember.count.mockResolvedValue(2);
+            mockPrisma.user.findUnique.mockResolvedValue({ id: 'user-2', email: 'member@test.com' });
+            mockPrisma.teamMember.findFirst.mockResolvedValue(null);
+            mockPrisma.teamMember.create.mockResolvedValue({
+                id: 'tm-1', userId: 'user-2', teamId: 'team-1',
+                user: { id: 'user-2', name: 'Member', email: 'member@test.com' },
+            });
+            mockPrisma.team.update.mockResolvedValue({});
+
+            const res = await request(app)
+                .post('/api/v1/teams/team-1/members')
+                .set('Authorization', `Bearer ${token}`)
+                .send({ email: 'member@test.com' });
+
+            expect(res.status).toBe(201);
+        });
+
+        it('should reject invalid email', async () => {
+            const res = await request(app)
+                .post('/api/v1/teams/team-1/members')
+                .set('Authorization', `Bearer ${token}`)
+                .send({ email: 'not-email' });
+
+            expect(res.status).toBe(400);
+        });
+    });
+});

@@ -1,5 +1,6 @@
-// Service for OpenAI proxy
 const OpenAI = require('openai');
+const AppError = require('../utils/AppError');
+const logger = require('../utils/logger');
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
@@ -7,19 +8,10 @@ const openai = new OpenAI({
 
 exports.proxy = async (body) => {
     if (!process.env.OPENAI_API_KEY) {
-        const err = new Error('OpenAI API key not configured');
-        err.status = 500;
-        throw err;
+        throw new AppError('OpenAI API key not configured', 500, 'OPENAI_NOT_CONFIGURED');
     }
-    console.log(process.env.OPENAI_API_KEY,'------------------');
-    try {
-        if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
-            const err = new Error('Invalid request: messages array is required');
-            err.status = 400;
-            throw err;
-        }
 
-        console.log(body);
+    try {
         const model = body.model || 'gpt-4';
 
         const completion = await openai.chat.completions.create({
@@ -27,35 +19,22 @@ exports.proxy = async (body) => {
             messages: body.messages,
         });
 
-        // AI தரும் மூலத் தரவு (Raw content)
         let rawContent = completion.choices[0].message.content;
+        const cleanContent = rawContent.replace(/```xml|```/g, '').trim();
 
-        // 1. Markdown குறியீடுகளை (```xml மற்றும் ```) நீக்குதல்
-        // 2. தொடக்கத்தில் அல்லது இறுதியில் உள்ள தேவையற்ற இடைவெளிகளை நீக்குதல்
-        const cleanContent = rawContent.replace(/```xml|```/g, "").trim();
-
-        // சுத்தமான XML-ஐ மட்டும் திருப்பி அனுப்புகிறோம்
         return { content: cleanContent };
     } catch (error) {
+        logger.error('OpenAI API error', { status: error.status, code: error.code });
+
         if (error.status === 401) {
-            const err = new Error('Invalid API key');
-            err.status = 401;
-            throw err;
+            throw new AppError('Invalid API key', 401, 'OPENAI_AUTH_ERROR');
         } else if (error.status === 429) {
-            const err = new Error('Rate limit exceeded');
-            err.status = 429;
-            throw err;
+            throw new AppError('Rate limit exceeded', 429, 'OPENAI_RATE_LIMIT');
         } else if (error.status === 400) {
-            const err = new Error('Invalid request to OpenAI API');
-            err.status = 400;
-            throw err;
+            throw new AppError('Invalid request to OpenAI API', 400, 'OPENAI_BAD_REQUEST');
         } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-            const err = new Error('Network error');
-            err.status = 500;
-            throw err;
+            throw new AppError('Network error', 500, 'NETWORK_ERROR');
         }
-        const err = new Error('Internal server error');
-        err.status = 500;
-        throw err;
+        throw new AppError('Internal server error', 500, 'INTERNAL_ERROR');
     }
 };

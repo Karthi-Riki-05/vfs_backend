@@ -1,10 +1,12 @@
 const { prisma } = require('../lib/prisma');
 const produce = require('immer').produce;
+const AppError = require('../utils/AppError');
 
 class FlowService {
     async getAllFlows(userId, options = {}) {
         const { search, page = 1, limit = 10 } = options;
-        const skip = (page - 1) * limit;
+        const take = Math.min(Number(limit) || 10, 100);
+        const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
         const where = {
             ownerId: userId,
@@ -21,13 +23,13 @@ class FlowService {
             prisma.flow.findMany({
                 where,
                 skip,
-                take: Number(limit),
+                take,
                 orderBy: { updatedAt: 'desc' },
             }),
             prisma.flow.count({ where }),
         ]);
 
-        return { flows, total, page, totalPages: Math.ceil(total / limit) };
+        return { flows, total, page: Number(page) || 1, totalPages: Math.ceil(total / take) };
     }
 
     async getFlowById(id, userId) {
@@ -39,20 +41,25 @@ class FlowService {
     async createFlow(userId, data) {
         return await prisma.flow.create({
             data: {
-                ...data,
-                diagramData: data.xml || data.diagramData || "",
+                name: data.name,
+                description: data.description,
+                thumbnail: data.thumbnail,
+                diagramData: data.xml || data.diagramData || '',
+                isPublic: data.isPublic || false,
                 ownerId: userId,
             },
         });
-
     }
 
     async updateFlow(id, userId, data) {
-        const updateData = { ...data };
-        if (data.xml) {
-            updateData.diagramData = data.xml;
-            delete updateData.xml;
-        }
+        const updateData = {};
+        if (data.name !== undefined) updateData.name = data.name;
+        if (data.description !== undefined) updateData.description = data.description;
+        if (data.thumbnail !== undefined) updateData.thumbnail = data.thumbnail;
+        if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
+        if (data.xml !== undefined) updateData.diagramData = data.xml;
+        if (data.diagramData !== undefined) updateData.diagramData = data.diagramData;
+
         return await prisma.flow.updateMany({
             where: { id, ownerId: userId },
             data: updateData,
@@ -67,22 +74,32 @@ class FlowService {
 
     async duplicateFlow(id, userId) {
         const original = await this.getFlowById(id, userId);
-        if (!original) throw new Error('Flow not found');
+        if (!original) throw new AppError('Flow not found', 404, 'NOT_FOUND');
 
-        const { id: _, createdAt: __, updatedAt: ___, ...rest } = original;
         return await prisma.flow.create({
             data: {
-                ...rest,
                 name: `${original.name} (Copy)`,
+                description: original.description,
+                thumbnail: original.thumbnail,
+                diagramData: original.diagramData,
+                isPublic: original.isPublic,
+                ownerId: original.ownerId,
+                version: original.version,
             },
         });
     }
 
     async updateDiagramState(id, userId, groupId, newShape) {
         const flow = await this.getFlowById(id, userId);
-        if (!flow) throw new Error('Flow not found');
+        if (!flow) throw new AppError('Flow not found', 404, 'NOT_FOUND');
 
-        const updatedDiagramData = produce(flow.diagramData || { groups: [] }, draft => {
+        // Parse diagramData if stored as string
+        let currentData = flow.diagramData || { groups: [] };
+        if (typeof currentData === 'string') {
+            try { currentData = JSON.parse(currentData); } catch { currentData = { groups: [] }; }
+        }
+
+        const updatedDiagramData = produce(currentData, draft => {
             let group = draft.groups.find(g => g.id === groupId);
             if (!group) {
                 group = { id: groupId, children: [] };

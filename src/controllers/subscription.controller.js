@@ -1,45 +1,30 @@
 const subscriptionService = require('../services/subscription.service');
+const asyncHandler = require('../utils/asyncHandler');
 
 class SubscriptionController {
-    async getCurrentSubscription(req, res) {
-        try {
-            const userId = req.user.id;
-            const subscription = await subscriptionService.getCurrentSubscription(userId);
-            res.json(subscription);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    getCurrentSubscription = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const subscription = await subscriptionService.getCurrentSubscription(userId);
+        res.json({ success: true, data: subscription });
+    });
 
-    async getPlans(req, res) {
-        try {
-            const plans = await subscriptionService.getPlans();
-            res.json(plans);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    getPlans = asyncHandler(async (req, res) => {
+        const plans = await subscriptionService.getPlans();
+        res.json({ success: true, data: plans });
+    });
 
-    async subscribe(req, res) {
-        try {
-            const userId = req.user.id;
-            const { planId } = req.body;
-            const subscription = await subscriptionService.subscribeToPlan(userId, planId);
-            res.json(subscription);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    subscribe = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const { planId } = req.body;
+        const subscription = await subscriptionService.subscribeToPlan(userId, planId);
+        res.json({ success: true, data: subscription });
+    });
 
-    async cancel(req, res) {
-        try {
-            const userId = req.user.id;
-            await subscriptionService.cancelSubscription(userId);
-            res.json({ message: 'Subscription cancelled successfully' });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    cancel = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        await subscriptionService.cancelSubscription(userId);
+        res.json({ success: true, data: { message: 'Subscription cancelled successfully' } });
+    });
 }
 
 module.exports = new SubscriptionController();

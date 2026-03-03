@@ -1,70 +1,77 @@
 const { prisma } = require('../lib/prisma');
 const argon2 = require('argon2');
+const jwt = require('jsonwebtoken');
+const asyncHandler = require('../utils/asyncHandler');
+const AppError = require('../utils/AppError');
+const logger = require('../utils/logger');
 
-exports.register = async (req, res) => {
-    try {
-        const { name, email, password } = req.body;
-        console.log(req.body);
+exports.register = asyncHandler(async (req, res) => {
+    const { name, email, password } = req.body;
 
-        if (!email || !password) {
-            return res.status(400).json({ error: "Email and password are required" });
-        }
+    const existingUser = await prisma.user.findUnique({
+        where: { email }
+    });
 
-        const existingUser = await prisma.user.findUnique({
-            where: { email }
-        });
-
-        if (existingUser) {
-            return res.status(400).json({ error: "User already exists" });
-        }
-
-        const hashedPassword = await argon2.hash(password);
-
-        const user = await prisma.user.create({
-            data: {
-                name,
-                email,
-                password: hashedPassword,
-                role: 'Viewer' // Default role
-            }
-        });
-
-        res.status(201).json({
-            message: "User registered successfully",
-            userId: user.id
-        });
-    } catch (error) {
-        console.error("Registration error:", error);
-        res.status(500).json({ error: "Internal server error" });
+    if (existingUser) {
+        throw new AppError('User already exists', 409, 'USER_EXISTS');
     }
-};
 
-exports.validateUser = async (req, res) => {
-    try {
-        const { email, password } = req.body;
+    const hashedPassword = await argon2.hash(password);
 
-        const user = await prisma.user.findUnique({
-            where: { email }
-        });
-
-        if (!user || !user.password) {
-            return res.status(401).json({ error: "Invalid credentials" });
+    const user = await prisma.user.create({
+        data: {
+            name,
+            email,
+            password: hashedPassword,
+            role: 'Viewer'
         }
+    });
 
-        const isValid = await argon2.verify(user.password, password);
+    logger.info(`User registered: ${user.id}`);
 
-        if (!isValid) {
-            return res.status(401).json({ error: "Invalid credentials" });
+    res.status(201).json({
+        success: true,
+        data: {
+            message: 'User registered successfully',
+            userId: user.id
         }
+    });
+});
 
-        res.json({
+exports.validateUser = asyncHandler(async (req, res) => {
+    const { email, password } = req.body;
+
+    const user = await prisma.user.findUnique({
+        where: { email }
+    });
+
+    if (!user || !user.password) {
+        throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
+    }
+
+    const isValid = await argon2.verify(user.password, password);
+
+    if (!isValid) {
+        logger.warn(`Failed login attempt for: ${email}`);
+        throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
+    }
+
+    logger.info(`User authenticated: ${user.id}`);
+
+    const token = jwt.sign(
+        { sub: user.id, email: user.email, name: user.name, role: user.role },
+        process.env.NEXTAUTH_SECRET,
+        { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    );
+
+    res.json({
+        success: true,
+        data: {
             id: user.id,
             email: user.email,
             name: user.name,
-            role: user.role
-        });
-    } catch (error) {
-        console.error("Auth validation error:", error);
-        res.status(500).json({ error: "Internal server error" });
-    }
-};
+            role: user.role,
+            token
+        }
+    });
+});

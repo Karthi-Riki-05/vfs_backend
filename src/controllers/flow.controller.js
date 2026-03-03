@@ -1,80 +1,53 @@
 const flowService = require('../services/flow.service');
+const asyncHandler = require('../utils/asyncHandler');
 
 class FlowController {
-    async getAllFlows(req, res) {
-        try {
-            const userId = req.user.id; // From auth middleware
-            const { search, page, limit } = req.query;
-            const result = await flowService.getAllFlows(userId, { search, page, limit });
-            res.json(result);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    getAllFlows = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const { search, page, limit } = req.query;
+        const result = await flowService.getAllFlows(userId, { search, page, limit });
+        res.json({ success: true, data: result });
+    });
 
-    async getFlowById(req, res) {
-        try {
-            const userId = req.user.id;
-            const flow = await flowService.getFlowById(req.params.id, userId);
-            if (!flow) return res.status(404).json({ error: 'Flow not found' });
-            res.json(flow);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
+    getFlowById = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const flow = await flowService.getFlowById(req.params.id, userId);
+        if (!flow) {
+            return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Flow not found' } });
         }
-    }
+        res.json({ success: true, data: flow });
+    });
 
-    async createFlow(req, res) {
-        try {
-            const userId = req.user.id;
-            const flow = await flowService.createFlow(userId, req.body);
-            res.status(201).json(flow);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    createFlow = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const flow = await flowService.createFlow(userId, req.body);
+        res.status(201).json({ success: true, data: flow });
+    });
 
-    async updateFlow(req, res) {
-        try {
-            const userId = req.user.id;
+    updateFlow = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        await flowService.updateFlow(req.params.id, userId, req.body);
+        res.json({ success: true, data: { message: 'Flow updated successfully' } });
+    });
 
-            await flowService.updateFlow(req.params.id, userId, req.body);
-            res.json({ message: 'Flow updated successfully' });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
-    
+    deleteFlow = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        await flowService.deleteFlow(req.params.id, userId);
+        res.json({ success: true, data: { message: 'Flow deleted successfully' } });
+    });
 
-    async deleteFlow(req, res) {
-        try {
-            const userId = req.user.id;
-            await flowService.deleteFlow(req.params.id, userId);
-            res.json({ message: 'Flow deleted successfully' });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    duplicateFlow = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const flow = await flowService.duplicateFlow(req.params.id, userId);
+        res.status(201).json({ success: true, data: flow });
+    });
 
-    async duplicateFlow(req, res) {
-        try {
-            const userId = req.user.id;
-            const flow = await flowService.duplicateFlow(req.params.id, userId);
-            res.status(201).json(flow);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
-
-    async updateDiagramState(req, res) {
-        try {
-            const userId = req.user.id;
-            const { groupId, newShape } = req.body;
-            const updatedDiagram = await flowService.updateDiagramState(req.params.id, userId, groupId, newShape);
-            res.json(updatedDiagram);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
+    updateDiagramState = asyncHandler(async (req, res) => {
+        const userId = req.user.id;
+        const { groupId, newShape } = req.body;
+        const updatedDiagram = await flowService.updateDiagramState(req.params.id, userId, groupId, newShape);
+        res.json({ success: true, data: updatedDiagram });
+    });
 }
 
 module.exports = new FlowController();

@@ -1,14 +1,7 @@
-// Controller for OpenAI proxy
 const openaiService = require('../services/openai.service');
+const asyncHandler = require('../utils/asyncHandler');
 
-exports.proxy = async (req, res) => {
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method not allowed' });
-    }
-    try {
-        const result = await openaiService.proxy(req.body);
-        res.json(result);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-};
+exports.proxy = asyncHandler(async (req, res) => {
+    const result = await openaiService.proxy(req.body);
+    res.json({ success: true, data: result });
+});

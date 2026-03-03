@@ -1,5 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const { prisma } = require('../lib/prisma');
+const AppError = require('../utils/AppError');
 
 class ShapeGroupService {
     async getAllGroups(userId) {
@@ -10,13 +10,39 @@ class ShapeGroupService {
         });
     }
 
+    async getGroupById(id, userId) {
+        const group = await prisma.shapeGroup.findFirst({
+            where: { id, userId },
+            include: { shapes: true, _count: { select: { shapes: true } } },
+        });
+        if (!group) throw new AppError('Shape group not found', 404, 'NOT_FOUND');
+        return group;
+    }
+
     async createGroup(userId, data) {
         return await prisma.shapeGroup.create({
             data: {
-                ...data,
+                name: data.name,
                 userId
             }
         });
+    }
+
+    async updateGroup(id, userId, data) {
+        const group = await prisma.shapeGroup.findFirst({ where: { id, userId } });
+        if (!group) throw new AppError('Shape group not found', 404, 'NOT_FOUND');
+
+        const updateData = {};
+        if (data.name !== undefined) updateData.name = data.name;
+        if (data.isPredefined !== undefined) updateData.isPredefined = data.isPredefined;
+
+        return await prisma.shapeGroup.update({ where: { id }, data: updateData });
+    }
+
+    async deleteGroup(id, userId) {
+        const group = await prisma.shapeGroup.findFirst({ where: { id, userId } });
+        if (!group) throw new AppError('Shape group not found', 404, 'NOT_FOUND');
+        await prisma.shapeGroup.delete({ where: { id } });
     }
 }
 
