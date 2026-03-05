@@ -21,6 +21,7 @@ const updateFlowSchema = z.object({
         diagramData: z.string().optional(),
         xml: z.string().optional(),
         isPublic: z.boolean().optional(),
+        isFavorite: z.boolean().optional(),
         thumbnail: z.string().max(500000).optional(),
     }),
 });

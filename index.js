@@ -1,8 +1,11 @@
 const express = require('express');
+const http = require('http');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const swaggerUi = require('swagger-ui-express');
 require('dotenv').config();
+
+const { initSocketIO, getIO } = require('./src/socket');
 
 const logger = require('./src/utils/logger');
 const AppError = require('./src/utils/AppError');
@@ -30,6 +33,7 @@ const chatRoutes = require('./src/routes/chat.routes');
 const issueRoutes = require('./src/routes/issue.routes');
 const paymentRoutes = require('./src/routes/payment.routes');
 const adminRoutes = require('./src/routes/admin.routes');
+const cronRoutes = require('./src/routes/cron.routes');
 
 // Validate required env vars at startup
 const requiredEnvVars = ['NEXTAUTH_SECRET'];
@@ -84,6 +88,10 @@ app.use(timeout(30000));
 // Global rate limiter
 app.use(globalLimiter);
 
+// Serve uploaded files
+const path = require('path');
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 // View engine
 app.set('view engine', 'ejs');
 
@@ -131,6 +139,7 @@ app.use('/api/v1/chat', chatRoutes);
 app.use('/api/v1/issues', issueRoutes);
 app.use('/api/v1/payments', paymentRoutes);
 app.use('/api/v1/admin', adminRoutes);
+app.use('/api/v1/cron', cronRoutes);
 
 // Backwards-compatible aliases (old /api/ routes -> /api/v1/)
 app.use('/api/auth', authRoutes);
@@ -145,6 +154,7 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/issues', issueRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/cron', cronRoutes);
 
 // AI Generate Diagram (Gemini) — now protected
 const genAI = process.env.GEMINI_API_KEY
@@ -265,17 +275,34 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
 });
 
+// Create HTTP server (used by both Express and Socket.IO)
+const server = http.createServer(app);
+
+// Initialize Socket.IO (attached to the same HTTP server)
+const socketAllowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+    : ['http://localhost:3000'];
+initSocketIO(server, socketAllowedOrigins);
+
 // Only start server if not in test mode
 if (process.env.NODE_ENV !== 'test') {
     const PORT = process.env.PORT || 5000;
-    const server = app.listen(PORT, '0.0.0.0', () => {
+    server.listen(PORT, '0.0.0.0', () => {
         logger.info(`Server running on port ${PORT}`);
         logger.info(`API Docs available at http://localhost:${PORT}/api-docs`);
+        logger.info('Socket.IO attached to HTTP server');
     });
 
     // Graceful shutdown
     const gracefulShutdown = async (signal) => {
         logger.info(`${signal} received. Starting graceful shutdown...`);
+
+        const io = getIO();
+        if (io) {
+            io.close();
+            logger.info('Socket.IO server closed');
+        }
+
         server.close(async () => {
             logger.info('HTTP server closed');
             const { prisma } = require('./src/lib/prisma');

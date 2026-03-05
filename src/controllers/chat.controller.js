@@ -1,5 +1,8 @@
 const chatService = require('../services/chat.service');
 const asyncHandler = require('../utils/asyncHandler');
+const AppError = require('../utils/AppError');
+const path = require('path');
+const fs = require('fs');
 
 class ChatController {
     getChatGroups = asyncHandler(async (req, res) => {
@@ -27,9 +30,80 @@ class ChatController {
         res.json({ success: true, data: { message: 'Message marked as read' } });
     });
 
+    markGroupRead = asyncHandler(async (req, res) => {
+        await chatService.markGroupRead(req.params.id, req.user.id);
+        res.json({ success: true, data: { message: 'All messages marked as read' } });
+    });
+
     addMember = asyncHandler(async (req, res) => {
         const member = await chatService.addMember(req.params.id, req.user.id, req.body.userId);
         res.status(201).json({ success: true, data: member });
+    });
+
+    uploadFile = asyncHandler(async (req, res) => {
+        if (!req.file) {
+            throw new AppError('No file uploaded', 400, 'NO_FILE');
+        }
+
+        const fileUrl = `/uploads/chat/${req.file.filename}`;
+        const groupId = req.body.groupId;
+
+        // If groupId is provided, create a full file message
+        if (groupId) {
+            const message = await chatService.createFileMessage(groupId, req.user.id, {
+                originalname: req.file.originalname,
+                mimetype: req.file.mimetype,
+                size: req.file.size,
+                url: fileUrl,
+            });
+            return res.json({ success: true, data: message });
+        }
+
+        // Otherwise return file info for the client to send as a message
+        const isImage = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(req.file.originalname);
+        res.json({
+            success: true,
+            data: {
+                url: fileUrl,
+                filename: req.file.originalname,
+                type: isImage ? 'image' : 'docs',
+                size: req.file.size,
+                mimetype: req.file.mimetype,
+            },
+        });
+    });
+
+    downloadFile = asyncHandler(async (req, res) => {
+        const file = await chatService.getFile(req.params.id, req.user.id);
+        const filePath = path.join(__dirname, '../../uploads/chat', path.basename(file.filePath));
+
+        if (!fs.existsSync(filePath)) {
+            throw new AppError('File not found on disk', 404, 'FILE_NOT_FOUND');
+        }
+
+        res.setHeader('Content-Disposition', `attachment; filename="${file.fileName}"`);
+        res.setHeader('Content-Type', file.fileType);
+        fs.createReadStream(filePath).pipe(res);
+    });
+
+    previewFile = asyncHandler(async (req, res) => {
+        const file = await chatService.getFile(req.params.id, req.user.id);
+        res.json({
+            success: true,
+            data: {
+                id: file.id,
+                fileName: file.fileName,
+                fileType: file.fileType,
+                fileSize: file.fileSize,
+                filePath: file.filePath,
+                createdAt: file.createdAt,
+            },
+        });
+    });
+
+    getUnreadCounts = asyncHandler(async (req, res) => {
+        const counts = await chatService.getUnreadCounts(req.user.id);
+        res.json({ success: true, data: counts });
     });
 }
 

@@ -41,6 +41,9 @@ router.use(authenticate);
  */
 router.get('/', validate(getFlowsQuerySchema), flowController.getAllFlows);
 
+router.get('/favorites', flowController.getFavorites);
+router.get('/trash', flowController.getTrash);
+
 /**
  * @swagger
  * /api/v1/flows/{id}:
@@ -215,5 +218,9 @@ router.delete('/:id', validate(idParamSchema), flowController.deleteFlow);
  *         description: Flow not found
  */
 router.post('/:id/duplicate', validate(idParamSchema), flowController.duplicateFlow);
+
+router.post('/:id/restore', validate(idParamSchema), flowController.restoreFlow);
+
+router.delete('/:id/permanent', validate(idParamSchema), flowController.permanentDeleteFlow);
 
 module.exports = router;

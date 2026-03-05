@@ -81,6 +81,8 @@ router.post('/', validate(createTeamSchema), teamController.createTeam);
  *         description: Invitation sent
  */
 router.post('/invite', validate(inviteSchema), teamController.invite);
+router.get('/invites', teamController.listPendingInvites);
+router.get('/accept', teamController.acceptInvite);
 
 /**
  * @swagger

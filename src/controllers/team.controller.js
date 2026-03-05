@@ -43,9 +43,29 @@ class TeamController {
     });
 
     invite = asyncHandler(async (req, res) => {
-        // In production: send invitation email with token
-        const member = await teamService.addMember(req.body.teamId, req.user.id, req.body.email, req.body.appType);
-        res.status(201).json({ success: true, data: { message: 'Invitation sent', member } });
+        const { teamId, email, emails } = req.body;
+        // Support single email or comma-separated list
+        const emailList = emails
+            ? emails
+            : email.includes(',')
+                ? email.split(',').map(e => e.trim())
+                : [email];
+        const results = await teamService.createInvite(teamId, req.user.id, emailList);
+        res.status(201).json({ success: true, data: { message: 'Invitations processed', results } });
+    });
+
+    acceptInvite = asyncHandler(async (req, res) => {
+        const { token } = req.query;
+        if (!token) return res.status(400).json({ success: false, error: 'Token required' });
+        const result = await teamService.acceptInvite(token, req.user.id);
+        res.json({ success: true, data: result });
+    });
+
+    listPendingInvites = asyncHandler(async (req, res) => {
+        const { teamId } = req.query;
+        if (!teamId) return res.status(400).json({ success: false, error: 'teamId required' });
+        const invites = await teamService.listPendingInvites(teamId, req.user.id);
+        res.json({ success: true, data: invites });
     });
 }
 

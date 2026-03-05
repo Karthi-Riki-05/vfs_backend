@@ -48,6 +48,26 @@ class FlowController {
         const updatedDiagram = await flowService.updateDiagramState(req.params.id, userId, groupId, newShape);
         res.json({ success: true, data: updatedDiagram });
     });
+
+    getFavorites = asyncHandler(async (req, res) => {
+        const flows = await flowService.getFavorites(req.user.id);
+        res.json({ success: true, data: flows });
+    });
+
+    getTrash = asyncHandler(async (req, res) => {
+        const result = await flowService.getTrash(req.user.id, req.query);
+        res.json({ success: true, data: result });
+    });
+
+    restoreFlow = asyncHandler(async (req, res) => {
+        await flowService.restoreFlow(req.params.id, req.user.id);
+        res.json({ success: true, data: { message: 'Flow restored successfully' } });
+    });
+
+    permanentDeleteFlow = asyncHandler(async (req, res) => {
+        await flowService.permanentDeleteFlow(req.params.id, req.user.id);
+        res.json({ success: true, data: { message: 'Flow permanently deleted' } });
+    });
 }
 
 module.exports = new FlowController();

@@ -40,9 +40,19 @@ class ShapeGroupService {
     }
 
     async deleteGroup(id, userId) {
-        const group = await prisma.shapeGroup.findFirst({ where: { id, userId } });
+        const group = await prisma.shapeGroup.findFirst({
+            where: { id, userId },
+            include: { _count: { select: { shapes: true } } },
+        });
         if (!group) throw new AppError('Shape group not found', 404, 'NOT_FOUND');
-        await prisma.shapeGroup.delete({ where: { id } });
+
+        // Cascade: delete all shapes in the group, then delete the group
+        await prisma.$transaction([
+            prisma.shape.deleteMany({ where: { groupId: id } }),
+            prisma.shapeGroup.delete({ where: { id } }),
+        ]);
+
+        return { deletedShapes: group._count.shapes };
     }
 }
 

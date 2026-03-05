@@ -201,6 +201,7 @@ model User {
   // --- Timestamps ---
   createdAt     DateTime    @default(now()) @map("created_at")
   updatedAt     DateTime    @updatedAt      @map("updated_at")
+  lastSeen      DateTime?   @map("last_seen")
 
   // --- Relations ---
   accounts            Account[]
@@ -464,6 +465,8 @@ model AddUserSubscription {
 model Team {
   id            String        @id @default(cuid())
   legacyId      Int?          @map("legacy_id")
+  name          String?
+  description   String?
   teamOwnerId   String        @map("team_owner_id")
   owner         User          @relation(fields: [teamOwnerId], references: [id], onDelete: Cascade)
   teamMem       Int           @default(0)  @map("team_mem")     // Max members allowed
@@ -472,12 +475,33 @@ model Team {
   verifyTeam    String?       @map("verify_team")
   status        PlanStatus    @default(active)
   members       TeamMember[]
+  invites       TeamInvite[]
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime?     @map("updated_at")
   deletedAt     DateTime?     @map("deleted_at")
 
   @@index([teamOwnerId])
   @@map("teams")
+}
+
+// ============================================================
+// 13a. TEAM INVITE
+// ============================================================
+
+model TeamInvite {
+  id        String    @id @default(cuid())
+  teamId    String    @map("team_id")
+  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  email     String
+  token     String    @unique
+  status    String    @default("pending") // pending, accepted, expired
+  expiresAt DateTime  @map("expires_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([teamId])
+  @@index([token])
+  @@index([email])
+  @@map("team_invites")
 }
 
 // ============================================================
@@ -491,6 +515,7 @@ model TeamMember {
   teamId    String    @map("team_id")
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  role      String    @default("MEMBER")
   appType   AppType?  @map("app_type")
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @map("updated_at")
@@ -515,6 +540,7 @@ model Flow {
   thumbnail     String?
   diagramData   String?         @db.Text @default("") @map("diagram_data")  // was flow_data
   isPublic      Boolean         @default(false) @map("is_public")
+  isFavorite    Boolean         @default(false) @map("is_favorite")
   ownerId       String          @map("owner_id")
   owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   appType       AppType?        @map("app_type")
@@ -649,7 +675,7 @@ model Shape {
   ratioLock     Boolean         @default(true) @map("ratio_lock")
   shapeType     ShapeType       @default(img)    @map("shape_type")
   groupId       String?         @map("group_id")
-  group         ShapeGroup?     @relation(fields: [groupId], references: [id])
+  group         ShapeGroup?     @relation(fields: [groupId], references: [id], onDelete: SetNull)
   ownerId       String          @map("owner_id")
   owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   appType       AppType?        @map("app_type")
@@ -705,9 +731,10 @@ model ChatGroupUser {
   groupId   String    @map("group_id")
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   group     ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  chatClear DateTime? @map("chat_clear")
-  createdAt DateTime? @map("created_at")
-  updatedAt DateTime? @map("updated_at")
+  chatClear  DateTime? @map("chat_clear")
+  lastReadAt DateTime? @map("last_read_at")
+  createdAt  DateTime? @map("created_at")
+  updatedAt  DateTime? @map("updated_at")
 
   @@index([userId])
   @@index([groupId])
@@ -731,7 +758,9 @@ model ChatMessage {
   user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   teamId        Int?              @map("team_id")
   attachPath    String?           @map("attach_path")
+  linkPreview   Json?             @map("link_preview")
   appType       AppType?          @map("app_type")
+  files         ChatFile[]
   msgUsers      ChatMessageUser[]
   createdAt     DateTime          @default(now()) @map("created_at")
   updatedAt     DateTime?         @map("updated_at")
@@ -766,6 +795,24 @@ model ChatMessageUser {
   @@index([msgId])
   @@index([receiverId])
   @@map("chat_message_users")
+}
+
+// ============================================================
+// 23b. CHAT FILE (Uploaded files attached to messages)
+// ============================================================
+
+model ChatFile {
+  id        String      @id @default(cuid())
+  messageId String      @map("message_id")
+  message   ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  fileName  String      @map("file_name")
+  fileType  String      @map("file_type")
+  fileSize  Int         @map("file_size")
+  filePath  String      @map("file_path")
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  @@index([messageId])
+  @@map("chat_files")
 }
 
 // ============================================================

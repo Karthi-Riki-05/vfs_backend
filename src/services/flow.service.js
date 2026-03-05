@@ -10,6 +10,7 @@ class FlowService {
 
         const where = {
             ownerId: userId,
+            deletedAt: null,
         };
 
         if (search) {
@@ -52,23 +53,77 @@ class FlowService {
     }
 
     async updateFlow(id, userId, data) {
+        const flow = await prisma.flow.findFirst({ where: { id, ownerId: userId, deletedAt: null } });
+        if (!flow) throw new AppError('Flow not found', 404, 'NOT_FOUND');
+
         const updateData = {};
         if (data.name !== undefined) updateData.name = data.name;
         if (data.description !== undefined) updateData.description = data.description;
         if (data.thumbnail !== undefined) updateData.thumbnail = data.thumbnail;
         if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
+        if (data.isFavorite !== undefined) updateData.isFavorite = data.isFavorite;
         if (data.xml !== undefined) updateData.diagramData = data.xml;
         if (data.diagramData !== undefined) updateData.diagramData = data.diagramData;
 
-        return await prisma.flow.updateMany({
-            where: { id, ownerId: userId },
+        return await prisma.flow.update({
+            where: { id },
             data: updateData,
         });
     }
 
     async deleteFlow(id, userId) {
+        const flow = await prisma.flow.findFirst({ where: { id, ownerId: userId, deletedAt: null } });
+        if (!flow) throw new AppError('Flow not found', 404, 'NOT_FOUND');
+
+        return await prisma.flow.update({
+            where: { id },
+            data: { deletedAt: new Date() },
+        });
+    }
+
+    async getTrash(userId, options = {}) {
+        const { page = 1, limit = 20 } = options;
+        const take = Math.min(Number(limit) || 20, 100);
+        const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
+
+        const where = { ownerId: userId, deletedAt: { not: null } };
+        const [flows, total] = await Promise.all([
+            prisma.flow.findMany({ where, skip, take, orderBy: { deletedAt: 'desc' } }),
+            prisma.flow.count({ where }),
+        ]);
+
+        return { flows, total, page: Number(page) || 1, totalPages: Math.ceil(total / take) };
+    }
+
+    async restoreFlow(id, userId) {
+        const result = await prisma.flow.updateMany({
+            where: { id, ownerId: userId, deletedAt: { not: null } },
+            data: { deletedAt: null },
+        });
+        if (result.count === 0) throw new AppError('Flow not found in trash', 404, 'NOT_FOUND');
+        return result;
+    }
+
+    async permanentDeleteFlow(id, userId) {
+        const result = await prisma.flow.deleteMany({
+            where: { id, ownerId: userId, deletedAt: { not: null } },
+        });
+        if (result.count === 0) throw new AppError('Flow not found in trash', 404, 'NOT_FOUND');
+        return result;
+    }
+
+    async purgeOldTrash(daysOld = 30) {
+        const cutoff = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
         return await prisma.flow.deleteMany({
-            where: { id, ownerId: userId },
+            where: { deletedAt: { not: null, lt: cutoff } },
+        });
+    }
+
+    async getFavorites(userId) {
+        return await prisma.flow.findMany({
+            where: { ownerId: userId, isFavorite: true, deletedAt: null },
+            orderBy: { updatedAt: 'desc' },
+            select: { id: true, name: true, thumbnail: true },
         });
     }
 
@@ -108,9 +163,13 @@ class FlowService {
             group.children.push(newShape);
         });
 
+        const serialized = typeof updatedDiagramData === 'string'
+            ? updatedDiagramData
+            : JSON.stringify(updatedDiagramData);
+
         await prisma.flow.update({
-            where: { id, ownerId: userId },
-            data: { diagramData: updatedDiagramData },
+            where: { id },
+            data: { diagramData: serialized },
         });
 
         return updatedDiagramData;

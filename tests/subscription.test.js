@@ -14,9 +14,7 @@ describe('Subscription Endpoints', () => {
     describe('GET /api/v1/subscription/current', () => {
         it('should return current subscription', async () => {
             mockPrisma.subscription.findUnique.mockResolvedValue({
-                id: 'sub-1',
-                userId: 'test-user-id',
-                status: 'active',
+                id: 'sub-1', userId: 'test-user-id', status: 'active',
                 plan: { name: 'Pro', price: 9.99 },
             });
 
@@ -32,21 +30,41 @@ describe('Subscription Endpoints', () => {
             const res = await request(app).get('/api/v1/subscription/current');
             expect(res.statusCode).toBe(401);
         });
+
+        it('should return null data when no subscription exists', async () => {
+            mockPrisma.subscription.findUnique.mockResolvedValue(null);
+
+            const res = await request(app)
+                .get('/api/v1/subscription/current')
+                .set('Authorization', `Bearer ${token}`);
+
+            expect(res.statusCode).toBe(200);
+            expect(res.body.data).toBeNull();
+        });
     });
 
     describe('GET /api/v1/subscription/plans', () => {
-        it('should return available plans', async () => {
+        it('should return available plans without auth', async () => {
             mockPrisma.plan.findMany.mockResolvedValue([
                 { id: 'plan-1', name: 'Free', price: 0, tier: 0 },
                 { id: 'plan-2', name: 'Pro', price: 9.99, tier: 1 },
             ]);
 
-            const res = await request(app)
-                .get('/api/v1/subscription/plans')
-                .set('Authorization', `Bearer ${token}`);
+            const res = await request(app).get('/api/v1/subscription/plans');
 
             expect(res.statusCode).toBe(200);
             expect(res.body.success).toBe(true);
+            expect(res.body.data).toHaveLength(2);
+        });
+
+        it('should return plans ordered by tier', async () => {
+            mockPrisma.plan.findMany.mockResolvedValue([]);
+
+            await request(app).get('/api/v1/subscription/plans');
+
+            expect(mockPrisma.plan.findMany).toHaveBeenCalledWith(
+                expect.objectContaining({ orderBy: { tier: 'asc' } })
+            );
         });
     });
 
@@ -74,6 +92,14 @@ describe('Subscription Endpoints', () => {
             expect(res.statusCode).toBe(400);
             expect(res.body.error.code).toBe('VALIDATION_ERROR');
         });
+
+        it('should return 401 without auth', async () => {
+            const res = await request(app)
+                .post('/api/v1/subscription/subscribe')
+                .send({ planId: 'plan-2' });
+
+            expect(res.statusCode).toBe(401);
+        });
     });
 
     describe('POST /api/v1/subscription/cancel', () => {
@@ -88,6 +114,11 @@ describe('Subscription Endpoints', () => {
 
             expect(res.statusCode).toBe(200);
             expect(res.body.success).toBe(true);
+        });
+
+        it('should return 401 without auth', async () => {
+            const res = await request(app).post('/api/v1/subscription/cancel');
+            expect(res.statusCode).toBe(401);
         });
     });
 });

@@ -50,7 +50,7 @@ async function main() {
     {
       name: 'Pro Monthly',
       duration: 'monthly',
-      price: 3.90,
+      price: 5,
       status: 'active',
       tier: 1,
       features: JSON.stringify(['10 Flows', 'All shapes', 'Export all formats', 'Priority support']),
@@ -58,7 +58,7 @@ async function main() {
     {
       name: 'Pro Yearly',
       duration: 'yearly',
-      price: 42.12,
+      price: 36,
       status: 'active',
       tier: 1,
       features: JSON.stringify(['10 Flows', 'All shapes', 'Export all formats', 'Priority support']),
@@ -66,24 +66,26 @@ async function main() {
     {
       name: 'Team Monthly',
       duration: 'monthly',
-      price: 6.50,
+      price: 5,
       status: 'active',
       tier: 2,
+      appType: 'enterprise',
       userAccess: true,
       userCount: 5,
       userCost: 2.50,
-      features: JSON.stringify(['Unlimited flows', 'Team collaboration', 'All shapes', 'Admin dashboard']),
+      features: JSON.stringify(['Unlimited flows', 'Team collaboration', 'All shapes', 'Admin dashboard', 'Team management']),
     },
     {
       name: 'Team Yearly',
       duration: 'yearly',
-      price: 70.20,
+      price: 36,
       status: 'active',
       tier: 2,
+      appType: 'enterprise',
       userAccess: true,
       userCount: 5,
       userCost: 25.00,
-      features: JSON.stringify(['Unlimited flows', 'Team collaboration', 'All shapes', 'Admin dashboard']),
+      features: JSON.stringify(['Unlimited flows', 'Team collaboration', 'All shapes', 'Admin dashboard', 'Team management']),
     },
   ];
 

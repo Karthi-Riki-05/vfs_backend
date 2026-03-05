@@ -165,9 +165,15 @@ class PaymentService {
         const take = Math.min(Number(limit) || 20, 100);
         const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
+        // Get the user's subscription to find their payment IDs
+        const subscription = await prisma.subscription.findUnique({ where: { userId } });
+        const where = subscription?.paymentId
+            ? { OR: [{ chargeId: subscription.paymentId }, { txnId: subscription.paymentId }] }
+            : { chargeId: '__none__' }; // No subscription = no transactions
+
         const [transactions, total] = await Promise.all([
-            prisma.transactionLog.findMany({ skip, take, orderBy: { createdAt: 'desc' } }),
-            prisma.transactionLog.count(),
+            prisma.transactionLog.findMany({ where, skip, take, orderBy: { createdAt: 'desc' } }),
+            prisma.transactionLog.count({ where }),
         ]);
 
         return { transactions, total, page: Number(page) || 1, totalPages: Math.ceil(total / take) };

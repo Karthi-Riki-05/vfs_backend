@@ -2,6 +2,8 @@ const { z } = require('zod');
 
 const createTeamSchema = z.object({
     body: z.object({
+        name: z.string().min(1).max(255).trim().optional(),
+        description: z.string().max(2000).trim().optional(),
         appType: z.enum(['enterprise', 'individual']).optional(),
     }),
 });
@@ -9,6 +11,8 @@ const createTeamSchema = z.object({
 const updateTeamSchema = z.object({
     params: z.object({ id: z.string().min(1) }),
     body: z.object({
+        name: z.string().min(1).max(255).trim().optional(),
+        description: z.string().max(2000).trim().optional(),
         teamMem: z.number().int().min(0).optional(),
         status: z.enum(['active', 'inactive']).optional(),
         appType: z.enum(['enterprise', 'individual']).optional(),
@@ -33,8 +37,11 @@ const removeMemberSchema = z.object({
 const inviteSchema = z.object({
     body: z.object({
         teamId: z.string().min(1),
-        email: z.string().email().max(255).trim().toLowerCase(),
+        email: z.string().email().max(255).trim().toLowerCase().optional(),
+        emails: z.array(z.string().email().max(255).trim().toLowerCase()).optional(),
         appType: z.enum(['enterprise', 'individual']).optional(),
+    }).refine(data => data.email || (data.emails && data.emails.length > 0), {
+        message: 'Either email or emails is required',
     }),
 });
 

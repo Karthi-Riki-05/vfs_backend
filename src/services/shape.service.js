@@ -1,4 +1,5 @@
 const { prisma } = require('../lib/prisma');
+const AppError = require('../utils/AppError');
 
 class ShapeService {
     async getAllShapes(userId) {
@@ -38,6 +39,9 @@ class ShapeService {
     }
 
     async updateShape(id, userId, data) {
+        const shape = await prisma.shape.findFirst({ where: { id, ownerId: userId } });
+        if (!shape) throw new AppError('Shape not found', 404, 'NOT_FOUND');
+
         const updateData = {};
         if (data.name !== undefined) updateData.name = data.name;
         if (data.type !== undefined) updateData.type = data.type;
@@ -49,15 +53,18 @@ class ShapeService {
         if (data.thumbnail !== undefined) updateData.thumbnail = data.thumbnail;
         if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
 
-        return await prisma.shape.updateMany({
-            where: { id, ownerId: userId },
+        return await prisma.shape.update({
+            where: { id },
             data: updateData
         });
     }
 
     async deleteShape(id, userId) {
-        return await prisma.shape.deleteMany({
-            where: { id, ownerId: userId }
+        const shape = await prisma.shape.findFirst({ where: { id, ownerId: userId } });
+        if (!shape) throw new AppError('Shape not found', 404, 'NOT_FOUND');
+
+        return await prisma.shape.delete({
+            where: { id }
         });
     }
 

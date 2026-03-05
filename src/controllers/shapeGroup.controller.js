@@ -25,8 +25,8 @@ class ShapeGroupController {
     });
 
     deleteGroup = asyncHandler(async (req, res) => {
-        await shapeGroupService.deleteGroup(req.params.id, req.user.id);
-        res.json({ success: true, data: { message: 'Shape group deleted successfully' } });
+        const result = await shapeGroupService.deleteGroup(req.params.id, req.user.id);
+        res.json({ success: true, data: { message: 'Shape group and all shapes deleted successfully', deletedShapes: result.deletedShapes } });
     });
 }
 

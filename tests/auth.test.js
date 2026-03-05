@@ -27,14 +27,14 @@ describe('Auth Endpoints', () => {
             expect(res.body.data.userId).toBe('new-user-id');
         });
 
-        it('should return 400 if user already exists', async () => {
+        it('should return 409 if user already exists', async () => {
             mockPrisma.user.findUnique.mockResolvedValue({ id: 'existing-id', email: 'test@example.com' });
 
             const res = await request(app)
                 .post('/api/v1/auth/register')
                 .send({ name: 'Test', email: 'test@example.com', password: 'password123' });
 
-            expect(res.statusCode).toBe(400);
+            expect(res.statusCode).toBe(409);
             expect(res.body.success).toBe(false);
         });
 
