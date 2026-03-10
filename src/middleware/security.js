@@ -5,6 +5,9 @@ const securityMiddleware = (app) => {
     // Disable x-powered-by
     app.disable('x-powered-by');
 
+    // Trust first proxy (Nginx) so x-forwarded-proto is respected
+    app.set('trust proxy', 1);
+
     // Helmet security headers
     app.use(helmet({
         contentSecurityPolicy: {
@@ -17,6 +20,7 @@ const securityMiddleware = (app) => {
         },
         crossOriginEmbedderPolicy: false,
     }));
+
 
     // HTTP parameter pollution protection
     app.use(hpp());
