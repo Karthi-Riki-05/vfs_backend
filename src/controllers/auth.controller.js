@@ -38,6 +38,44 @@ exports.register = asyncHandler(async (req, res) => {
     });
 });
 
+exports.oauthSync = asyncHandler(async (req, res) => {
+    const { email, name, image, provider } = req.body;
+
+    let user = await prisma.user.findUnique({ where: { email } });
+
+    if (!user) {
+        user = await prisma.user.create({
+            data: {
+                name: name || email.split('@')[0],
+                email,
+                image: image || null,
+                role: 'Viewer',
+            },
+        });
+        logger.info(`OAuth user created via ${provider}: ${user.id}`);
+    } else {
+        // Update image/name if not set
+        const updates = {};
+        if (!user.image && image) updates.image = image;
+        if (!user.name && name) updates.name = name;
+        if (Object.keys(updates).length > 0) {
+            user = await prisma.user.update({ where: { id: user.id }, data: updates });
+        }
+    }
+
+    res.json({
+        success: true,
+        data: {
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            role: user.role,
+            hasPro: user.hasPro,
+            currentVersion: user.currentVersion,
+        },
+    });
+});
+
 exports.validateUser = asyncHandler(async (req, res) => {
     const { email, password } = req.body;
 
@@ -71,6 +109,8 @@ exports.validateUser = asyncHandler(async (req, res) => {
             email: user.email,
             name: user.name,
             role: user.role,
+            hasPro: user.hasPro,
+            currentVersion: user.currentVersion,
             token
         }
     });

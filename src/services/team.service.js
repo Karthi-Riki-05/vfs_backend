@@ -4,12 +4,13 @@ const crypto = require('crypto');
 const { sendTeamInviteEmail } = require('../utils/email');
 
 class TeamService {
-    async getTeams(userId, options = {}) {
+    async getTeams(userId, options = {}, appContext = 'free') {
         const { page = 1, limit = 20 } = options;
         const take = Math.min(Number(limit) || 20, 100);
         const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
         const where = {
+            appContext,
             OR: [
                 { teamOwnerId: userId },
                 { members: { some: { userId } } },
@@ -47,7 +48,7 @@ class TeamService {
         return team;
     }
 
-    async createTeam(userId, data = {}) {
+    async createTeam(userId, data = {}, appContext = 'free') {
         return await prisma.$transaction(async (tx) => {
             const team = await tx.team.create({
                 data: {
@@ -55,6 +56,7 @@ class TeamService {
                     description: data.description || null,
                     teamOwnerId: userId,
                     appType: data.appType || null,
+                    appContext,
                     status: 'active',
                     countMem: 1,
                 },
@@ -100,6 +102,10 @@ class TeamService {
             prisma.teamMember.deleteMany({ where: { teamId } }),
             prisma.team.delete({ where: { id: teamId } }),
         ]);
+    }
+
+    async getMemberCount(teamId) {
+        return await prisma.teamMember.count({ where: { teamId } });
     }
 
     async getMembers(teamId, userId) {
@@ -162,12 +168,25 @@ class TeamService {
         await prisma.team.update({ where: { id: teamId }, data: { countMem: { decrement: 1 } } });
     }
 
-    async createInvite(teamId, userId, emails) {
+    async createInvite(teamId, userId, emails, appContext = 'free') {
+        // Check team exists and user has permission (owner check first, then role-based)
         const team = await prisma.team.findFirst({ where: { id: teamId, teamOwnerId: userId } });
-        if (!team) throw new AppError('Team not found or not owner', 404, 'NOT_FOUND');
+        if (!team) {
+            // Not the owner — check if user has ADMIN or OWNER role as a member
+            const teamByMember = await prisma.team.findUnique({ where: { id: teamId } });
+            if (!teamByMember) throw new AppError('Team not found', 404, 'NOT_FOUND');
+            const membership = await prisma.teamMember.findFirst({
+                where: { teamId, userId, role: { in: ['OWNER', 'ADMIN'] } },
+            });
+            if (!membership) throw new AppError('Only team owners and admins can invite members', 403, 'FORBIDDEN');
+            // Use teamByMember for the rest
+            var inviteTeam = teamByMember;
+        } else {
+            var inviteTeam = team;
+        }
 
-        const inviter = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
-        const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const inviter = await prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true } });
+        const baseUrl = process.env.APP_URL || process.env.FRONTEND_URL || process.env.NEXTAUTH_URL || 'http://localhost:3000';
         const results = [];
 
         for (const email of emails) {
@@ -201,25 +220,71 @@ class TeamService {
             const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
             const invite = await prisma.teamInvite.create({
-                data: { teamId, email: trimmed, token, status: 'pending', expiresAt },
+                data: {
+                    teamId,
+                    email: trimmed,
+                    token,
+                    status: 'pending',
+                    invitedBy: userId,
+                    role: 'MEMBER',
+                    appContext: inviteTeam.appContext || appContext,
+                    expiresAt,
+                },
             });
 
-            const acceptUrl = `${baseUrl}/dashboard/teams/accept?token=${token}`;
+            const acceptUrl = `${baseUrl}/invite/accept?token=${token}`;
 
             try {
                 await sendTeamInviteEmail({
                     to: trimmed,
-                    teamName: team.name || `Team #${team.id.slice(-6)}`,
+                    teamName: inviteTeam.name || `Team #${inviteTeam.id.slice(-6)}`,
                     inviterName: inviter?.name || 'A team member',
+                    inviterEmail: inviter?.email,
                     acceptUrl,
+                    appContext: inviteTeam.appContext || appContext,
                 });
                 results.push({ email: trimmed, status: 'sent', inviteId: invite.id });
             } catch {
-                results.push({ email: trimmed, status: 'email_failed', inviteId: invite.id });
+                results.push({ email: trimmed, status: 'email_failed', inviteId: invite.id, acceptUrl });
             }
         }
 
         return results;
+    }
+
+    async verifyInvite(token) {
+        if (!token) throw new AppError('Token required', 400, 'BAD_REQUEST');
+
+        const invite = await prisma.teamInvite.findUnique({
+            where: { token },
+            include: {
+                team: { select: { id: true, name: true, appContext: true } },
+                inviter: { select: { id: true, name: true, email: true } },
+            },
+        });
+
+        if (!invite) throw new AppError('Invalid invitation', 404, 'INVALID');
+
+        if (invite.status === 'accepted') {
+            throw new AppError('Invitation already accepted', 400, 'ALREADY_ACCEPTED');
+        }
+
+        if (invite.status === 'expired' || new Date() > new Date(invite.expiresAt)) {
+            if (invite.status !== 'expired') {
+                await prisma.teamInvite.update({ where: { id: invite.id }, data: { status: 'expired' } });
+            }
+            throw new AppError('Invitation has expired', 400, 'EXPIRED');
+        }
+
+        return {
+            teamName: invite.team?.name || 'Unknown Team',
+            teamId: invite.team?.id,
+            inviterName: invite.inviter?.name || invite.inviter?.email || 'A team member',
+            inviterEmail: invite.inviter?.email,
+            appContext: invite.appContext || invite.team?.appContext || 'free',
+            role: invite.role,
+            email: invite.email,
+        };
     }
 
     async acceptInvite(token, userId) {
@@ -231,16 +296,43 @@ class TeamService {
             throw new AppError('Invitation has expired', 400, 'EXPIRED');
         }
 
-        // Check if user is already a member
+        // Verify the accepting user's email matches the invitation
+        const acceptingUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+        if (!acceptingUser) throw new AppError('User not found', 404, 'NOT_FOUND');
+
+        if (acceptingUser.email.toLowerCase() !== invite.email.toLowerCase()) {
+            throw new AppError(
+                `This invitation was sent to ${invite.email}. Please log in with that email to accept.`,
+                403,
+                'EMAIL_MISMATCH'
+            );
+        }
+
+        // Check if user is already a member of this team
         const existing = await prisma.teamMember.findFirst({ where: { teamId: invite.teamId, userId } });
         if (existing) {
-            await prisma.teamInvite.update({ where: { id: invite.id }, data: { status: 'accepted' } });
-            return { alreadyMember: true, teamId: invite.teamId };
+            // Mark invite as accepted but inform the user
+            await prisma.teamInvite.update({
+                where: { id: invite.id },
+                data: { status: 'accepted', acceptedBy: userId, acceptedAt: new Date() },
+            });
+            return { alreadyMember: true, teamId: invite.teamId, appContext: invite.appContext };
         }
+
+        const team = await prisma.team.findUnique({ where: { id: invite.teamId } });
+        if (!team) throw new AppError('Team no longer exists', 404, 'NOT_FOUND');
+
+        // Determine app context — never allow NULL
+        const memberAppContext = invite.appContext || team.appContext || 'free';
 
         await prisma.$transaction([
             prisma.teamMember.create({
-                data: { teamId: invite.teamId, userId, role: 'MEMBER', appType: null },
+                data: {
+                    teamId: invite.teamId,
+                    userId,
+                    role: invite.role || 'MEMBER',
+                    appType: team.appType || null,
+                },
             }),
             prisma.team.update({
                 where: { id: invite.teamId },
@@ -248,11 +340,11 @@ class TeamService {
             }),
             prisma.teamInvite.update({
                 where: { id: invite.id },
-                data: { status: 'accepted' },
+                data: { status: 'accepted', acceptedBy: userId, acceptedAt: new Date() },
             }),
         ]);
 
-        return { teamId: invite.teamId };
+        return { teamId: invite.teamId, appContext: memberAppContext };
     }
 
     async listPendingInvites(teamId, userId) {

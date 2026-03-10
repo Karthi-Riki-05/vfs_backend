@@ -3,7 +3,7 @@ const router = express.Router();
 const flowController = require('../controllers/flow.controller');
 const { authenticate } = require('../middleware/auth.middleware');
 const validate = require('../middleware/validate');
-const { createFlowSchema, updateFlowSchema, updateDiagramStateSchema, getFlowsQuerySchema, idParamSchema } = require('../validators/flow.validator');
+const { createFlowSchema, updateFlowSchema, updateDiagramStateSchema, getFlowsQuerySchema, idParamSchema, shareFlowSchema, updateShareSchema, shareIdParamSchema } = require('../validators/flow.validator');
 
 // All flow routes are protected
 router.use(authenticate);
@@ -43,6 +43,7 @@ router.get('/', validate(getFlowsQuerySchema), flowController.getAllFlows);
 
 router.get('/favorites', flowController.getFavorites);
 router.get('/trash', flowController.getTrash);
+router.get('/share/members', flowController.getAvailableShareMembers);
 
 /**
  * @swagger
@@ -222,5 +223,19 @@ router.post('/:id/duplicate', validate(idParamSchema), flowController.duplicateF
 router.post('/:id/restore', validate(idParamSchema), flowController.restoreFlow);
 
 router.delete('/:id/permanent', validate(idParamSchema), flowController.permanentDeleteFlow);
+
+// ==================== SHARING ROUTES ====================
+
+// Share a flow with users
+router.post('/:id/share', validate(shareFlowSchema), flowController.shareFlow);
+
+// Get all shares for a flow
+router.get('/:id/shares', validate(idParamSchema), flowController.getFlowShares);
+
+// Update share permission
+router.put('/:id/shares/:shareId', validate(updateShareSchema), flowController.updateShare);
+
+// Remove a share
+router.delete('/:id/shares/:shareId', validate(shareIdParamSchema), flowController.removeShare);
 
 module.exports = router;

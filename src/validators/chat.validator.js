@@ -6,6 +6,7 @@ const createChatGroupSchema = z.object({
         flowId: z.number().int().optional(),
         flowItemId: z.string().optional(),
         appType: z.enum(['enterprise', 'individual']).optional(),
+        teamId: z.string().optional(),
         memberIds: z.array(z.string().min(1)).optional(),
     }),
 });
@@ -54,6 +55,27 @@ const ALLOWED_FILE_TYPES = [
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
 
+const addMembersSchema = z.object({
+    params: z.object({ id: z.string().min(1) }),
+    body: z.object({
+        userIds: z.array(z.string().min(1)).min(1).max(50),
+    }),
+});
+
+const updateGroupSchema = z.object({
+    params: z.object({ id: z.string().min(1) }),
+    body: z.object({
+        title: z.string().min(1).max(255).trim().optional(),
+    }),
+});
+
+const removeMemberSchema = z.object({
+    params: z.object({
+        id: z.string().min(1),
+        userId: z.string().min(1),
+    }),
+});
+
 module.exports = {
     createChatGroupSchema,
     sendMessageSchema,
@@ -61,6 +83,9 @@ module.exports = {
     getMessagesQuerySchema,
     idParamSchema,
     markGroupReadSchema,
+    addMembersSchema,
+    updateGroupSchema,
+    removeMemberSchema,
     ALLOWED_FILE_TYPES,
     MAX_FILE_SIZE,
 };

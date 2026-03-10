@@ -26,6 +26,9 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# database backups
+/backups
+
 # vercel
 .vercel
 

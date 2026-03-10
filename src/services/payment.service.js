@@ -1,17 +1,13 @@
 const { prisma } = require('../lib/prisma');
+const { getStripe, getStripeCurrency } = require('../lib/stripe');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
+const proService = require('./pro.service');
 
 class PaymentService {
-    getStripe() {
-        if (!process.env.STRIPE_SECRET_KEY) {
-            throw new AppError('Stripe is not configured', 503, 'STRIPE_NOT_CONFIGURED');
-        }
-        return require('stripe')(process.env.STRIPE_SECRET_KEY);
-    }
 
     async createCheckoutSession(userId, planId, urls = {}) {
-        const stripe = this.getStripe();
+        const stripe = getStripe();
         const plan = await prisma.plan.findUnique({ where: { id: planId } });
         if (!plan) throw new AppError('Plan not found', 404, 'NOT_FOUND');
 
@@ -24,7 +20,7 @@ class PaymentService {
             customer_email: user.email,
             line_items: [{
                 price_data: {
-                    currency: 'usd',
+                    currency: getStripeCurrency(),
                     product_data: { name: plan.name, description: `ValueChart ${plan.appType || ''} Plan` },
                     unit_amount: Math.round(plan.price * 100),
                     ...(plan.duration && { recurring: { interval: plan.duration === 'yearly' ? 'year' : 'month' } }),
@@ -40,7 +36,7 @@ class PaymentService {
     }
 
     async handleWebhook(rawBody, signature) {
-        const stripe = this.getStripe();
+        const stripe = getStripe();
         const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
         if (!webhookSecret) throw new AppError('Webhook secret not configured', 503, 'CONFIG_ERROR');
 
@@ -78,6 +74,22 @@ class PaymentService {
     }
 
     async _handleCheckoutComplete(session) {
+        const purchaseType = session.metadata?.purchaseType;
+        console.log('=== WEBHOOK: checkout.session.completed ===');
+        console.log('Payment Intent:', session.payment_intent);
+        console.log('Metadata:', JSON.stringify(session.metadata));
+        console.log('Purchase Type:', purchaseType);
+
+        // Route Pro purchases to ProService
+        if (purchaseType === 'pro_upgrade') {
+            console.log('[_handleCheckoutComplete] Routing to proService.handleProUpgradeWebhook');
+            return await proService.handleProUpgradeWebhook(session);
+        }
+        if (purchaseType === 'pro_extra_flows') {
+            console.log('[_handleCheckoutComplete] Routing to proService.handleExtraFlowsWebhook');
+            return await proService.handleExtraFlowsWebhook(session);
+        }
+
         const { userId, planId, appType } = session.metadata;
         if (!userId || !planId) return;
 
@@ -95,7 +107,7 @@ class PaymentService {
                     chargeId: session.payment_intent || session.id,
                     txnId: session.id,
                     amountCharged: session.amount_total || 0,
-                    currency: session.currency || 'usd',
+                    currency: session.currency || getStripeCurrency(),
                     status: 'success',
                     paymentMethod: session.payment_method_types?.[0] || 'card',
                 },

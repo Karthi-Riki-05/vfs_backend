@@ -4,6 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const chatController = require('../controllers/chat.controller');
 const { authenticate } = require('../middleware/auth.middleware');
+const { checkTeamAccess } = require('../middleware/checkTeamAccess');
 const validate = require('../middleware/validate');
 const {
     createChatGroupSchema,
@@ -12,6 +13,9 @@ const {
     getMessagesQuerySchema,
     idParamSchema,
     markGroupReadSchema,
+    addMembersSchema,
+    updateGroupSchema,
+    removeMemberSchema,
     ALLOWED_FILE_TYPES,
     MAX_FILE_SIZE,
 } = require('../validators/chat.validator');
@@ -40,6 +44,17 @@ router.use(authenticate);
 
 /**
  * @swagger
+ * /api/v1/chat/sidebar:
+ *   get:
+ *     summary: Get sidebar data (teams, groups, contacts) for chat page
+ *     tags: [Chat]
+ *     security:
+ *       - BearerAuth: []
+ */
+router.get('/sidebar', chatController.getSidebar);
+
+/**
+ * @swagger
  * /api/v1/chat/groups:
  *   get:
  *     summary: List user's chat groups with unread counts
@@ -61,7 +76,7 @@ router.get('/groups', chatController.getChatGroups);
  *     security:
  *       - BearerAuth: []
  */
-router.post('/groups', validate(createChatGroupSchema), chatController.createChatGroup);
+router.post('/groups', checkTeamAccess, validate(createChatGroupSchema), chatController.createChatGroup);
 
 /**
  * @swagger
@@ -106,6 +121,69 @@ router.put('/groups/:id/read', validate(markGroupReadSchema), chatController.mar
  *       - BearerAuth: []
  */
 router.post('/groups/:id/members', chatController.addMember);
+
+/**
+ * @swagger
+ * /api/v1/chat/groups/{id}/members/batch:
+ *   post:
+ *     summary: Add multiple members to a chat group (from teams)
+ *     tags: [Chat]
+ */
+router.post('/groups/:id/members/batch', validate(addMembersSchema), chatController.addMembers);
+
+/**
+ * @swagger
+ * /api/v1/chat/groups/{id}/members/{userId}:
+ *   delete:
+ *     summary: Remove a member from a chat group (admin only)
+ *     tags: [Chat]
+ */
+router.delete('/groups/:id/members/:userId', validate(removeMemberSchema), chatController.removeMember);
+
+/**
+ * @swagger
+ * /api/v1/chat/groups/{id}/info:
+ *   get:
+ *     summary: Get group info with member list
+ *     tags: [Chat]
+ */
+router.get('/groups/:id/info', chatController.getGroupInfo);
+
+/**
+ * @swagger
+ * /api/v1/chat/groups/{id}/available-members:
+ *   get:
+ *     summary: Get team members available to add to this group
+ *     tags: [Chat]
+ */
+router.get('/groups/:id/available-members', chatController.getAvailableMembers);
+
+/**
+ * @swagger
+ * /api/v1/chat/groups/{id}:
+ *   put:
+ *     summary: Update group (rename)
+ *     tags: [Chat]
+ */
+router.put('/groups/:id', validate(updateGroupSchema), chatController.updateGroup);
+
+/**
+ * @swagger
+ * /api/v1/chat/groups/{id}:
+ *   delete:
+ *     summary: Delete a chat group (creator only)
+ *     tags: [Chat]
+ */
+router.delete('/groups/:id', chatController.deleteGroup);
+
+/**
+ * @swagger
+ * /api/v1/chat/groups/{id}/leave:
+ *   post:
+ *     summary: Leave a chat group
+ *     tags: [Chat]
+ */
+router.post('/groups/:id/leave', chatController.leaveGroup);
 
 /**
  * @swagger

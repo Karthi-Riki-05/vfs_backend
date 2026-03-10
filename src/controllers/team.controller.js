@@ -1,9 +1,11 @@
 const teamService = require('../services/team.service');
 const asyncHandler = require('../utils/asyncHandler');
+const AppError = require('../utils/AppError');
 
 class TeamController {
     getTeams = asyncHandler(async (req, res) => {
-        const result = await teamService.getTeams(req.user.id, req.query);
+        const appContext = req.user.currentVersion || 'free';
+        const result = await teamService.getTeams(req.user.id, req.query, appContext);
         res.json({ success: true, data: result });
     });
 
@@ -13,7 +15,8 @@ class TeamController {
     });
 
     createTeam = asyncHandler(async (req, res) => {
-        const team = await teamService.createTeam(req.user.id, req.body);
+        const appContext = req.user.currentVersion || 'free';
+        const team = await teamService.createTeam(req.user.id, req.body, appContext);
         res.status(201).json({ success: true, data: team });
     });
 
@@ -33,6 +36,17 @@ class TeamController {
     });
 
     addMember = asyncHandler(async (req, res) => {
+        // Enforce team member limit from subscription
+        const teamMemberLimit = req.subscription?.teamMemberLimit || 5;
+        const currentCount = await teamService.getMemberCount(req.params.id);
+        if (currentCount >= teamMemberLimit) {
+            throw new AppError(
+                `Team member limit reached (${teamMemberLimit}). Please upgrade your plan to add more members.`,
+                403,
+                'MEMBER_LIMIT_REACHED'
+            );
+        }
+
         const member = await teamService.addMember(req.params.id, req.user.id, req.body.email, req.body.appType);
         res.status(201).json({ success: true, data: member });
     });
@@ -44,19 +58,26 @@ class TeamController {
 
     invite = asyncHandler(async (req, res) => {
         const { teamId, email, emails } = req.body;
+        const appContext = req.user.currentVersion || 'free';
         // Support single email or comma-separated list
         const emailList = emails
             ? emails
             : email.includes(',')
                 ? email.split(',').map(e => e.trim())
                 : [email];
-        const results = await teamService.createInvite(teamId, req.user.id, emailList);
+        const results = await teamService.createInvite(teamId, req.user.id, emailList, appContext);
         res.status(201).json({ success: true, data: { message: 'Invitations processed', results } });
     });
 
-    acceptInvite = asyncHandler(async (req, res) => {
+    verifyInvite = asyncHandler(async (req, res) => {
         const { token } = req.query;
-        if (!token) return res.status(400).json({ success: false, error: 'Token required' });
+        const data = await teamService.verifyInvite(token);
+        res.json({ success: true, data });
+    });
+
+    acceptInvite = asyncHandler(async (req, res) => {
+        const token = req.query.token || req.body?.token;
+        if (!token) return res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: 'Token required' } });
         const result = await teamService.acceptInvite(token, req.user.id);
         res.json({ success: true, data: result });
     });

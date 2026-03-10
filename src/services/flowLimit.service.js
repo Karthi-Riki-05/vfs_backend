@@ -5,6 +5,35 @@ const FREE_FLOW_LIMIT = 10;
 
 class FlowLimitService {
     async checkAndEnforceLimit(userId, appType) {
+        // Check if user is in Pro mode — use Pro flow limits instead
+        const user = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { hasPro: true, currentVersion: true, proFlowLimit: true, proAdditionalFlowsPurchased: true, proUnlimitedFlows: true },
+        });
+
+        if (user?.hasPro && user.currentVersion === 'pro') {
+            // Unlimited — no limit
+            if (user.proUnlimitedFlows) {
+                return { allowed: true, used: 0, total: -1, isPro: true, isUnlimited: true };
+            }
+
+            const flowCount = await prisma.flow.count({
+                where: { ownerId: userId, deletedAt: null, appContext: 'pro' },
+            });
+            const maxFlows = user.proFlowLimit + user.proAdditionalFlowsPurchased;
+
+            if (flowCount >= maxFlows) {
+                throw new AppError(
+                    `Pro flow limit reached. You have used ${flowCount} of ${maxFlows} flows. Purchase additional flows to create more.`,
+                    403,
+                    'PRO_FLOW_LIMIT_REACHED'
+                );
+            }
+
+            return { allowed: true, used: flowCount, total: maxFlows, isPro: true };
+        }
+
+        // Original ValueChart flow limit logic
         const limit = await prisma.flowLimit.findFirst({
             where: { userId, appType: appType || 'individual' },
         });

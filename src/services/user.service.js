@@ -2,6 +2,8 @@ const { prisma } = require('../lib/prisma');
 const argon2 = require('argon2');
 const crypto = require('crypto');
 const AppError = require('../utils/AppError');
+const { sendPasswordResetEmail } = require('../utils/email');
+const logger = require('../utils/logger');
 
 class UserService {
     async getUserById(id) {
@@ -64,10 +66,23 @@ class UserService {
     async requestPasswordReset(email) {
         const user = await prisma.user.findUnique({ where: { email } });
         if (!user) return; // Don't reveal if user exists
+
         const token = crypto.randomBytes(32).toString('hex');
+
+        // Delete any existing tokens for this email, then create new one
+        await prisma.passwordReset.deleteMany({ where: { email } });
         await prisma.passwordReset.create({ data: { email, token } });
-        // In production: send email with reset link containing this token
-        return token;
+
+        // Build reset URL and send email
+        const baseUrl = process.env.NEXTAUTH_URL || 'http://localhost:3000';
+        const resetUrl = `${baseUrl}/reset-password?token=${token}`;
+
+        try {
+            await sendPasswordResetEmail({ to: email, name: user.name, resetUrl });
+        } catch (err) {
+            logger.error(`Failed to send password reset email to ${email}: ${err.message}`);
+            // Don't throw — we don't want to reveal if email exists
+        }
     }
 
     async resetPassword(token, newPassword) {

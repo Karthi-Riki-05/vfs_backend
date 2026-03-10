@@ -34,6 +34,9 @@ const issueRoutes = require('./src/routes/issue.routes');
 const paymentRoutes = require('./src/routes/payment.routes');
 const adminRoutes = require('./src/routes/admin.routes');
 const cronRoutes = require('./src/routes/cron.routes');
+const projectRoutes = require('./src/routes/project.routes');
+const proRoutes = require('./src/routes/pro.routes');
+const inviteRoutes = require('./src/routes/invite.routes');
 
 // Validate required env vars at startup
 const requiredEnvVars = ['NEXTAUTH_SECRET'];
@@ -67,7 +70,18 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Body parser with size limits
+// Stripe webhook routes MUST receive raw body — mount BEFORE express.json()
+const webhookRawBody = express.raw({ type: 'application/json' });
+const captureRawBody = (req, res, next) => {
+    req.rawBody = req.body; // body is a raw Buffer here (from express.raw)
+    next();
+};
+app.use('/api/v1/payments/webhook', webhookRawBody, captureRawBody);
+app.use('/api/payments/webhook', webhookRawBody, captureRawBody);
+app.use('/api/v1/subscription/webhook', webhookRawBody, captureRawBody);
+app.use('/api/subscription/webhook', webhookRawBody, captureRawBody);
+
+// Body parser with size limits (AFTER webhook raw body routes)
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
@@ -115,17 +129,6 @@ app.get('/health', (req, res) => {
     res.json({ success: true, data: { status: 'ok', timestamp: new Date().toISOString() } });
 });
 
-// Stripe webhook needs raw body — mount BEFORE json parser affects it
-// (Already parsed by express.json above, so we capture rawBody for webhook)
-app.use('/api/v1/payments/webhook', express.raw({ type: 'application/json' }), (req, res, next) => {
-    req.rawBody = req.body;
-    next();
-});
-app.use('/api/payments/webhook', express.raw({ type: 'application/json' }), (req, res, next) => {
-    req.rawBody = req.body;
-    next();
-});
-
 // API v1 Routes
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/users', userRoutes);
@@ -140,6 +143,10 @@ app.use('/api/v1/issues', issueRoutes);
 app.use('/api/v1/payments', paymentRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/cron', cronRoutes);
+app.use('/api/v1/projects', projectRoutes);
+app.use('/api/v1/invite', inviteRoutes);
+app.use('/api/v1/upgrade-pro', proRoutes);
+app.use('/api/v1/pro', proRoutes); // backward-compatible alias
 
 // Backwards-compatible aliases (old /api/ routes -> /api/v1/)
 app.use('/api/auth', authRoutes);
@@ -155,6 +162,10 @@ app.use('/api/issues', issueRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/cron', cronRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/invite', inviteRoutes);
+app.use('/api/upgrade-pro', proRoutes);
+app.use('/api/pro', proRoutes); // backward-compatible alias
 
 // AI Generate Diagram (Gemini) — now protected
 const genAI = process.env.GEMINI_API_KEY
@@ -284,13 +295,58 @@ const socketAllowedOrigins = process.env.ALLOWED_ORIGINS
     : ['http://localhost:3000'];
 initSocketIO(server, socketAllowedOrigins);
 
+// Auto-seed essential data if missing (roles, plans, apps)
+async function autoSeed() {
+    const { prisma } = require('./src/lib/prisma');
+    try {
+        const roleCount = await prisma.role.count();
+        if (roleCount === 0) {
+            logger.info('No seed data found. Running auto-seed...');
+            const roles = [
+                { title: 'Super Admin', legacyId: 1 },
+                { title: 'Company Admin', legacyId: 2 },
+                { title: 'Process Manager', legacyId: 3 },
+                { title: 'User', legacyId: 4 },
+                { title: 'Free user', legacyId: 5 },
+            ];
+            for (const role of roles) {
+                await prisma.role.upsert({ where: { legacyId: role.legacyId }, update: { title: role.title }, create: role });
+            }
+
+            const apps = [
+                { appName: 'valuechart_enterprise', dbName: 'ent_value_chart', legacyId: 1 },
+                { appName: 'valuechart_individual', dbName: 'ind_value_chart', legacyId: 2 },
+            ];
+            for (const app of apps) {
+                await prisma.app.upsert({ where: { legacyId: app.legacyId }, update: { appName: app.appName, dbName: app.dbName }, create: app });
+            }
+
+            const plans = [
+                { name: 'Free', duration: 'monthly', price: 0, status: 'active', tier: 0, features: JSON.stringify(['1 Flow', 'Basic shapes', 'Export PDF']) },
+                { name: 'Pro Monthly', duration: 'monthly', price: 5, status: 'active', tier: 1, features: JSON.stringify(['10 Flows', 'All shapes', 'Export all formats', 'Priority support']) },
+                { name: 'Pro Yearly', duration: 'yearly', price: 36, status: 'active', tier: 1, features: JSON.stringify(['10 Flows', 'All shapes', 'Export all formats', 'Priority support']) },
+                { name: 'Team Monthly', duration: 'monthly', price: 5, status: 'active', tier: 2, appType: 'enterprise', userAccess: true, userCount: 5, userCost: 2.50, features: JSON.stringify(['Unlimited flows', 'Team collaboration', 'All shapes', 'Admin dashboard', 'Team management']) },
+                { name: 'Team Yearly', duration: 'yearly', price: 36, status: 'active', tier: 2, appType: 'enterprise', userAccess: true, userCount: 5, userCost: 25.00, features: JSON.stringify(['Unlimited flows', 'Team collaboration', 'All shapes', 'Admin dashboard', 'Team management']) },
+            ];
+            for (const plan of plans) {
+                await prisma.plan.upsert({ where: { name: plan.name }, update: plan, create: plan });
+            }
+
+            logger.info('Auto-seed complete: 5 roles, 2 apps, 5 plans');
+        }
+    } catch (err) {
+        logger.error('Auto-seed failed:', err);
+    }
+}
+
 // Only start server if not in test mode
 if (process.env.NODE_ENV !== 'test') {
     const PORT = process.env.PORT || 5000;
-    server.listen(PORT, '0.0.0.0', () => {
+    server.listen(PORT, '0.0.0.0', async () => {
         logger.info(`Server running on port ${PORT}`);
         logger.info(`API Docs available at http://localhost:${PORT}/api-docs`);
         logger.info('Socket.IO attached to HTTP server');
+        await autoSeed();
     });
 
     // Graceful shutdown

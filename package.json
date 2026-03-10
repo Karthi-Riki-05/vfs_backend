@@ -17,6 +17,8 @@
     "db:migrate": "npx prisma migrate dev",
     "db:studio": "npx prisma studio",
     "db:seed": "node prisma/seed.js",
+    "db:backup": "node scripts/db-backup.js",
+    "db:restore": "node scripts/db-restore.js",
     "lint": "echo 'No linter configured'"
   },
   "dependencies": {
@@ -39,10 +41,14 @@
     "openai": "^6.22.0",
     "pg": "^8.11.5",
     "socket.io": "^4.8.3",
+    "stripe": "^20.4.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
     "winston": "^3.19.0",
     "zod": "^4.3.6"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
   },
   "devDependencies": {
     "jest": "^30.2.0",

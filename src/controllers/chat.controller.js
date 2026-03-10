@@ -5,13 +5,21 @@ const path = require('path');
 const fs = require('fs');
 
 class ChatController {
+    getSidebar = asyncHandler(async (req, res) => {
+        const appContext = req.user.currentVersion || 'free';
+        const data = await chatService.getSidebarData(req.user.id, appContext);
+        res.json({ success: true, data });
+    });
+
     getChatGroups = asyncHandler(async (req, res) => {
-        const groups = await chatService.getChatGroups(req.user.id);
+        const appContext = req.user.currentVersion || 'free';
+        const groups = await chatService.getChatGroups(req.user.id, appContext);
         res.json({ success: true, data: groups });
     });
 
     createChatGroup = asyncHandler(async (req, res) => {
-        const group = await chatService.createChatGroup(req.user.id, req.body);
+        const appContext = req.user.currentVersion || 'free';
+        const group = await chatService.createChatGroup(req.user.id, req.body, appContext);
         res.status(201).json({ success: true, data: group });
     });
 
@@ -104,6 +112,43 @@ class ChatController {
     getUnreadCounts = asyncHandler(async (req, res) => {
         const counts = await chatService.getUnreadCounts(req.user.id);
         res.json({ success: true, data: counts });
+    });
+
+    getGroupInfo = asyncHandler(async (req, res) => {
+        const info = await chatService.getGroupInfo(req.params.id, req.user.id);
+        res.json({ success: true, data: info });
+    });
+
+    updateGroup = asyncHandler(async (req, res) => {
+        const group = await chatService.updateGroup(req.params.id, req.user.id, req.body);
+        res.json({ success: true, data: group });
+    });
+
+    getAvailableMembers = asyncHandler(async (req, res) => {
+        const appContext = req.user.currentVersion || 'free';
+        const members = await chatService.getAvailableMembers(req.params.id, req.user.id, appContext);
+        res.json({ success: true, data: members });
+    });
+
+    addMembers = asyncHandler(async (req, res) => {
+        const appContext = req.user.currentVersion || 'free';
+        const result = await chatService.addMembers(req.params.id, req.user.id, req.body.userIds, appContext);
+        res.json({ success: true, data: result });
+    });
+
+    removeMember = asyncHandler(async (req, res) => {
+        await chatService.removeMember(req.params.id, req.user.id, req.params.userId);
+        res.json({ success: true, data: { message: 'Member removed' } });
+    });
+
+    leaveGroup = asyncHandler(async (req, res) => {
+        await chatService.leaveGroup(req.params.id, req.user.id);
+        res.json({ success: true, data: { message: 'Left the group' } });
+    });
+
+    deleteGroup = asyncHandler(async (req, res) => {
+        await chatService.deleteGroup(req.params.id, req.user.id);
+        res.json({ success: true, data: { message: 'Group deleted' } });
     });
 }
 

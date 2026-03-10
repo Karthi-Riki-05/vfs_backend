@@ -114,6 +114,11 @@ enum FeedbackType {
   query
 }
 
+enum UserVersion {
+  free
+  pro
+}
+
 // ============================================================
 // 1. NEXTAUTH MODELS (kept from your existing schema)
 // ============================================================
@@ -184,6 +189,15 @@ model User {
   clientType    ClientType  @default(web)       @map("client_type")
   welcomeUser   Boolean     @default(true)      @map("welcome_user")
   companyId     Int?        @map("company_id")  // From ind_value_chart.users
+  stripeCustomerId String?  @map("stripe_customer_id")
+
+  // --- ValueChart Pro fields ---
+  hasPro                     Boolean      @default(false) @map("has_pro")
+  proPurchasedAt             DateTime?    @map("pro_purchased_at")
+  proFlowLimit               Int          @default(10)    @map("pro_flow_limit")
+  proAdditionalFlowsPurchased Int         @default(0)     @map("pro_additional_flows_purchased")
+  proUnlimitedFlows          Boolean      @default(false) @map("pro_unlimited_flows")
+  currentVersion             UserVersion  @default(free)  @map("current_version")
 
   // --- Granular permissions (from legacy) ---
   pFlowRead     Boolean     @default(false)     @map("p_flow_read")
@@ -234,6 +248,12 @@ model User {
   issuesCreated       IssueItem[]
   subQueue            SubscriptionQueue[]
   addUserSubs         AddUserSubscription[]
+  projects            Project[]
+  proFlowPurchases    ProFlowPurchase[]
+  teamInvitesSent     TeamInvite[]          @relation("TeamInviteSender")
+  teamInvitesAccepted TeamInvite[]          @relation("TeamInviteAcceptor")
+  flowSharesGiven     FlowShare[]           @relation("FlowShareSharedBy")
+  flowSharesReceived  FlowShare[]           @relation("FlowShareSharedWith")
 
   @@index([legacyVsId])
   @@index([companyId])
@@ -399,6 +419,11 @@ model Subscription {
   updatedAt     DateTime      @updatedAt      @map("updated_at")
   deletedAt     DateTime?     @map("deleted_at")
 
+  // Scheduled plan change (monthly → yearly)
+  scheduledPlanType       String?    @map("scheduled_plan_type")
+  scheduledTeamMembers    Int?       @map("scheduled_team_members")
+  scheduledActivationDate DateTime?  @map("scheduled_activation_date")
+
   @@index([appType])
   @@index([status])
   @@map("subscriptions")
@@ -472,6 +497,7 @@ model Team {
   teamMem       Int           @default(0)  @map("team_mem")     // Max members allowed
   countMem      Int           @default(0)  @map("count_mem")    // Current member count
   appType       AppType?      @map("app_type")
+  appContext    UserVersion   @default(free) @map("app_context")
   verifyTeam    String?       @map("verify_team")
   status        PlanStatus    @default(active)
   members       TeamMember[]
@@ -481,6 +507,7 @@ model Team {
   deletedAt     DateTime?     @map("deleted_at")
 
   @@index([teamOwnerId])
+  @@index([appContext])
   @@map("teams")
 }
 
@@ -489,14 +516,21 @@ model Team {
 // ============================================================
 
 model TeamInvite {
-  id        String    @id @default(cuid())
-  teamId    String    @map("team_id")
-  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  email     String
-  token     String    @unique
-  status    String    @default("pending") // pending, accepted, expired
-  expiresAt DateTime  @map("expires_at")
-  createdAt DateTime  @default(now()) @map("created_at")
+  id          String      @id @default(cuid())
+  teamId      String      @map("team_id")
+  team        Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  email       String
+  token       String      @unique
+  status      String      @default("pending") // pending, accepted, expired
+  invitedBy   String?     @map("invited_by")
+  inviter     User?       @relation("TeamInviteSender", fields: [invitedBy], references: [id], onDelete: SetNull)
+  acceptedBy  String?     @map("accepted_by")
+  acceptor    User?       @relation("TeamInviteAcceptor", fields: [acceptedBy], references: [id], onDelete: SetNull)
+  role        String      @default("MEMBER") // OWNER, ADMIN, MEMBER
+  appContext  UserVersion @default(free) @map("app_context")
+  expiresAt   DateTime    @map("expires_at")
+  acceptedAt  DateTime?   @map("accepted_at")
+  createdAt   DateTime    @default(now()) @map("created_at")
 
   @@index([teamId])
   @@index([token])
@@ -543,16 +577,22 @@ model Flow {
   isFavorite    Boolean         @default(false) @map("is_favorite")
   ownerId       String          @map("owner_id")
   owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  projectId     String?         @map("project_id")
+  project       Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
   appType       AppType?        @map("app_type")
+  appContext    UserVersion     @default(free) @map("app_context")
   version       Int             @default(1)
   flowGroupUsers FlowGroupUser[]
   flowPublishes  FlowPublish[]
+  flowShares     FlowShare[]
   createdAt     DateTime        @default(now()) @map("created_at")
   updatedAt     DateTime        @updatedAt      @map("updated_at")
   deletedAt     DateTime?       @map("deleted_at")
 
   @@index([ownerId])
   @@index([appType])
+  @@index([appContext])
+  @@index([projectId])
   @@index([legacyId, legacySource])
   @@map("flows")
 }
@@ -634,6 +674,36 @@ model FlowPublish {
 }
 
 // ============================================================
+// 16B. FLOW SHARE
+// Tracks which users a flow has been shared with and their permission level
+// ============================================================
+
+enum SharePermission {
+  view
+  edit
+}
+
+model FlowShare {
+  id            String          @id @default(cuid())
+  flowId        String          @map("flow_id")
+  flow          Flow            @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  sharedById    String          @map("shared_by")
+  sharedBy      User            @relation("FlowShareSharedBy", fields: [sharedById], references: [id], onDelete: Cascade)
+  sharedWithId  String          @map("shared_with")
+  sharedWith    User            @relation("FlowShareSharedWith", fields: [sharedWithId], references: [id], onDelete: Cascade)
+  permission    SharePermission @default(view)
+  appContext    UserVersion     @default(free) @map("app_context")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt      @map("updated_at")
+
+  @@unique([flowId, sharedWithId])
+  @@index([sharedWithId])
+  @@index([flowId])
+  @@index([appContext])
+  @@map("flow_shares")
+}
+
+// ============================================================
 // 18. SHAPE GROUP (UNIFIED)
 // Source: ent + ind groups
 // ind extras: is_predefined, team_id
@@ -649,12 +719,14 @@ model ShapeGroup {
   isPredefined  Boolean         @default(false) @map("is_predefined")
   teamId        Int             @default(0) @map("team_id")
   appType       AppType?        @map("app_type")
+  appContext    UserVersion     @default(free) @map("app_context")
   shapes        Shape[]
   flowGroupUsers FlowGroupUser[]
   createdAt     DateTime        @default(now()) @map("created_at")
   updatedAt     DateTime?       @map("updated_at")
   deletedAt     DateTime?       @map("deleted_at")
 
+  @@index([appContext])
   @@map("shape_groups")
 }
 
@@ -679,6 +751,7 @@ model Shape {
   ownerId       String          @map("owner_id")
   owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   appType       AppType?        @map("app_type")
+  appContext    UserVersion     @default(free) @map("app_context")
   category      String?
   xmlContent    String?         @db.Text @map("xml_content")  // Legacy
   thumbnail     String?
@@ -688,6 +761,7 @@ model Shape {
   deletedAt     DateTime?       @map("deleted_at")
 
   @@index([groupId])
+  @@index([appContext])
   @@map("shapes")
 }
 
@@ -704,11 +778,12 @@ model ChatGroup {
   picture       String?
   userId        String            @map("user_id")
   user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  teamId        Int?              @map("team_id")
+  teamId        String?           @map("team_id")
   companyId     Int?              @map("company_id")
   flowId        Int               @default(0) @map("flow_id")
   flowItemId    String            @default("") @map("flow_item_id")
   appType       AppType?          @map("app_type")
+  appContext    UserVersion       @default(free) @map("app_context")
   members       ChatGroupUser[]
   messages      ChatMessage[]
   msgUsers      ChatMessageUser[]
@@ -717,6 +792,7 @@ model ChatGroup {
   deletedAt     DateTime?         @map("deleted_at")
 
   @@index([userId])
+  @@index([appContext])
   @@map("chat_groups")
 }
 
@@ -1038,7 +1114,7 @@ model PasswordReset {
   id        String    @id @default(cuid())
   email     String
   token     String
-  createdAt DateTime? @map("created_at")
+  createdAt DateTime  @default(now()) @map("created_at")
 
   @@index([email])
   @@map("password_resets")
@@ -1080,4 +1156,45 @@ model FeedbackQuery {
   updatedAt DateTime?    @map("updated_at")
 
   @@map("feedback_queries")
+}
+
+// ============================================================
+// 35. PROJECT
+// Organizes flows into named projects/folders
+// ============================================================
+
+model Project {
+  id          String      @id @default(cuid())
+  name        String
+  description String?     @db.Text
+  coverImage  String?     @map("cover_image")
+  createdBy   String      @map("created_by")
+  creator     User        @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  appContext  UserVersion  @default(free) @map("app_context")
+  flows       Flow[]
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt      @map("updated_at")
+  deletedAt   DateTime?   @map("deleted_at")
+
+  @@index([createdBy])
+  @@index([appContext])
+  @@map("projects")
+}
+
+// ============================================================
+// 36. PRO FLOW PURCHASE
+// Tracks additional flow purchases for ValueChart Pro users
+// ============================================================
+
+model ProFlowPurchase {
+  id                    String    @id @default(cuid())
+  userId                String    @map("user_id")
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flowCount             Int       @map("flow_count")
+  amountCents           Int       @map("amount_cents")
+  stripePaymentIntentId String?   @map("stripe_payment_intent_id")
+  createdAt             DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("pro_flow_purchases")
 }

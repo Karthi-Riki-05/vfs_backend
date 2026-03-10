@@ -4,7 +4,8 @@ const asyncHandler = require('../utils/asyncHandler');
 class ShapeGroupController {
     getAllGroups = asyncHandler(async (req, res) => {
         const userId = req.user.id;
-        const groups = await shapeGroupService.getAllGroups(userId);
+        const appContext = req.user.currentVersion || 'free';
+        const groups = await shapeGroupService.getAllGroups(userId, appContext);
         res.json({ success: true, data: groups });
     });
 
@@ -15,7 +16,8 @@ class ShapeGroupController {
 
     createGroup = asyncHandler(async (req, res) => {
         const userId = req.user.id;
-        const group = await shapeGroupService.createGroup(userId, req.body);
+        const appContext = req.user.currentVersion || 'free';
+        const group = await shapeGroupService.createGroup(userId, req.body, appContext);
         res.status(201).json({ success: true, data: group });
     });
 

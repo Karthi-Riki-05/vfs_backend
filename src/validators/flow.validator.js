@@ -8,6 +8,7 @@ const createFlowSchema = z.object({
         xml: z.string().optional(),
         isPublic: z.boolean().optional(),
         thumbnail: z.string().max(500000).optional(),
+        projectId: z.string().optional().nullable(),
     }),
 });
 
@@ -23,6 +24,7 @@ const updateFlowSchema = z.object({
         isPublic: z.boolean().optional(),
         isFavorite: z.boolean().optional(),
         thumbnail: z.string().max(500000).optional(),
+        projectId: z.string().optional().nullable(),
     }),
 });
 
@@ -50,4 +52,36 @@ const idParamSchema = z.object({
     }),
 });
 
-module.exports = { createFlowSchema, updateFlowSchema, updateDiagramStateSchema, getFlowsQuerySchema, idParamSchema };
+const shareFlowSchema = z.object({
+    params: z.object({
+        id: z.string().min(1),
+    }),
+    body: z.object({
+        shares: z.array(z.object({
+            userId: z.string().min(1),
+            permission: z.enum(['view', 'edit']),
+        })).min(1, 'At least one share is required'),
+    }),
+});
+
+const updateShareSchema = z.object({
+    params: z.object({
+        id: z.string().min(1),
+        shareId: z.string().min(1),
+    }),
+    body: z.object({
+        permission: z.enum(['view', 'edit']),
+    }),
+});
+
+const shareIdParamSchema = z.object({
+    params: z.object({
+        id: z.string().min(1),
+        shareId: z.string().min(1),
+    }),
+});
+
+module.exports = {
+    createFlowSchema, updateFlowSchema, updateDiagramStateSchema, getFlowsQuerySchema, idParamSchema,
+    shareFlowSchema, updateShareSchema, shareIdParamSchema,
+};

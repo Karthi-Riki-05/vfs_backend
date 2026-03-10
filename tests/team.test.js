@@ -6,6 +6,19 @@ const app = require('../index');
 describe('Team Routes', () => {
     const token = generateTestToken('owner-1', 'Viewer');
 
+    // Mock an active subscription for routes that require checkSubscription
+    const mockActiveSubscription = () => {
+        mockPrisma.subscription.findUnique.mockResolvedValue({
+            id: 'sub-1',
+            userId: 'owner-1',
+            status: 'active',
+            usersCount: 10,
+            productType: 'team_monthly',
+            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
+            paymentId: 'sub_stripe_123',
+        });
+    };
+
     beforeEach(() => jest.clearAllMocks());
 
     describe('GET /api/v1/teams', () => {
@@ -43,6 +56,7 @@ describe('Team Routes', () => {
 
     describe('POST /api/v1/teams', () => {
         it('should create a team', async () => {
+            mockActiveSubscription();
             mockPrisma.team.create.mockResolvedValue({
                 id: 'team-new', teamOwnerId: 'owner-1', status: 'active',
                 owner: { id: 'owner-1', name: 'Owner', email: 'test@test.com' },
@@ -149,6 +163,7 @@ describe('Team Routes', () => {
 
     describe('POST /api/v1/teams/:id/members', () => {
         it('should add a member', async () => {
+            mockActiveSubscription();
             mockPrisma.team.findFirst.mockResolvedValue({ id: 'team-1', teamOwnerId: 'owner-1', teamMem: 10 });
             mockPrisma.teamMember.count.mockResolvedValue(2);
             mockPrisma.user.findUnique.mockResolvedValue({ id: 'user-2', email: 'member@test.com' });
@@ -168,6 +183,7 @@ describe('Team Routes', () => {
         });
 
         it('should reject invalid email', async () => {
+            mockActiveSubscription();
             const res = await request(app)
                 .post('/api/v1/teams/team-1/members')
                 .set('Authorization', `Bearer ${token}`)
@@ -177,6 +193,7 @@ describe('Team Routes', () => {
         });
 
         it('should reject duplicate member', async () => {
+            mockActiveSubscription();
             mockPrisma.team.findFirst.mockResolvedValue({ id: 'team-1', teamOwnerId: 'owner-1', teamMem: 10 });
             mockPrisma.teamMember.count.mockResolvedValue(2);
             mockPrisma.user.findUnique.mockResolvedValue({ id: 'user-2', email: 'member@test.com' });
@@ -191,6 +208,12 @@ describe('Team Routes', () => {
         });
 
         it('should reject when member limit reached', async () => {
+            // Mock subscription with limit of 3
+            mockPrisma.subscription.findUnique.mockResolvedValue({
+                id: 'sub-1', userId: 'owner-1', status: 'active', usersCount: 3,
+                productType: 'team_monthly', paymentId: 'sub_stripe_123',
+                expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            });
             mockPrisma.team.findFirst.mockResolvedValue({ id: 'team-1', teamOwnerId: 'owner-1', teamMem: 3 });
             mockPrisma.teamMember.count.mockResolvedValue(3);
 
@@ -199,7 +222,8 @@ describe('Team Routes', () => {
                 .set('Authorization', `Bearer ${token}`)
                 .send({ email: 'new@test.com' });
 
-            expect(res.status).toBe(400);
+            expect(res.status).toBe(403);
+            expect(res.body.error.code).toBe('MEMBER_LIMIT_REACHED');
         });
     });
 
@@ -256,6 +280,9 @@ describe('Team Routes', () => {
 
     describe('POST /api/v1/teams/invite', () => {
         it('should send team invitations', async () => {
+            mockActiveSubscription();
+            mockPrisma.user.findUnique.mockResolvedValueOnce({ id: 'owner-1', role: 'User' }); // for authenticate
+            mockPrisma.user.findUnique.mockResolvedValueOnce(null); // for invite lookup
             mockPrisma.team.findFirst.mockResolvedValue({ id: 'team-1', teamOwnerId: 'owner-1' });
             mockPrisma.user.findUnique.mockResolvedValue(null);
             mockPrisma.teamInvite.findFirst.mockResolvedValue(null);

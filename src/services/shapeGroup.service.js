@@ -2,9 +2,9 @@ const { prisma } = require('../lib/prisma');
 const AppError = require('../utils/AppError');
 
 class ShapeGroupService {
-    async getAllGroups(userId) {
+    async getAllGroups(userId, appContext = 'free') {
         return await prisma.shapeGroup.findMany({
-            where: { userId },
+            where: { userId, appContext },
             orderBy: { createdAt: 'desc' },
             include: { _count: { select: { shapes: true } } }
         });
@@ -19,11 +19,12 @@ class ShapeGroupService {
         return group;
     }
 
-    async createGroup(userId, data) {
+    async createGroup(userId, data, appContext = 'free') {
         return await prisma.shapeGroup.create({
             data: {
                 name: data.name,
-                userId
+                userId,
+                appContext,
             }
         });
     }

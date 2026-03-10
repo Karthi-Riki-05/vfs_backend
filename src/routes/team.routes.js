@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const teamController = require('../controllers/team.controller');
 const { authenticate } = require('../middleware/auth.middleware');
+const { checkTeamAccess } = require('../middleware/checkTeamAccess');
 const validate = require('../middleware/validate');
 const { createTeamSchema, updateTeamSchema, addMemberSchema, removeMemberSchema, inviteSchema, idParamSchema, getTeamsQuerySchema } = require('../validators/team.validator');
 
@@ -53,7 +54,7 @@ router.get('/', validate(getTeamsQuerySchema), teamController.getTeams);
  *       201:
  *         description: Team created
  */
-router.post('/', validate(createTeamSchema), teamController.createTeam);
+router.post('/', checkTeamAccess, validate(createTeamSchema), teamController.createTeam);
 
 /**
  * @swagger
@@ -80,7 +81,7 @@ router.post('/', validate(createTeamSchema), teamController.createTeam);
  *       201:
  *         description: Invitation sent
  */
-router.post('/invite', validate(inviteSchema), teamController.invite);
+router.post('/invite', checkTeamAccess, validate(inviteSchema), teamController.invite);
 router.get('/invites', teamController.listPendingInvites);
 router.get('/accept', teamController.acceptInvite);
 
@@ -199,7 +200,7 @@ router.get('/:id/members', validate(idParamSchema), teamController.getMembers);
  *       409:
  *         description: Already a member
  */
-router.post('/:id/members', validate(addMemberSchema), teamController.addMember);
+router.post('/:id/members', checkTeamAccess, validate(addMemberSchema), teamController.addMember);
 
 /**
  * @swagger

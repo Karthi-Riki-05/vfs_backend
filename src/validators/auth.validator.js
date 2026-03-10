@@ -15,4 +15,13 @@ const validateSchema = z.object({
     }),
 });
 
-module.exports = { registerSchema, validateSchema };
+const oauthSyncSchema = z.object({
+    body: z.object({
+        email: z.string().email('Invalid email address').max(255).trim().toLowerCase(),
+        name: z.string().max(100).trim().optional(),
+        image: z.string().max(500).optional(),
+        provider: z.string().min(1).max(50),
+    }),
+});
+
+module.exports = { registerSchema, validateSchema, oauthSyncSchema };

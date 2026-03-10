@@ -2,12 +2,12 @@ const { prisma } = require('../lib/prisma');
 const AppError = require('../utils/AppError');
 
 class ShapeService {
-    async getAllShapes(userId) {
+    async getAllShapes(userId, appContext = 'free') {
         return await prisma.shape.findMany({
             where: {
                 OR: [
                     { isPublic: true },
-                    { ownerId: userId }
+                    { ownerId: userId, appContext }
                 ]
             },
             orderBy: { createdAt: 'desc' },
@@ -21,7 +21,7 @@ class ShapeService {
         });
     }
 
-    async createShape(userId, data) {
+    async createShape(userId, data, appContext = 'free') {
         return await prisma.shape.create({
             data: {
                 name: data.name,
@@ -33,7 +33,8 @@ class ShapeService {
                 xmlContent: data.xmlContent,
                 thumbnail: data.thumbnail,
                 isPublic: data.isPublic || false,
-                ownerId: userId
+                ownerId: userId,
+                appContext,
             }
         });
     }

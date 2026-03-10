@@ -7,9 +7,11 @@ const linkPreviewCache = new Map();
 const CACHE_TTL = 60 * 60 * 1000;
 
 class ChatService {
-    async getChatGroups(userId) {
+    async getChatGroups(userId, appContext = 'free') {
         const groups = await prisma.chatGroup.findMany({
             where: {
+                appContext,
+                deletedAt: null,
                 OR: [
                     { userId },
                     { members: { some: { userId } } },
@@ -59,7 +61,7 @@ class ChatService {
         return groupsWithUnread;
     }
 
-    async createChatGroup(userId, data) {
+    async createChatGroup(userId, data, appContext = 'free') {
         const group = await prisma.chatGroup.create({
             data: {
                 title: data.title,
@@ -67,6 +69,8 @@ class ChatService {
                 flowId: data.flowId || 0,
                 flowItemId: data.flowItemId || '',
                 appType: data.appType || null,
+                appContext,
+                teamId: data.teamId || null,
             },
         });
 
@@ -372,6 +376,400 @@ class ChatService {
         }
 
         return { totalUnread, perGroup };
+    }
+
+    async getSidebarData(userId, appContext = 'free') {
+        // 1. Fetch user's teams
+        const teams = await prisma.team.findMany({
+            where: {
+                appContext,
+                OR: [
+                    { teamOwnerId: userId },
+                    { members: { some: { userId } } },
+                ],
+            },
+            include: {
+                owner: { select: { id: true, name: true, email: true, image: true } },
+                members: {
+                    include: { user: { select: { id: true, name: true, email: true, image: true } } },
+                },
+                _count: { select: { members: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+        });
+
+        // 2. Fetch all user's chat groups (exclude soft-deleted)
+        const chatGroups = await prisma.chatGroup.findMany({
+            where: {
+                appContext,
+                deletedAt: null,
+                OR: [
+                    { userId },
+                    { members: { some: { userId } } },
+                ],
+            },
+            include: {
+                _count: { select: { messages: true, members: true } },
+                messages: { take: 1, orderBy: { createdAt: 'desc' }, select: { message: true, createdAt: true, type: true } },
+                members: {
+                    include: { user: { select: { id: true, name: true, email: true, image: true } } },
+                },
+            },
+            orderBy: { updatedAt: 'desc' },
+        });
+
+        // 3. Batch unread counts
+        const unreadCounts = await prisma.chatMessageUser.groupBy({
+            by: ['groupId'],
+            where: { receiverId: userId, isRead: false },
+            _count: { id: true },
+        });
+        const unreadMap = {};
+        for (const uc of unreadCounts) {
+            unreadMap[uc.groupId] = uc._count.id;
+        }
+
+        // 4. Classify groups: team-linked vs regular
+        const teamConvoMap = {}; // teamId -> chatGroup
+        const regularGroups = []; // ALL non-team chat groups
+        const dmGroups = []; // Auto-created 1:1 DM groups (title matches other user's name)
+
+        for (const group of chatGroups) {
+            const g = {
+                ...group,
+                unreadCount: unreadMap[group.id] || 0,
+                members: group.members.map(m => m.user),
+            };
+
+            if (group.teamId) {
+                teamConvoMap[group.teamId] = g;
+            } else {
+                regularGroups.push(g);
+                // Only treat as DM if it's a 2-member group whose title matches
+                // the other member's name (auto-created DMs use the contact's name as title)
+                if (group._count.members === 2) {
+                    const otherMember = g.members.find(m => m.id !== userId);
+                    if (otherMember && (group.title === otherMember.name || group.title === otherMember.email)) {
+                        dmGroups.push(g);
+                    }
+                }
+            }
+        }
+
+        // 5. Build teams response with conversation links
+        const teamsWithConvo = teams.map(team => ({
+            id: team.id,
+            name: team.name,
+            description: team.description,
+            ownerId: team.teamOwnerId,
+            ownerName: team.owner?.name,
+            memberCount: team._count.members,
+            members: team.members.map(m => m.user),
+            conversationId: teamConvoMap[team.id]?.id || null,
+            lastMessage: teamConvoMap[team.id]?.messages?.[0] || null,
+            unreadCount: teamConvoMap[team.id]?.unreadCount || 0,
+        }));
+
+        // 6. Build contacts: deduplicated users from teams + ALL chat groups
+        const contactMap = new Map();
+        for (const team of teams) {
+            for (const member of team.members) {
+                if (member.user && member.user.id !== userId) {
+                    contactMap.set(member.user.id, member.user);
+                }
+            }
+        }
+        for (const group of chatGroups) {
+            for (const member of group.members) {
+                if (member.user && member.user.id !== userId) {
+                    contactMap.set(member.user.id, member.user);
+                }
+            }
+        }
+
+        // Find existing 1:1 conversations for each contact
+        const contacts = [];
+        for (const [contactId, contactUser] of contactMap) {
+            // Find a 1:1 chat group with this contact
+            const existingConvo = dmGroups.find(g =>
+                g.members.some(m => m.id === contactId)
+            );
+            contacts.push({
+                ...contactUser,
+                conversationId: existingConvo?.id || null,
+                lastMessage: existingConvo?.messages?.[0] || null,
+                unreadCount: existingConvo?.unreadCount || 0,
+            });
+        }
+
+        return {
+            teams: teamsWithConvo,
+            groups: regularGroups,
+            contacts,
+            // Flat list for backward compat
+            allGroups: chatGroups.map(g => ({
+                ...g,
+                unreadCount: unreadMap[g.id] || 0,
+                members: g.members.map(m => m.user),
+            })),
+        };
+    }
+
+    async getGroupInfo(groupId, userId) {
+        // Verify membership
+        const isMember = await prisma.chatGroupUser.findFirst({ where: { groupId, userId } });
+        const group = await prisma.chatGroup.findUnique({
+            where: { id: groupId },
+            include: {
+                user: { select: { id: true, name: true, email: true, image: true } },
+                members: {
+                    include: { user: { select: { id: true, name: true, email: true, image: true } } },
+                    orderBy: { createdAt: 'asc' },
+                },
+                _count: { select: { members: true } },
+            },
+        });
+        if (!group) throw new AppError('Group not found', 404, 'NOT_FOUND');
+        if (!isMember && group.userId !== userId) throw new AppError('Not a member', 403, 'FORBIDDEN');
+
+        return {
+            id: group.id,
+            title: group.title,
+            createdBy: group.user,
+            createdAt: group.createdAt,
+            memberCount: group._count.members,
+            isAdmin: group.userId === userId,
+            members: group.members.map(m => ({
+                ...m.user,
+                role: m.userId === group.userId ? 'admin' : 'member',
+                joinedAt: m.createdAt,
+            })),
+        };
+    }
+
+    async updateGroup(groupId, userId, data) {
+        const group = await prisma.chatGroup.findUnique({ where: { id: groupId } });
+        if (!group) throw new AppError('Group not found', 404, 'NOT_FOUND');
+        if (group.userId !== userId) throw new AppError('Only the group creator can update', 403, 'FORBIDDEN');
+
+        return await prisma.chatGroup.update({
+            where: { id: groupId },
+            data: { title: data.title },
+        });
+    }
+
+    async getAvailableMembers(groupId, userId, appContext = 'free') {
+        // Verify membership
+        const isMember = await prisma.chatGroupUser.findFirst({ where: { groupId, userId } });
+        const isOwner = !isMember ? await prisma.chatGroup.findFirst({ where: { id: groupId, userId } }) : true;
+        if (!isMember && !isOwner) throw new AppError('Not a member of this group', 403, 'FORBIDDEN');
+
+        // Get current group member IDs
+        const currentMembers = await prisma.chatGroupUser.findMany({
+            where: { groupId },
+            select: { userId: true },
+        });
+        const currentMemberIds = new Set(currentMembers.map(m => m.userId));
+
+        // Get all teams the user belongs to
+        const teams = await prisma.team.findMany({
+            where: {
+                appContext,
+                OR: [
+                    { teamOwnerId: userId },
+                    { members: { some: { userId } } },
+                ],
+            },
+            include: {
+                members: {
+                    include: { user: { select: { id: true, name: true, email: true, image: true } } },
+                },
+            },
+            orderBy: { name: 'asc' },
+        });
+
+        // Group members by team, marking who's already in the group
+        const teamGroups = teams.map(team => ({
+            teamId: team.id,
+            teamName: team.name,
+            members: team.members
+                .filter(m => m.userId !== userId) // Exclude current user
+                .map(m => ({
+                    userId: m.user.id,
+                    name: m.user.name || m.user.email,
+                    email: m.user.email,
+                    avatar: m.user.image,
+                    alreadyInGroup: currentMemberIds.has(m.userId),
+                })),
+        })).filter(t => t.members.length > 0);
+
+        return teamGroups;
+    }
+
+    async addMembers(groupId, userId, userIds, appContext = 'free') {
+        // Verify group exists
+        const group = await prisma.chatGroup.findUnique({ where: { id: groupId } });
+        if (!group) throw new AppError('Group not found', 404, 'NOT_FOUND');
+
+        // Verify requester is a member
+        const isMember = await prisma.chatGroupUser.findFirst({ where: { groupId, userId } });
+        if (!isMember && group.userId !== userId) throw new AppError('Not a member', 403, 'FORBIDDEN');
+
+        // Verify all userIds are from user's teams (security)
+        const teams = await prisma.team.findMany({
+            where: {
+                appContext,
+                OR: [
+                    { teamOwnerId: userId },
+                    { members: { some: { userId } } },
+                ],
+            },
+            include: { members: { select: { userId: true } } },
+        });
+        const validTeamMemberIds = new Set();
+        for (const team of teams) {
+            for (const m of team.members) validTeamMemberIds.add(m.userId);
+        }
+
+        // Get current members
+        const currentMembers = await prisma.chatGroupUser.findMany({
+            where: { groupId },
+            select: { userId: true },
+        });
+        const currentMemberIds = new Set(currentMembers.map(m => m.userId));
+
+        const addedNames = [];
+        for (const addUserId of userIds) {
+            if (!validTeamMemberIds.has(addUserId)) continue;
+            if (currentMemberIds.has(addUserId)) continue;
+
+            await prisma.chatGroupUser.create({ data: { groupId, userId: addUserId } });
+
+            const addedUser = await prisma.user.findUnique({ where: { id: addUserId }, select: { name: true, email: true } });
+            addedNames.push(addedUser?.name || addedUser?.email || 'Someone');
+        }
+
+        // System message
+        if (addedNames.length > 0) {
+            const adder = await prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true } });
+            const adderName = adder?.name || adder?.email;
+            const sysMsg = await prisma.chatMessage.create({
+                data: {
+                    message: `${adderName} added ${addedNames.join(', ')} to the group`,
+                    groupId,
+                    userId,
+                    type: 'text',
+                },
+            });
+
+            await prisma.chatGroup.update({ where: { id: groupId }, data: { updatedAt: new Date() } });
+
+            // Emit via socket
+            try {
+                const { getIO } = require('../socket');
+                const io = getIO();
+                if (io) {
+                    io.to(`chat:${groupId}`).emit('message:new', { ...sysMsg, groupId });
+                }
+            } catch (err) {
+                logger.error('Socket emit error:', err.message);
+            }
+        }
+
+        return { addedCount: addedNames.length, addedNames };
+    }
+
+    async removeMember(groupId, userId, removeUserId) {
+        const group = await prisma.chatGroup.findUnique({ where: { id: groupId } });
+        if (!group) throw new AppError('Group not found', 404, 'NOT_FOUND');
+        if (group.userId !== userId) throw new AppError('Only the group creator can remove members', 403, 'FORBIDDEN');
+        if (removeUserId === userId) throw new AppError('Cannot remove yourself. Use Leave Group instead.', 400, 'BAD_REQUEST');
+
+        const membership = await prisma.chatGroupUser.findFirst({ where: { groupId, userId: removeUserId } });
+        if (!membership) throw new AppError('User is not a member', 404, 'NOT_FOUND');
+
+        await prisma.chatGroupUser.delete({ where: { id: membership.id } });
+
+        // System message
+        const removedUser = await prisma.user.findUnique({ where: { id: removeUserId }, select: { name: true, email: true } });
+        const adminUser = await prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true } });
+        const sysMsg = await prisma.chatMessage.create({
+            data: {
+                message: `${adminUser?.name || adminUser?.email} removed ${removedUser?.name || removedUser?.email} from the group`,
+                groupId,
+                userId,
+                type: 'text',
+            },
+        });
+
+        try {
+            const { getIO } = require('../socket');
+            const io = getIO();
+            if (io) {
+                io.to(`chat:${groupId}`).emit('message:new', { ...sysMsg, groupId });
+            }
+        } catch (err) {
+            logger.error('Socket emit error:', err.message);
+        }
+
+        return { success: true };
+    }
+
+    async leaveGroup(groupId, userId) {
+        const group = await prisma.chatGroup.findUnique({ where: { id: groupId } });
+        if (!group) throw new AppError('Group not found', 404, 'NOT_FOUND');
+
+        const membership = await prisma.chatGroupUser.findFirst({ where: { groupId, userId } });
+        if (!membership) throw new AppError('Not a member of this group', 403, 'FORBIDDEN');
+
+        await prisma.chatGroupUser.delete({ where: { id: membership.id } });
+
+        // System message
+        const leaver = await prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true } });
+        const sysMsg = await prisma.chatMessage.create({
+            data: {
+                message: `${leaver?.name || leaver?.email} left the group`,
+                groupId,
+                userId,
+                type: 'text',
+            },
+        });
+
+        try {
+            const { getIO } = require('../socket');
+            const io = getIO();
+            if (io) {
+                io.to(`chat:${groupId}`).emit('message:new', { ...sysMsg, groupId });
+            }
+        } catch (err) {
+            logger.error('Socket emit error:', err.message);
+        }
+
+        return { success: true };
+    }
+
+    async deleteGroup(groupId, userId) {
+        const group = await prisma.chatGroup.findUnique({ where: { id: groupId } });
+        if (!group) throw new AppError('Group not found', 404, 'NOT_FOUND');
+        if (group.userId !== userId) throw new AppError('Only the group creator can delete', 403, 'FORBIDDEN');
+
+        // Soft delete
+        await prisma.chatGroup.update({
+            where: { id: groupId },
+            data: { deletedAt: new Date() },
+        });
+
+        try {
+            const { getIO } = require('../socket');
+            const io = getIO();
+            if (io) {
+                io.to(`chat:${groupId}`).emit('group:deleted', { groupId });
+            }
+        } catch (err) {
+            logger.error('Socket emit error:', err.message);
+        }
+
+        return { success: true };
     }
 
     // --- Link Preview ---
