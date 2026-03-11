@@ -254,6 +254,8 @@ model User {
   teamInvitesAccepted TeamInvite[]          @relation("TeamInviteAcceptor")
   flowSharesGiven     FlowShare[]           @relation("FlowShareSharedBy")
   flowSharesReceived  FlowShare[]           @relation("FlowShareSharedWith")
+  aiConsent           AiConsent?
+  aiConversations     AiConversation[]
 
   @@index([legacyVsId])
   @@index([companyId])
@@ -1197,4 +1199,61 @@ model ProFlowPurchase {
 
   @@index([userId])
   @@map("pro_flow_purchases")
+}
+
+// ============================================================
+// 37. AI CONSENT
+// Tracks user consent for AI data processing (GDPR)
+// ============================================================
+
+model AiConsent {
+  id          String    @id @default(cuid())
+  userId      String    @unique @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  consented   Boolean   @default(false)
+  consentedAt DateTime? @map("consented_at")
+  revokedAt   DateTime? @map("revoked_at")
+  ipAddress   String?   @map("ip_address")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt      @map("updated_at")
+
+  @@map("ai_consent")
+}
+
+// ============================================================
+// 38. AI CONVERSATION
+// Groups AI chat messages into conversations
+// ============================================================
+
+model AiConversation {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title      String?
+  appContext String?   @map("app_context")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt      @map("updated_at")
+  messages   AiMessage[]
+
+  @@index([userId])
+  @@map("ai_conversations")
+}
+
+// ============================================================
+// 39. AI MESSAGE
+// Individual messages within an AI conversation
+// ============================================================
+
+model AiMessage {
+  id             String         @id @default(cuid())
+  conversationId String         @map("conversation_id")
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String         // 'user' | 'assistant' | 'system'
+  content        String         @db.Text
+  diagramXml     String?        @map("diagram_xml") @db.Text
+  metadata       Json?
+  createdAt      DateTime       @default(now()) @map("created_at")
+
+  @@index([conversationId])
+  @@map("ai_messages")
 }

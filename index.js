@@ -37,6 +37,7 @@ const cronRoutes = require('./src/routes/cron.routes');
 const projectRoutes = require('./src/routes/project.routes');
 const proRoutes = require('./src/routes/pro.routes');
 const inviteRoutes = require('./src/routes/invite.routes');
+const aiAssistantRoutes = require('./src/routes/ai-assistant.routes');
 
 // Validate required env vars at startup
 const requiredEnvVars = ['NEXTAUTH_SECRET'];
@@ -147,6 +148,7 @@ app.use('/api/v1/projects', projectRoutes);
 app.use('/api/v1/invite', inviteRoutes);
 app.use('/api/v1/upgrade-pro', proRoutes);
 app.use('/api/v1/pro', proRoutes); // backward-compatible alias
+app.use('/api/v1/ai-assistant', aiAssistantRoutes);
 
 // Backwards-compatible aliases (old /api/ routes -> /api/v1/)
 app.use('/api/auth', authRoutes);
@@ -166,6 +168,7 @@ app.use('/api/projects', projectRoutes);
 app.use('/api/invite', inviteRoutes);
 app.use('/api/upgrade-pro', proRoutes);
 app.use('/api/pro', proRoutes); // backward-compatible alias
+app.use('/api/ai-assistant', aiAssistantRoutes);
 
 // AI Generate Diagram (Gemini) — now protected
 const genAI = process.env.GEMINI_API_KEY

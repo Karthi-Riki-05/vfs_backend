@@ -2,23 +2,27 @@ const AppError = require('../utils/AppError');
 
 /**
  * Returns a configured Stripe instance using the correct keys
- * based on environment (test vs live).
+ * based on STRIPE_MODE env var ('live' or 'test').
  *
- * Uses live keys when NODE_ENV=production, test keys otherwise.
  * Env vars:
+ *   STRIPE_MODE: 'live' or 'test' (default: 'test')
  *   Test: STRIPE_SECRET_KEY
  *   Live: STRIPE_LIVE_SECRET_KEY
  *   Currency: STRIPE_CURRENCY (default: 'usd')
  */
+function isLiveMode() {
+    return process.env.STRIPE_MODE === 'live';
+}
+
 function getStripe() {
-    const isLive = process.env.NODE_ENV === 'production';
-    const secretKey = isLive
+    const live = isLiveMode();
+    const secretKey = live
         ? process.env.STRIPE_LIVE_SECRET_KEY
         : process.env.STRIPE_SECRET_KEY;
 
     if (!secretKey) {
         throw new AppError(
-            `Stripe ${isLive ? 'live' : 'test'} secret key not configured`,
+            `Stripe ${live ? 'live' : 'test'} secret key not configured`,
             503,
             'STRIPE_NOT_CONFIGURED'
         );
@@ -34,4 +38,4 @@ function getStripeCurrency() {
     return (process.env.STRIPE_CURRENCY || 'usd').toLowerCase();
 }
 
-module.exports = { getStripe, getStripeCurrency };
+module.exports = { getStripe, getStripeCurrency, isLiveMode };
