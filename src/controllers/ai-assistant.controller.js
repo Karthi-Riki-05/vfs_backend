@@ -46,3 +46,52 @@ exports.deleteData = asyncHandler(async (req, res) => {
     await aiAssistantService.deleteAllData(req.user.id);
     res.json({ success: true, data: { message: 'All AI data deleted.' } });
 });
+
+exports.generateDiagram = asyncHandler(async (req, res) => {
+    const { message, existingXml, conversationId } = req.body;
+    const result = await aiAssistantService.generateDiagramFromText(
+        req.user.id,
+        message,
+        existingXml || null,
+        conversationId || null,
+        req.user.currentVersion || 'free'
+    );
+    res.json({ success: true, data: result });
+});
+
+exports.generateDiagramFromDocument = asyncHandler(async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ success: false, error: { code: 'NO_FILE', message: 'No file uploaded' } });
+    }
+
+    const fileName = req.file.originalname;
+    const mimeType = req.file.mimetype;
+    let documentText = '';
+
+    if (mimeType === 'application/pdf') {
+        try {
+            const pdfParse = require('pdf-parse');
+            const pdfData = await pdfParse(req.file.buffer);
+            documentText = pdfData.text;
+        } catch (e) {
+            return res.status(400).json({ success: false, error: { code: 'PARSE_ERROR', message: 'Could not extract PDF text' } });
+        }
+    } else if (fileName.endsWith('.docx')) {
+        try {
+            const mammoth = require('mammoth');
+            const result = await mammoth.extractRawText({ buffer: req.file.buffer });
+            documentText = result.value;
+        } catch (e) {
+            return res.status(400).json({ success: false, error: { code: 'PARSE_ERROR', message: 'Could not extract DOCX text' } });
+        }
+    } else {
+        documentText = req.file.buffer.toString('utf-8');
+    }
+
+    if (!documentText.trim()) {
+        return res.status(400).json({ success: false, error: { code: 'EMPTY_DOC', message: 'Could not extract text from document' } });
+    }
+
+    const result = await aiAssistantService.generateDiagramFromDocument(req.user.id, documentText, fileName);
+    res.json({ success: true, data: result });
+});

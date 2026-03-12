@@ -21,4 +21,12 @@ const historyQuerySchema = z.object({
     }),
 });
 
-module.exports = { chatSchema, consentSchema, historyQuerySchema };
+const generateDiagramSchema = z.object({
+    body: z.object({
+        message: z.string().min(1, 'Message is required').max(4000, 'Message too long'),
+        existingXml: z.string().optional().nullable(),
+        conversationId: z.string().optional().nullable(),
+    }),
+});
+
+module.exports = { chatSchema, consentSchema, historyQuerySchema, generateDiagramSchema };

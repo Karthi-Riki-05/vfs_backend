@@ -41,6 +41,49 @@ IMPORTANT RULES:
 When generating a diagram, respond with a brief description + the draw.io XML.
 For how-to questions, respond with clear step-by-step instructions.`;
 
+const DIAGRAM_SYSTEM_PROMPT = `You are an expert draw.io XML diagram generator.
+
+ALWAYS respond ONLY with valid JSON (no markdown, no backticks):
+{
+  "message": "Brief description of what was created",
+  "xml": "<mxGraphModel>...</mxGraphModel>"
+}
+
+draw.io XML STRICT RULES:
+- Root: <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+- Must contain <root>
+- ALWAYS first two cells:
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+- Vertex cell: <mxCell id="N" value="Label" style="STYLE" vertex="1" parent="1"><mxGeometry x="X" y="Y" width="W" height="H" as="geometry" /></mxCell>
+- Edge cell: <mxCell id="N" value="Label" style="EDGE_STYLE" edge="1" source="SRC_ID" target="TGT_ID" parent="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+STYLES:
+- Rectangle/Process: rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;
+- Decision/Diamond: rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;
+- Start/End oval: ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;
+- Database: shape=mxgraph.flowchart.database;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;
+- Swimlane: swimlane;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;
+- Process box: rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;
+- Value Stream box: rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;
+- Edge: edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;
+
+LAYOUT: start at x=160,y=80. Space 200px horizontal, 120px vertical.
+Keep diagram within 1200x800 bounds.
+
+DIAGRAM TYPES to recognize and generate:
+- Flowchart / Process flow
+- ER Diagram / Database schema
+- Swimlane / Cross-functional
+- Value Stream Map (VSM)
+- Org chart / Network diagram
+- Sequence diagram (use swimlanes)
+- Mind map (use tree layout)
+- BPMN process / Class diagram
+- Any diagram the user describes
+
+Generate COMPLETE valid XML. Never truncate. Never use placeholders.`;
+
 class AiAssistantService {
     async getConsent(userId) {
         const consent = await prisma.aiConsent.findUnique({
@@ -383,6 +426,137 @@ class AiAssistantService {
             }
             throw new AppError('AI service temporarily unavailable.', 500, 'AI_ERROR');
         }
+    }
+
+    async generateDiagramFromText(userId, message, existingXml, conversationId, appContext) {
+        // Verify consent
+        const consent = await prisma.aiConsent.findUnique({ where: { userId } });
+        if (!consent || !consent.consented || consent.revokedAt) {
+            throw new AppError('Please accept the AI data processing terms to use this feature.', 403, 'CONSENT_REQUIRED');
+        }
+
+        if (!process.env.OPENAI_API_KEY) {
+            throw new AppError('AI service not configured', 500, 'AI_NOT_CONFIGURED');
+        }
+
+        const messages = [
+            { role: 'system', content: DIAGRAM_SYSTEM_PROMPT },
+        ];
+
+        if (existingXml) {
+            messages.push({
+                role: 'user',
+                content: `Here is the existing diagram XML:\n${existingXml}\n\nUser request: ${message}\n\nModify or extend the diagram based on the request.`,
+            });
+        } else {
+            messages.push({
+                role: 'user',
+                content: `Generate a draw.io diagram for: ${message}`,
+            });
+        }
+
+        try {
+            const completion = await openai.chat.completions.create({
+                model: 'gpt-4o',
+                messages,
+                response_format: { type: 'json_object' },
+                max_tokens: 4000,
+                temperature: 0.3,
+            });
+
+            const parsed = JSON.parse(completion.choices[0].message.content);
+
+            // Save to conversation if provided
+            if (conversationId) {
+                const conversation = await prisma.aiConversation.findFirst({
+                    where: { id: conversationId, userId },
+                });
+                if (conversation) {
+                    await prisma.aiMessage.create({
+                        data: { conversationId, role: 'user', content: message },
+                    });
+                    await prisma.aiMessage.create({
+                        data: {
+                            conversationId,
+                            role: 'assistant',
+                            content: parsed.message || '',
+                            diagramXml: parsed.xml || null,
+                            metadata: { intent: 'generate_diagram' },
+                        },
+                    });
+                }
+            }
+
+            return {
+                intent: 'generate_diagram',
+                message: parsed.message || 'Here is your diagram.',
+                xml: parsed.xml || null,
+                templateName: this._extractTemplateName(parsed.message || message),
+            };
+        } catch (error) {
+            logger.error('Diagram generation error', { error: error.message, userId });
+            if (error.status === 429) {
+                throw new AppError('AI rate limit exceeded. Please try again later.', 429, 'AI_RATE_LIMIT');
+            }
+            throw new AppError('Failed to generate diagram.', 500, 'AI_ERROR');
+        }
+    }
+
+    async generateDiagramFromDocument(userId, documentText, fileName) {
+        // Verify consent
+        const consent = await prisma.aiConsent.findUnique({ where: { userId } });
+        if (!consent || !consent.consented || consent.revokedAt) {
+            throw new AppError('Please accept the AI data processing terms to use this feature.', 403, 'CONSENT_REQUIRED');
+        }
+
+        if (!process.env.OPENAI_API_KEY) {
+            throw new AppError('AI service not configured', 500, 'AI_NOT_CONFIGURED');
+        }
+
+        try {
+            const completion = await openai.chat.completions.create({
+                model: 'gpt-4o',
+                messages: [
+                    { role: 'system', content: DIAGRAM_SYSTEM_PROMPT },
+                    {
+                        role: 'user',
+                        content: `Analyze this document and generate the most appropriate draw.io diagram.\n\nDocument name: ${fileName}\nDocument content:\n---\n${documentText.substring(0, 8000)}\n---\n\nDetermine what type of diagram best represents this document (flowchart, process map, org chart, ER diagram, VSM, etc.) and generate it.\nInclude all key entities, processes, and relationships from the document.`,
+                    },
+                ],
+                response_format: { type: 'json_object' },
+                max_tokens: 4000,
+                temperature: 0.3,
+            });
+
+            const parsed = JSON.parse(completion.choices[0].message.content);
+
+            return {
+                intent: 'generate_diagram_from_document',
+                message: parsed.message || `Generated diagram from "${fileName}".`,
+                xml: parsed.xml || null,
+                fileName,
+                templateName: this._extractTemplateName(parsed.message || fileName),
+            };
+        } catch (error) {
+            logger.error('Document diagram generation error', { error: error.message, userId });
+            if (error.status === 429) {
+                throw new AppError('AI rate limit exceeded. Please try again later.', 429, 'AI_RATE_LIMIT');
+            }
+            throw new AppError('Failed to generate diagram from document.', 500, 'AI_ERROR');
+        }
+    }
+
+    _extractTemplateName(text) {
+        if (!text) return 'AI Generated Flow';
+        const patterns = [
+            /(?:created|generated|designed|here(?:'s| is))\s+(?:a|an|the)\s+(.+?)(?:\.|!|:|\n|$)/i,
+            /(.+?)(?:flowchart|diagram|flow|chart|process)/i,
+        ];
+        for (const pattern of patterns) {
+            const match = text.match(pattern);
+            if (match) return match[1].trim().replace(/^["']|["']$/g, '') || 'AI Generated Flow';
+        }
+        return 'AI Generated Flow';
     }
 
     _buildContextBlock(ctx) {
