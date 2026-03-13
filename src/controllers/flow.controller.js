@@ -5,8 +5,8 @@ class FlowController {
     getAllFlows = asyncHandler(async (req, res) => {
         const userId = req.user.id;
         const appContext = req.user.currentVersion || 'free';
-        const { search, page, limit } = req.query;
-        const result = await flowService.getAllFlows(userId, { search, page, limit }, appContext);
+        const { search, page, limit, nonEmpty, draftsOnly } = req.query;
+        const result = await flowService.getAllFlows(userId, { search, page, limit, nonEmpty, draftsOnly }, appContext);
         const shared = await flowService.getSharedFlows(userId, appContext);
         res.json({ success: true, data: { ...result, shared } });
     });
@@ -107,8 +107,8 @@ class FlowController {
     getAllFlowsWithShared = asyncHandler(async (req, res) => {
         const userId = req.user.id;
         const appContext = req.user.currentVersion || 'free';
-        const { search, page, limit } = req.query;
-        const own = await flowService.getAllFlows(userId, { search, page, limit }, appContext);
+        const { search, page, limit, nonEmpty, draftsOnly } = req.query;
+        const own = await flowService.getAllFlows(userId, { search, page, limit, nonEmpty, draftsOnly }, appContext);
         const shared = await flowService.getSharedFlows(userId, appContext);
         res.json({ success: true, data: { ...own, shared } });
     });

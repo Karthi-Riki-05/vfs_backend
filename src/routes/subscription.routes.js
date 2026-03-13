@@ -20,6 +20,88 @@ router.post('/webhook', subscriptionController.handleWebhook);
  */
 router.get('/plans', subscriptionController.getPlans);
 
+// Subscription info (dashboard widget) — needs auth
+router.get('/info', authenticate, async (req, res) => {
+    try {
+        const { prisma } = require('../lib/prisma');
+        const userId = req.user.id;
+
+        // Get user's subscription with plan
+        let sub = null;
+        try {
+            sub = await prisma.subscription.findUnique({
+                where: { userId },
+                include: { plan: true },
+            });
+        } catch { /* table may not exist */ }
+
+        // Get user for pro status
+        let user = null;
+        try {
+            user = await prisma.user.findUnique({
+                where: { id: userId },
+                select: { hasPro: true, currentVersion: true },
+            });
+        } catch { /* fields may not exist */ }
+
+        // Count chat messages (last 30 days)
+        let messagesUsed = 0;
+        try {
+            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+            messagesUsed = await prisma.chatMessage.count({
+                where: { senderId: userId, createdAt: { gte: thirtyDaysAgo } },
+            });
+        } catch { /* table may not exist */ }
+
+        // Storage estimate from flows
+        let storageUsedMb = 0;
+        try {
+            const flows = await prisma.flow.findMany({
+                where: { ownerId: userId, deletedAt: null },
+                select: { diagramData: true },
+            });
+            const totalBytes = flows.reduce((sum, f) => sum + (f.diagramData?.length || 0), 0);
+            storageUsedMb = Math.round((totalBytes / 1024 / 1024) * 100) / 100;
+        } catch { /* ignore */ }
+
+        // Build response
+        if (!sub) {
+            return res.json({ success: true, data: {
+                plan: 'Free',
+                is_active: true,
+                is_pro: !!(user?.hasPro),
+                expires_at: null,
+                billing_period_days: 30,
+                messages_used: messagesUsed,
+                messages_limit: 50,
+                storage_used_mb: storageUsedMb,
+                storage_limit_mb: 100,
+            }});
+        }
+
+        const isActive = sub.status === 'active' || sub.status === 'trialing';
+        const expiresAt = sub.expiresAt || null;
+
+        res.json({ success: true, data: {
+            plan: sub.plan?.name || 'Free',
+            is_active: isActive,
+            is_pro: !!(user?.hasPro),
+            expires_at: expiresAt,
+            billing_period_days: sub.plan?.duration === 'yearly' ? 365 : 30,
+            messages_used: messagesUsed,
+            messages_limit: sub.plan?.tier >= 1 ? 500 : 50,
+            storage_used_mb: storageUsedMb,
+            storage_limit_mb: sub.plan?.tier >= 1 ? 1000 : 100,
+        }});
+    } catch (err) {
+        console.error('Subscription info error:', err);
+        res.json({ success: true, data: {
+            plan: 'Free', is_active: true, is_pro: false,
+            expires_at: null, messages_used: 0, messages_limit: 50,
+        }});
+    }
+});
+
 // All routes below require authentication
 router.use(authenticate);
 

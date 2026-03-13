@@ -4,7 +4,7 @@ const AppError = require('../utils/AppError');
 
 class FlowService {
     async getAllFlows(userId, options = {}, appContext = 'free') {
-        const { search, page = 1, limit = 10 } = options;
+        const { search, page = 1, limit = 10, nonEmpty, draftsOnly } = options;
         const take = Math.min(Number(limit) || 10, 100);
         const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
@@ -19,6 +19,28 @@ class FlowService {
                 { name: { contains: search, mode: 'insensitive' } },
                 { description: { contains: search, mode: 'insensitive' } },
             ];
+        }
+
+        // Filter to non-empty flows only (has real diagram data)
+        if (nonEmpty === 'true') {
+            where.diagramData = {
+                not: { in: ['', '{}', '<mxGraphModel></mxGraphModel>', '<mxGraphModel/>'] },
+            };
+        }
+
+        // Filter to drafts only (empty or no diagram data)
+        // Use AND to avoid overwriting search OR clause
+        if (draftsOnly === 'true') {
+            if (!where.AND) where.AND = [];
+            where.AND.push({
+                OR: [
+                    { diagramData: null },
+                    { diagramData: '' },
+                    { diagramData: '{}' },
+                    { diagramData: '<mxGraphModel></mxGraphModel>' },
+                    { diagramData: '<mxGraphModel/>' },
+                ],
+            });
         }
 
         const [flows, total] = await Promise.all([
