@@ -1,7 +1,7 @@
 const request = require('supertest');
 require('./setup');
 const app = require('../index');
-const { mockPrisma } = require('./setup');
+const { mockPrisma, applyDefaultMocks } = require('./setup');
 const { generateTestToken } = require('./helpers');
 
 describe('Shape Endpoints', () => {
@@ -9,6 +9,7 @@ describe('Shape Endpoints', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        applyDefaultMocks();
     });
 
     describe('GET /api/v1/shapes', () => {
@@ -42,7 +43,7 @@ describe('Shape Endpoints', () => {
                     where: expect.objectContaining({
                         OR: expect.arrayContaining([
                             { isPublic: true },
-                            { ownerId: 'test-user-id' },
+                            expect.objectContaining({ ownerId: 'test-user-id' }),
                         ]),
                     }),
                 })

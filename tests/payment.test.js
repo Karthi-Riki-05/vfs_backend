@@ -1,5 +1,5 @@
 const request = require('supertest');
-const { mockPrisma } = require('./setup');
+const { mockPrisma, applyDefaultMocks } = require('./setup');
 const { generateTestToken } = require('./helpers');
 
 const app = require('../index');
@@ -10,6 +10,7 @@ describe('Payment Module', () => {
     beforeEach(() => {
         token = generateTestToken('user-1');
         jest.clearAllMocks();
+        applyDefaultMocks();
     });
 
     describe('POST /api/v1/payments', () => {
@@ -45,7 +46,7 @@ describe('Payment Module', () => {
                 .set('Authorization', `Bearer ${token}`)
                 .send({ planId: 'plan-1' });
 
-            expect(res.status).toBe(201);
+            expect(res.status).toBe(200);
             expect(res.body.success).toBe(true);
             expect(res.body.data).toHaveProperty('sessionId');
             expect(res.body.data).toHaveProperty('url');

@@ -1,10 +1,20 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const teamController = require('../controllers/team.controller');
-const { authenticate } = require('../middleware/auth.middleware');
-const { checkTeamAccess } = require('../middleware/checkTeamAccess');
-const validate = require('../middleware/validate');
-const { createTeamSchema, updateTeamSchema, addMemberSchema, removeMemberSchema, inviteSchema, idParamSchema, getTeamsQuerySchema } = require('../validators/team.validator');
+const teamController = require("../controllers/team.controller");
+const { authenticate } = require("../middleware/auth.middleware");
+const { checkTeamAccess } = require("../middleware/checkTeamAccess");
+const validate = require("../middleware/validate");
+const {
+  createTeamSchema,
+  updateTeamSchema,
+  addMemberSchema,
+  removeMemberSchema,
+  inviteSchema,
+  idParamSchema,
+  getTeamsQuerySchema,
+  invitesQuerySchema,
+  acceptQuerySchema,
+} = require("../validators/team.validator");
 
 router.use(authenticate);
 
@@ -31,7 +41,7 @@ router.use(authenticate);
  *       200:
  *         description: List of teams
  */
-router.get('/', validate(getTeamsQuerySchema), teamController.getTeams);
+router.get("/", validate(getTeamsQuerySchema), teamController.getTeams);
 
 /**
  * @swagger
@@ -54,7 +64,12 @@ router.get('/', validate(getTeamsQuerySchema), teamController.getTeams);
  *       201:
  *         description: Team created
  */
-router.post('/', checkTeamAccess, validate(createTeamSchema), teamController.createTeam);
+router.post(
+  "/",
+  checkTeamAccess,
+  validate(createTeamSchema),
+  teamController.createTeam,
+);
 
 /**
  * @swagger
@@ -81,9 +96,57 @@ router.post('/', checkTeamAccess, validate(createTeamSchema), teamController.cre
  *       201:
  *         description: Invitation sent
  */
-router.post('/invite', checkTeamAccess, validate(inviteSchema), teamController.invite);
-router.get('/invites', teamController.listPendingInvites);
-router.get('/accept', teamController.acceptInvite);
+router.post(
+  "/invite",
+  checkTeamAccess,
+  validate(inviteSchema),
+  teamController.invite,
+);
+/**
+ * @swagger
+ * /api/v1/teams/invites:
+ *   get:
+ *     summary: List pending invites for a team
+ *     tags: [Teams]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: teamId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of pending invites
+ */
+router.get(
+  "/invites",
+  validate(invitesQuerySchema),
+  teamController.listPendingInvites,
+);
+
+/**
+ * @swagger
+ * /api/v1/teams/accept:
+ *   get:
+ *     summary: Accept a team invitation
+ *     tags: [Teams]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: token
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Invitation accepted
+ *       400:
+ *         description: Invalid or expired token
+ */
+router.get("/accept", validate(acceptQuerySchema), teamController.acceptInvite);
 
 /**
  * @swagger
@@ -105,7 +168,7 @@ router.get('/accept', teamController.acceptInvite);
  *       404:
  *         description: Team not found
  */
-router.get('/:id', validate(idParamSchema), teamController.getTeamById);
+router.get("/:id", validate(idParamSchema), teamController.getTeamById);
 
 /**
  * @swagger
@@ -125,7 +188,7 @@ router.get('/:id', validate(idParamSchema), teamController.getTeamById);
  *       200:
  *         description: Team updated
  */
-router.put('/:id', validate(updateTeamSchema), teamController.updateTeam);
+router.put("/:id", validate(updateTeamSchema), teamController.updateTeam);
 
 /**
  * @swagger
@@ -145,7 +208,7 @@ router.put('/:id', validate(updateTeamSchema), teamController.updateTeam);
  *       200:
  *         description: Team deleted
  */
-router.delete('/:id', validate(idParamSchema), teamController.deleteTeam);
+router.delete("/:id", validate(idParamSchema), teamController.deleteTeam);
 
 /**
  * @swagger
@@ -165,7 +228,7 @@ router.delete('/:id', validate(idParamSchema), teamController.deleteTeam);
  *       200:
  *         description: List of team members
  */
-router.get('/:id/members', validate(idParamSchema), teamController.getMembers);
+router.get("/:id/members", validate(idParamSchema), teamController.getMembers);
 
 /**
  * @swagger
@@ -200,7 +263,12 @@ router.get('/:id/members', validate(idParamSchema), teamController.getMembers);
  *       409:
  *         description: Already a member
  */
-router.post('/:id/members', checkTeamAccess, validate(addMemberSchema), teamController.addMember);
+router.post(
+  "/:id/members",
+  checkTeamAccess,
+  validate(addMemberSchema),
+  teamController.addMember,
+);
 
 /**
  * @swagger
@@ -225,6 +293,10 @@ router.post('/:id/members', checkTeamAccess, validate(addMemberSchema), teamCont
  *       200:
  *         description: Member removed
  */
-router.delete('/:id/members/:uid', validate(removeMemberSchema), teamController.removeMember);
+router.delete(
+  "/:id/members/:uid",
+  validate(removeMemberSchema),
+  teamController.removeMember,
+);
 
 module.exports = router;

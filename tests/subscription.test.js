@@ -1,7 +1,7 @@
 const request = require('supertest');
 require('./setup');
 const app = require('../index');
-const { mockPrisma } = require('./setup');
+const { mockPrisma, applyDefaultMocks } = require('./setup');
 const { generateTestToken } = require('./helpers');
 
 describe('Subscription Endpoints', () => {
@@ -9,6 +9,7 @@ describe('Subscription Endpoints', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        applyDefaultMocks();
     });
 
     describe('GET /api/v1/subscription/current', () => {
@@ -104,8 +105,11 @@ describe('Subscription Endpoints', () => {
 
     describe('POST /api/v1/subscription/cancel', () => {
         it('should cancel subscription', async () => {
+            mockPrisma.subscription.findUnique.mockResolvedValue({
+                id: 'sub-1', userId: 'test-user-id', status: 'active', paymentId: 'sub_stripe_123',
+            });
             mockPrisma.subscription.update.mockResolvedValue({
-                id: 'sub-1', status: 'cancelled',
+                id: 'sub-1', status: 'cancelling',
             });
 
             const res = await request(app)

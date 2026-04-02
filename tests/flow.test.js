@@ -1,7 +1,7 @@
 const request = require('supertest');
 require('./setup');
 const app = require('../index');
-const { mockPrisma } = require('./setup');
+const { mockPrisma, applyDefaultMocks } = require('./setup');
 const { generateTestToken, generateExpiredToken } = require('./helpers');
 
 describe('Flow Endpoints', () => {
@@ -9,6 +9,7 @@ describe('Flow Endpoints', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        applyDefaultMocks();
     });
 
     describe('GET /api/v1/flows', () => {

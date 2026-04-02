@@ -1,17 +1,20 @@
 const request = require('supertest');
-const { mockPrisma } = require('./setup');
+const { mockPrisma, applyDefaultMocks } = require('./setup');
 const { generateTestToken } = require('./helpers');
 const app = require('../index');
 
 describe('Chat Routes', () => {
     const token = generateTestToken('user-1', 'Viewer');
 
-    beforeEach(() => jest.clearAllMocks());
+    beforeEach(() => {
+        jest.clearAllMocks();
+        applyDefaultMocks();
+    });
 
     describe('GET /api/v1/chat/groups', () => {
         it('should list chat groups', async () => {
             mockPrisma.chatGroup.findMany.mockResolvedValue([
-                { id: 'cg-1', title: 'Test Chat', _count: { messages: 5, members: 2 }, messages: [] },
+                { id: 'cg-1', title: 'Test Chat', _count: { messages: 5, members: 2 }, messages: [], members: [{ lastReadAt: null }] },
             ]);
 
             const res = await request(app)
@@ -41,6 +44,8 @@ describe('Chat Routes', () => {
 
     describe('POST /api/v1/chat/groups', () => {
         it('should create a chat group', async () => {
+            // checkTeamAccess requires hasPro+pro or active subscription
+            mockPrisma.user.findUnique.mockResolvedValue({ id: 'user-1', role: 'Viewer', userStatus: 'active', currentVersion: 'pro', hasPro: true });
             mockPrisma.chatGroup.create.mockResolvedValue({ id: 'cg-new', title: 'New Chat' });
             mockPrisma.chatGroupUser.create.mockResolvedValue({});
             mockPrisma.chatGroupUser.createMany.mockResolvedValue({});
@@ -54,6 +59,7 @@ describe('Chat Routes', () => {
         });
 
         it('should reject empty title', async () => {
+            mockPrisma.user.findUnique.mockResolvedValue({ id: 'user-1', role: 'Viewer', userStatus: 'active', currentVersion: 'pro', hasPro: true });
             const res = await request(app)
                 .post('/api/v1/chat/groups')
                 .set('Authorization', `Bearer ${token}`)
@@ -63,6 +69,7 @@ describe('Chat Routes', () => {
         });
 
         it('should create group with initial members', async () => {
+            mockPrisma.user.findUnique.mockResolvedValue({ id: 'user-1', role: 'Viewer', userStatus: 'active', currentVersion: 'pro', hasPro: true });
             mockPrisma.chatGroup.create.mockResolvedValue({ id: 'cg-new', title: 'Team Chat' });
             mockPrisma.chatGroupUser.create.mockResolvedValue({});
             mockPrisma.chatGroupUser.createMany.mockResolvedValue({ count: 2 });

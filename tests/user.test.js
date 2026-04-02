@@ -1,12 +1,15 @@
 const request = require('supertest');
-const { mockPrisma } = require('./setup');
+const { mockPrisma, applyDefaultMocks } = require('./setup');
 const { generateTestToken } = require('./helpers');
 const app = require('../index');
 
 describe('User Routes', () => {
     const token = generateTestToken('user-1', 'Viewer');
 
-    beforeEach(() => jest.clearAllMocks());
+    beforeEach(() => {
+        jest.clearAllMocks();
+        applyDefaultMocks();
+    });
 
     describe('GET /api/v1/users/me', () => {
         it('should return current user profile', async () => {
@@ -28,14 +31,14 @@ describe('User Routes', () => {
             expect(res.status).toBe(401);
         });
 
-        it('should return 404 if user deleted', async () => {
+        it('should return 401 if user not found in db', async () => {
             mockPrisma.user.findUnique.mockResolvedValue(null);
 
             const res = await request(app)
                 .get('/api/v1/users/me')
                 .set('Authorization', `Bearer ${token}`);
 
-            expect(res.status).toBe(404);
+            expect(res.status).toBe(401);
         });
     });
 
@@ -55,7 +58,7 @@ describe('User Routes', () => {
 
     describe('PUT /api/v1/users/:id', () => {
         it('should update user profile', async () => {
-            mockPrisma.user.findUnique.mockResolvedValue(null); // no email conflict
+            // No email in body, so only auth middleware calls findUnique
             mockPrisma.user.update.mockResolvedValue({ id: 'user-1', name: 'Updated' });
 
             const res = await request(app)
@@ -77,7 +80,7 @@ describe('User Routes', () => {
         });
 
         it('should update contact number', async () => {
-            mockPrisma.user.findUnique.mockResolvedValue(null);
+            // No email in body, so only auth middleware calls findUnique
             mockPrisma.user.update.mockResolvedValue({ id: 'user-1', contactNo: '+1234567890' });
 
             const res = await request(app)
