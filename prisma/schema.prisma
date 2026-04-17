@@ -198,6 +198,7 @@ model User {
   proAdditionalFlowsPurchased Int         @default(0)     @map("pro_additional_flows_purchased")
   proUnlimitedFlows          Boolean      @default(false) @map("pro_unlimited_flows")
   currentVersion             UserVersion  @default(free)  @map("current_version")
+  refreshToken               String?      @db.Text        @map("refresh_token")
 
   // --- Granular permissions (from legacy) ---
   pFlowRead     Boolean     @default(false)     @map("p_flow_read")
@@ -256,6 +257,7 @@ model User {
   flowSharesReceived  FlowShare[]           @relation("FlowShareSharedWith")
   aiConsent           AiConsent?
   aiConversations     AiConversation[]
+  flowVersions        FlowVersion[]         @relation("FlowVersionSavedBy")
 
   @@index([legacyVsId])
   @@index([companyId])
@@ -587,6 +589,7 @@ model Flow {
   flowGroupUsers FlowGroupUser[]
   flowPublishes  FlowPublish[]
   flowShares     FlowShare[]
+  versions       FlowVersion[]
   createdAt     DateTime        @default(now()) @map("created_at")
   updatedAt     DateTime        @updatedAt      @map("updated_at")
   deletedAt     DateTime?       @map("deleted_at")
@@ -597,6 +600,21 @@ model Flow {
   @@index([projectId])
   @@index([legacyId, legacySource])
   @@map("flows")
+}
+
+model FlowVersion {
+  id          String   @id @default(cuid())
+  flowId      String   @map("flow_id")
+  flow        Flow     @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  xml         String   @db.Text
+  thumbnail   String?  @db.Text
+  savedById   String   @map("saved_by_id")
+  savedBy     User     @relation("FlowVersionSavedBy", fields: [savedById], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([flowId])
+  @@index([savedById])
+  @@map("flow_versions")
 }
 
 // ============================================================

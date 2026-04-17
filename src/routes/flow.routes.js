@@ -1,12 +1,36 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const flowController = require('../controllers/flow.controller');
-const { authenticate } = require('../middleware/auth.middleware');
-const validate = require('../middleware/validate');
-const { createFlowSchema, updateFlowSchema, updateDiagramStateSchema, getFlowsQuerySchema, idParamSchema, shareFlowSchema, updateShareSchema, shareIdParamSchema } = require('../validators/flow.validator');
+const flowController = require("../controllers/flow.controller");
+const { authenticate } = require("../middleware/auth.middleware");
+const validate = require("../middleware/validate");
+const {
+  createFlowSchema,
+  updateFlowSchema,
+  updateDiagramStateSchema,
+  getFlowsQuerySchema,
+  idParamSchema,
+  shareFlowSchema,
+  updateShareSchema,
+  shareIdParamSchema,
+} = require("../validators/flow.validator");
 
 // All flow routes are protected
 router.use(authenticate);
+
+// AI: generate VSM diagram from uploaded PDF/Word — must be before /:id matchers
+router.post("/ai-from-doc", flowController.generateFromDocument);
+
+// Version history
+router.get(
+  "/:id/versions",
+  validate(idParamSchema),
+  flowController.getFlowVersions,
+);
+router.post(
+  "/:id/versions/restore/:versionId",
+  validate(idParamSchema),
+  flowController.restoreFlowVersion,
+);
 
 /**
  * @swagger
@@ -39,11 +63,11 @@ router.use(authenticate);
  *       401:
  *         description: Unauthorized
  */
-router.get('/', validate(getFlowsQuerySchema), flowController.getAllFlows);
+router.get("/", validate(getFlowsQuerySchema), flowController.getAllFlows);
 
-router.get('/favorites', flowController.getFavorites);
-router.get('/trash', flowController.getTrash);
-router.get('/share/members', flowController.getAvailableShareMembers);
+router.get("/favorites", flowController.getFavorites);
+router.get("/trash", flowController.getTrash);
+router.get("/share/members", flowController.getAvailableShareMembers);
 
 /**
  * @swagger
@@ -67,7 +91,7 @@ router.get('/share/members', flowController.getAvailableShareMembers);
  *       401:
  *         description: Unauthorized
  */
-router.get('/:id', validate(idParamSchema), flowController.getFlowById);
+router.get("/:id", validate(idParamSchema), flowController.getFlowById);
 
 /**
  * @swagger
@@ -101,7 +125,7 @@ router.get('/:id', validate(idParamSchema), flowController.getFlowById);
  *       401:
  *         description: Unauthorized
  */
-router.post('/', validate(createFlowSchema), flowController.createFlow);
+router.post("/", validate(createFlowSchema), flowController.createFlow);
 
 /**
  * @swagger
@@ -138,7 +162,7 @@ router.post('/', validate(createFlowSchema), flowController.createFlow);
  *       401:
  *         description: Unauthorized
  */
-router.put('/:id', validate(updateFlowSchema), flowController.updateFlow);
+router.put("/:id", validate(updateFlowSchema), flowController.updateFlow);
 
 /**
  * @swagger
@@ -172,7 +196,11 @@ router.put('/:id', validate(updateFlowSchema), flowController.updateFlow);
  *       401:
  *         description: Unauthorized
  */
-router.put('/:id/diagram', validate(updateDiagramStateSchema), flowController.updateDiagramState);
+router.put(
+  "/:id/diagram",
+  validate(updateDiagramStateSchema),
+  flowController.updateDiagramState,
+);
 
 /**
  * @swagger
@@ -194,7 +222,7 @@ router.put('/:id/diagram', validate(updateDiagramStateSchema), flowController.up
  *       401:
  *         description: Unauthorized
  */
-router.delete('/:id', validate(idParamSchema), flowController.deleteFlow);
+router.delete("/:id", validate(idParamSchema), flowController.deleteFlow);
 
 /**
  * @swagger
@@ -218,24 +246,48 @@ router.delete('/:id', validate(idParamSchema), flowController.deleteFlow);
  *       404:
  *         description: Flow not found
  */
-router.post('/:id/duplicate', validate(idParamSchema), flowController.duplicateFlow);
+router.post(
+  "/:id/duplicate",
+  validate(idParamSchema),
+  flowController.duplicateFlow,
+);
 
-router.post('/:id/restore', validate(idParamSchema), flowController.restoreFlow);
+router.post(
+  "/:id/restore",
+  validate(idParamSchema),
+  flowController.restoreFlow,
+);
 
-router.delete('/:id/permanent', validate(idParamSchema), flowController.permanentDeleteFlow);
+router.delete(
+  "/:id/permanent",
+  validate(idParamSchema),
+  flowController.permanentDeleteFlow,
+);
 
 // ==================== SHARING ROUTES ====================
 
 // Share a flow with users
-router.post('/:id/share', validate(shareFlowSchema), flowController.shareFlow);
+router.post("/:id/share", validate(shareFlowSchema), flowController.shareFlow);
 
 // Get all shares for a flow
-router.get('/:id/shares', validate(idParamSchema), flowController.getFlowShares);
+router.get(
+  "/:id/shares",
+  validate(idParamSchema),
+  flowController.getFlowShares,
+);
 
 // Update share permission
-router.put('/:id/shares/:shareId', validate(updateShareSchema), flowController.updateShare);
+router.put(
+  "/:id/shares/:shareId",
+  validate(updateShareSchema),
+  flowController.updateShare,
+);
 
 // Remove a share
-router.delete('/:id/shares/:shareId', validate(shareIdParamSchema), flowController.removeShare);
+router.delete(
+  "/:id/shares/:shareId",
+  validate(shareIdParamSchema),
+  flowController.removeShare,
+);
 
 module.exports = router;
