@@ -1,10 +1,16 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const userController = require('../controllers/user.controller');
-const { authenticate } = require('../middleware/auth.middleware');
-const validate = require('../middleware/validate');
-const { authLimiter } = require('../middleware/rateLimiter');
-const { updateUserSchema, changePasswordSchema, forgotPasswordSchema, resetPasswordSchema, idParamSchema } = require('../validators/user.validator');
+const userController = require("../controllers/user.controller");
+const { authenticate } = require("../middleware/auth.middleware");
+const validate = require("../middleware/validate");
+const { authLimiter } = require("../middleware/rateLimiter");
+const {
+  updateUserSchema,
+  changePasswordSchema,
+  forgotPasswordSchema,
+  resetPasswordSchema,
+  idParamSchema,
+} = require("../validators/user.validator");
 
 /**
  * @swagger
@@ -20,7 +26,21 @@ const { updateUserSchema, changePasswordSchema, forgotPasswordSchema, resetPassw
  *       401:
  *         description: Unauthorized
  */
-router.get('/me', authenticate, userController.getMe);
+router.get("/me", authenticate, userController.getMe);
+
+/**
+ * @swagger
+ * /api/v1/users/team-context:
+ *   get:
+ *     summary: Get personal plan + available team contexts the user can switch into
+ *     tags: [Users]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Personal plan and a list of teams (with the owner's plan) the user belongs to
+ */
+router.get("/team-context", authenticate, userController.getTeamContext);
 
 /**
  * @swagger
@@ -45,7 +65,12 @@ router.get('/me', authenticate, userController.getMe);
  *       429:
  *         description: Rate limited
  */
-router.post('/forgot-password', authLimiter, validate(forgotPasswordSchema), userController.forgotPassword);
+router.post(
+  "/forgot-password",
+  authLimiter,
+  validate(forgotPasswordSchema),
+  userController.forgotPassword,
+);
 
 /**
  * @swagger
@@ -72,7 +97,12 @@ router.post('/forgot-password', authLimiter, validate(forgotPasswordSchema), use
  *       400:
  *         description: Invalid or expired token
  */
-router.post('/reset-password', authLimiter, validate(resetPasswordSchema), userController.resetPassword);
+router.post(
+  "/reset-password",
+  authLimiter,
+  validate(resetPasswordSchema),
+  userController.resetPassword,
+);
 
 /**
  * @swagger
@@ -101,7 +131,12 @@ router.post('/reset-password', authLimiter, validate(resetPasswordSchema), userC
  *       401:
  *         description: Current password incorrect
  */
-router.put('/change-password', authenticate, validate(changePasswordSchema), userController.changePassword);
+router.put(
+  "/change-password",
+  authenticate,
+  validate(changePasswordSchema),
+  userController.changePassword,
+);
 
 /**
  * @swagger
@@ -123,7 +158,12 @@ router.put('/change-password', authenticate, validate(changePasswordSchema), use
  *       404:
  *         description: User not found
  */
-router.get('/:id', authenticate, validate(idParamSchema), userController.getUserById);
+router.get(
+  "/:id",
+  authenticate,
+  validate(idParamSchema),
+  userController.getUserById,
+);
 
 /**
  * @swagger
@@ -160,7 +200,12 @@ router.get('/:id', authenticate, validate(idParamSchema), userController.getUser
  *       409:
  *         description: Email already in use
  */
-router.put('/:id', authenticate, validate(updateUserSchema), userController.updateUser);
+router.put(
+  "/:id",
+  authenticate,
+  validate(updateUserSchema),
+  userController.updateUser,
+);
 
 /**
  * @swagger
@@ -180,6 +225,11 @@ router.put('/:id', authenticate, validate(updateUserSchema), userController.upda
  *       200:
  *         description: User deactivated
  */
-router.delete('/:id', authenticate, validate(idParamSchema), userController.deleteUser);
+router.delete(
+  "/:id",
+  authenticate,
+  validate(idParamSchema),
+  userController.deleteUser,
+);
 
 module.exports = router;

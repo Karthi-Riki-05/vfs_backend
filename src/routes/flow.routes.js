@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const flowController = require("../controllers/flow.controller");
 const { authenticate } = require("../middleware/auth.middleware");
+const { aiLimiter } = require("../middleware/rateLimiter");
 const validate = require("../middleware/validate");
 const {
   createFlowSchema,
@@ -18,7 +19,7 @@ const {
 router.use(authenticate);
 
 // AI: generate VSM diagram from uploaded PDF/Word — must be before /:id matchers
-router.post("/ai-from-doc", flowController.generateFromDocument);
+router.post("/ai-from-doc", aiLimiter, flowController.generateFromDocument);
 
 // Version history
 router.get(

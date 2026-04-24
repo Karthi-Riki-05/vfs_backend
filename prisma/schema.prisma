@@ -117,6 +117,7 @@ enum FeedbackType {
 enum UserVersion {
   free
   pro
+  team
 }
 
 // ============================================================
@@ -124,18 +125,18 @@ enum UserVersion {
 // ============================================================
 
 model Account {
-  id                 String  @id @default(cuid())
-  userId             String
-  type               String
-  provider           String  // google, facebook, linkedin, credentials, apple
-  providerAccountId  String
-  refresh_token      String? @db.Text
-  access_token       String? @db.Text
-  expires_at         Int?
-  token_type         String?
-  scope              String?
-  id_token           String? @db.Text
-  session_state      String?
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String // google, facebook, linkedin, credentials, apple
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -152,7 +153,7 @@ model Session {
 
 model VerificationToken {
   identifier String
-  token      String @unique
+  token      String   @unique
   expires    DateTime
 
   @@unique([identifier, token])
@@ -167,100 +168,111 @@ model VerificationToken {
 // ============================================================
 
 model User {
-  id            String      @id @default(cuid())
+  id            String    @id @default(cuid())
   name          String?
-  email         String?     @unique
+  email         String?   @unique
   emailVerified DateTime?
   image         String?
   password      String?
-  rememberToken String?     @map("remember_token")
-  role          String      @default("Viewer")  // App-level role (Viewer, Editor, Admin)
+  rememberToken String?   @map("remember_token")
+  role          String    @default("Viewer") // App-level role (Viewer, Editor, Admin)
 
   // --- Legacy migration traceability ---
-  legacyVsId    Int?        @map("legacy_vs_id")   // Original value_stream.users.id
-  legacyEntId   Int?        @map("legacy_ent_id")  // Original ent_value_chart.users.id
-  legacyIndId   Int?        @map("legacy_ind_id")  // Original ind_value_chart.users.id
+  legacyVsId  Int? @map("legacy_vs_id") // Original value_stream.users.id
+  legacyEntId Int? @map("legacy_ent_id") // Original ent_value_chart.users.id
+  legacyIndId Int? @map("legacy_ind_id") // Original ind_value_chart.users.id
 
   // --- Fields from legacy value_stream.users ---
-  contactNo     String?     @map("contact_no")
-  photo         String?
-  userType      UserType    @default(free_user) @map("user_type")
-  userStatus    UserStatus  @default(success)   @map("user_status")
-  clientType    ClientType  @default(web)       @map("client_type")
-  welcomeUser   Boolean     @default(true)      @map("welcome_user")
-  companyId     Int?        @map("company_id")  // From ind_value_chart.users
-  stripeCustomerId String?  @map("stripe_customer_id")
+  contactNo        String?    @map("contact_no")
+  photo            String?
+  userType         UserType   @default(free_user) @map("user_type")
+  userStatus       UserStatus @default(success) @map("user_status")
+  clientType       ClientType @default(web) @map("client_type")
+  welcomeUser      Boolean    @default(true) @map("welcome_user")
+  companyId        Int?       @map("company_id") // From ind_value_chart.users
+  stripeCustomerId String?    @map("stripe_customer_id")
 
   // --- ValueChart Pro fields ---
-  hasPro                     Boolean      @default(false) @map("has_pro")
-  proPurchasedAt             DateTime?    @map("pro_purchased_at")
-  proFlowLimit               Int          @default(10)    @map("pro_flow_limit")
-  proAdditionalFlowsPurchased Int         @default(0)     @map("pro_additional_flows_purchased")
-  proUnlimitedFlows          Boolean      @default(false) @map("pro_unlimited_flows")
-  currentVersion             UserVersion  @default(free)  @map("current_version")
-  refreshToken               String?      @db.Text        @map("refresh_token")
+  hasPro                      Boolean     @default(false) @map("has_pro")
+  proPurchasedAt              DateTime?   @map("pro_purchased_at")
+  proFlowLimit                Int         @default(10) @map("pro_flow_limit")
+  proAdditionalFlowsPurchased Int         @default(0) @map("pro_additional_flows_purchased")
+  proUnlimitedFlows           Boolean     @default(false) @map("pro_unlimited_flows")
+  currentVersion              UserVersion @default(free) @map("current_version")
+  refreshToken                String?     @map("refresh_token") @db.Text
 
   // --- Granular permissions (from legacy) ---
-  pFlowRead     Boolean     @default(false)     @map("p_flow_read")
-  pFlowModify   Boolean     @default(false)     @map("p_flow_modify")
-  pUserRead     Boolean     @default(false)     @map("p_user_read")
-  pUserModify   Boolean     @default(false)     @map("p_user_modify")
-  pShapeRead    Boolean     @default(false)     @map("p_shape_read")
-  pShapeModify  Boolean     @default(false)     @map("p_shape_modify")
-  chatEnabled   Boolean     @default(false)     @map("chat_enabled")
+  pFlowRead    Boolean @default(false) @map("p_flow_read")
+  pFlowModify  Boolean @default(false) @map("p_flow_modify")
+  pUserRead    Boolean @default(false) @map("p_user_read")
+  pUserModify  Boolean @default(false) @map("p_user_modify")
+  pShapeRead   Boolean @default(false) @map("p_shape_read")
+  pShapeModify Boolean @default(false) @map("p_shape_modify")
+  chatEnabled  Boolean @default(false) @map("chat_enabled")
 
   // --- Role reference (legacy) ---
-  roleId        String?     @map("role_id")
-  userRole      Role?       @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  roleId   String? @map("role_id")
+  userRole Role?   @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
+  // --- Super admin fields ---
+  adminNote   String?   @map("admin_note") @db.Text
+  suspendedAt DateTime? @map("suspended_at")
+  suspendedBy String?   @map("suspended_by")
 
   // --- Timestamps ---
-  createdAt     DateTime    @default(now()) @map("created_at")
-  updatedAt     DateTime    @updatedAt      @map("updated_at")
-  lastSeen      DateTime?   @map("last_seen")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  lastSeen  DateTime? @map("last_seen")
 
   // --- Relations ---
-  accounts            Account[]
-  sessions            Session[]
-  flows               Flow[]
-  shapeGroups         ShapeGroup[]
-  shapes              Shape[]
-  subscription        Subscription?
-  firebaseUser        FirebaseUser?
-  usersApps           UserApp[]
-  ownedTeams          Team[]
-  teamMemberships     TeamMember[]
-  flowGroupUsers      FlowGroupUser[]       @relation("FlowGroupUserUser")
-  flowGroupCreated    FlowGroupUser[]       @relation("FlowGroupUserCreator")
-  flowLimits          FlowLimit[]
-  flowPublishes       FlowPublish[]
-  chatGroupsCreated   ChatGroup[]
-  chatGroupMembers    ChatGroupUser[]
-  chatMessagesSent    ChatMessage[]
-  chatMsgSender       ChatMessageUser[]     @relation("ChatMsgSender")
-  chatMsgReceiver     ChatMessageUser[]     @relation("ChatMsgReceiver")
-  conversations       ConversationUser[]
-  messages            Message[]
+  accounts             Account[]
+  sessions             Session[]
+  flows                Flow[]
+  shapeGroups          ShapeGroup[]
+  shapes               Shape[]
+  subscription         Subscription?
+  firebaseUser         FirebaseUser?
+  usersApps            UserApp[]
+  ownedTeams           Team[]
+  teamMemberships      TeamMember[]
+  flowGroupUsers       FlowGroupUser[]       @relation("FlowGroupUserUser")
+  flowGroupCreated     FlowGroupUser[]       @relation("FlowGroupUserCreator")
+  flowLimits           FlowLimit[]
+  flowPublishes        FlowPublish[]
+  chatGroupsCreated    ChatGroup[]
+  chatGroupMembers     ChatGroupUser[]
+  chatMessagesSent     ChatMessage[]
+  chatMsgSender        ChatMessageUser[]     @relation("ChatMsgSender")
+  chatMsgReceiver      ChatMessageUser[]     @relation("ChatMsgReceiver")
+  conversations        ConversationUser[]
+  messages             Message[]
   messageNotifications MessageNotification[]
-  userActions         UserAction[]
-  userInterests       UserInterest[]
-  userFreeTrial       UserFreeTrial?
-  feedbackQueries     FeedbackQuery[]
-  vsmOptions          VsmOption[]
-  issuesCreated       IssueItem[]
-  subQueue            SubscriptionQueue[]
-  addUserSubs         AddUserSubscription[]
-  projects            Project[]
-  proFlowPurchases    ProFlowPurchase[]
-  teamInvitesSent     TeamInvite[]          @relation("TeamInviteSender")
-  teamInvitesAccepted TeamInvite[]          @relation("TeamInviteAcceptor")
-  flowSharesGiven     FlowShare[]           @relation("FlowShareSharedBy")
-  flowSharesReceived  FlowShare[]           @relation("FlowShareSharedWith")
-  aiConsent           AiConsent?
-  aiConversations     AiConversation[]
-  flowVersions        FlowVersion[]         @relation("FlowVersionSavedBy")
+  userActions          UserAction[]
+  userInterests        UserInterest[]
+  userFreeTrial        UserFreeTrial?
+  feedbackQueries      FeedbackQuery[]
+  vsmOptions           VsmOption[]
+  issuesCreated        IssueItem[]
+  subQueue             SubscriptionQueue[]
+  addUserSubs          AddUserSubscription[]
+  projects             Project[]
+  proFlowPurchases     ProFlowPurchase[]
+  teamInvitesSent      TeamInvite[]          @relation("TeamInviteSender")
+  teamInvitesAccepted  TeamInvite[]          @relation("TeamInviteAcceptor")
+  flowSharesGiven      FlowShare[]           @relation("FlowShareSharedBy")
+  flowSharesReceived   FlowShare[]           @relation("FlowShareSharedWith")
+  aiConsent            AiConsent?
+  aiConversations      AiConversation[]
+  aiCreditBalance      AiCreditBalance?
+  aiCreditUsages       AiCreditUsage[]
+  flowVersions         FlowVersion[]         @relation("FlowVersionSavedBy")
+  adminLogsGiven       AdminLog[]            @relation("AdminLogAdmin")
+  adminLogsReceived    AdminLog[]            @relation("AdminLogTarget")
+  subscriptionHistory  SubscriptionHistory[]
 
   @@index([legacyVsId])
   @@index([companyId])
+  @@index([suspendedAt])
   @@map("users")
 }
 
@@ -275,7 +287,7 @@ model Role {
   title     String
   users     User[]
   createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt      @map("updated_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("roles")
 }
@@ -304,10 +316,10 @@ model FirebaseUser {
   id          String    @id @default(cuid())
   userId      String    @unique @map("user_id")
   user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  fcmUsername  String?   @map("fcm_username")
-  fcmPassword  String?  @map("fcm_password")
-  fcmUserId    String?  @map("fcm_user_id")
-  fcmToken     String?  @db.Text @map("fcm_token")
+  fcmUsername String?   @map("fcm_username")
+  fcmPassword String?   @map("fcm_password")
+  fcmUserId   String?   @map("fcm_user_id")
+  fcmToken    String?   @map("fcm_token") @db.Text
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime? @map("updated_at")
   deletedAt   DateTime? @map("deleted_at")
@@ -324,7 +336,7 @@ model App {
   id        String    @id @default(cuid())
   legacyId  Int?      @unique @map("legacy_id")
   appName   String?   @map("app_name")
-  dbName    String?   @map("db_name")   // Legacy reference
+  dbName    String?   @map("db_name") // Legacy reference
   userApps  UserApp[]
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @map("updated_at")
@@ -357,33 +369,33 @@ model UserApp {
 // ============================================================
 
 model Plan {
-  id               String          @id @default(cuid())
-  legacyId         Int?            @map("legacy_id")
-  legacySource     String?         @map("legacy_source")
-  name             String          @unique
-  duration         PlanDuration    @default(monthly)
-  noDuration       String?         @map("no_duration")
+  id               String                @id @default(cuid())
+  legacyId         Int?                  @map("legacy_id")
+  legacySource     String?               @map("legacy_source")
+  name             String                @unique
+  duration         PlanDuration          @default(monthly)
+  noDuration       String?               @map("no_duration")
   price            Float
-  freeTrial        Int?            @default(0) @map("free_trial")
-  gracePeriod      Int?            @default(0) @map("grace_period")
-  userAccess       Boolean         @default(false) @map("user_access")
-  userCount        Int?            @map("user_count")
-  userCost         Float?          @map("user_cost")
-  status           PlanStatus      @default(active)
-  permissionAccess Json?           @map("permission_access")  // JSONB
-  features         Json?                                       // Benefits/features as JSON
-  tier             Int             @default(0)
-  colorPick        String?         @map("color_pick")
+  freeTrial        Int?                  @default(0) @map("free_trial")
+  gracePeriod      Int?                  @default(0) @map("grace_period")
+  userAccess       Boolean               @default(false) @map("user_access")
+  userCount        Int?                  @map("user_count")
+  userCost         Float?                @map("user_cost")
+  status           PlanStatus            @default(active)
+  permissionAccess Json?                 @map("permission_access") // JSONB
+  features         Json? // Benefits/features as JSON
+  tier             Int                   @default(0)
+  colorPick        String?               @map("color_pick")
   fontname         String?
-  subPlanId        Json?           @map("sub_plan_id")
-  subTopId         String?         @map("sub_top_id")
-  appType          AppType?        @map("app_type")
+  subPlanId        Json?                 @map("sub_plan_id")
+  subTopId         String?               @map("sub_top_id")
+  appType          AppType?              @map("app_type")
   subscriptions    Subscription[]
   subQueue         SubscriptionQueue[]
   addUserSubs      AddUserSubscription[]
-  createdAt        DateTime        @default(now()) @map("created_at")
-  updatedAt        DateTime?       @map("updated_at")
-  deletedAt        DateTime?       @map("deleted_at")
+  createdAt        DateTime              @default(now()) @map("created_at")
+  updatedAt        DateTime?             @map("updated_at")
+  deletedAt        DateTime?             @map("deleted_at")
 
   @@index([appType])
   @@map("plans")
@@ -395,38 +407,38 @@ model Plan {
 // ============================================================
 
 model Subscription {
-  id            String        @id @default(cuid())
-  legacyId      Int?          @map("legacy_id")
-  legacySource  String?       @map("legacy_source")
-  userId        String        @unique @map("user_id")
-  planId        String        @map("plan_id")
-  user          User          @relation(fields: [userId], references: [id])
-  plan          Plan          @relation(fields: [planId], references: [id])
-  paymentId     String?       @map("payment_id")
-  price         Float         @default(0)
-  currency      String?       @default("usd")
-  permission    Json?                                    // JSON array of permission strings
-  isRecurring   Boolean       @default(false) @map("is_recurring")
-  deviceType    ClientType    @default(web)   @map("device_type")
-  appType       AppType?      @map("app_type")
-  usersCount    Int?          @map("users_count")
-  flowsCount    String?       @map("flows_count")
-  subType       SubType?      @map("sub_type")
-  productType   ProductType?  @map("product_type")
-  paidApp       Boolean       @default(false) @map("paid_app")
-  freeTrial     Int?          @map("free_trial")
-  gracePeriod   Int?          @map("grace_period")
-  startedAt     DateTime?     @map("started_at")
-  status        String        @default("active")
-  expiresAt     DateTime?     @map("expires_at")         // was plan_endat
-  createdAt     DateTime      @default(now()) @map("created_at")
-  updatedAt     DateTime      @updatedAt      @map("updated_at")
-  deletedAt     DateTime?     @map("deleted_at")
+  id           String       @id @default(cuid())
+  legacyId     Int?         @map("legacy_id")
+  legacySource String?      @map("legacy_source")
+  userId       String       @unique @map("user_id")
+  planId       String       @map("plan_id")
+  user         User         @relation(fields: [userId], references: [id])
+  plan         Plan         @relation(fields: [planId], references: [id])
+  paymentId    String?      @map("payment_id")
+  price        Float        @default(0)
+  currency     String?      @default("usd")
+  permission   Json? // JSON array of permission strings
+  isRecurring  Boolean      @default(false) @map("is_recurring")
+  deviceType   ClientType   @default(web) @map("device_type")
+  appType      AppType?     @map("app_type")
+  usersCount   Int?         @map("users_count")
+  flowsCount   String?      @map("flows_count")
+  subType      SubType?     @map("sub_type")
+  productType  ProductType? @map("product_type")
+  paidApp      Boolean      @default(false) @map("paid_app")
+  freeTrial    Int?         @map("free_trial")
+  gracePeriod  Int?         @map("grace_period")
+  startedAt    DateTime?    @map("started_at")
+  status       String       @default("active")
+  expiresAt    DateTime?    @map("expires_at") // was plan_endat
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+  deletedAt    DateTime?    @map("deleted_at")
 
   // Scheduled plan change (monthly → yearly)
-  scheduledPlanType       String?    @map("scheduled_plan_type")
-  scheduledTeamMembers    Int?       @map("scheduled_team_members")
-  scheduledActivationDate DateTime?  @map("scheduled_activation_date")
+  scheduledPlanType       String?   @map("scheduled_plan_type")
+  scheduledTeamMembers    Int?      @map("scheduled_team_members")
+  scheduledActivationDate DateTime? @map("scheduled_activation_date")
 
   @@index([appType])
   @@index([status])
@@ -439,25 +451,25 @@ model Subscription {
 // ============================================================
 
 model SubscriptionQueue {
-  id           String        @id @default(cuid())
-  userId       String        @map("user_id")
-  planId       String        @map("plan_id")
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plan         Plan          @relation(fields: [planId], references: [id])
-  paymentId    String        @map("payment_id")
-  price        Float
-  currency     String?
-  permission   Json?
-  deviceType   ClientType    @default(web) @map("device_type")
-  appType      AppType?      @map("app_type")
-  usersCount   Int?          @map("users_count")
-  flowsCount   String?       @map("flows_count")
-  subType      SubType?      @map("sub_type")
-  productType  ProductType?  @map("product_type")
-  startDate    DateTime?     @map("start_date")
-  planEndat    DateTime?     @map("plan_endat")
-  createdAt    DateTime      @default(now()) @map("created_at")
-  updatedAt    DateTime?     @map("updated_at")
+  id          String       @id @default(cuid())
+  userId      String       @map("user_id")
+  planId      String       @map("plan_id")
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan        Plan         @relation(fields: [planId], references: [id])
+  paymentId   String       @map("payment_id")
+  price       Float
+  currency    String?
+  permission  Json?
+  deviceType  ClientType   @default(web) @map("device_type")
+  appType     AppType?     @map("app_type")
+  usersCount  Int?         @map("users_count")
+  flowsCount  String?      @map("flows_count")
+  subType     SubType?     @map("sub_type")
+  productType ProductType? @map("product_type")
+  startDate   DateTime?    @map("start_date")
+  planEndat   DateTime?    @map("plan_endat")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime?    @map("updated_at")
 
   @@map("subscription_queue")
 }
@@ -468,20 +480,20 @@ model SubscriptionQueue {
 // ============================================================
 
 model AddUserSubscription {
-  id              String    @id @default(cuid())
-  paymentId       String?   @map("payment_id")
-  subscriptionId  String?   @map("subscription_id")
-  teamId          String?   @map("team_id")
-  planId          String?   @map("plan_id")
-  userId          String    @map("user_id")
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plan            Plan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
-  price           Float?
-  currency        String?
-  usersAdd        Int?      @map("users_add")
-  payDate         DateTime? @map("pay_date")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime? @map("updated_at")
+  id             String    @id @default(cuid())
+  paymentId      String?   @map("payment_id")
+  subscriptionId String?   @map("subscription_id")
+  teamId         String?   @map("team_id")
+  planId         String?   @map("plan_id")
+  userId         String    @map("user_id")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan           Plan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
+  price          Float?
+  currency       String?
+  usersAdd       Int?      @map("users_add")
+  payDate        DateTime? @map("pay_date")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime? @map("updated_at")
 
   @@map("add_user_subscriptions")
 }
@@ -492,23 +504,25 @@ model AddUserSubscription {
 // ============================================================
 
 model Team {
-  id            String        @id @default(cuid())
-  legacyId      Int?          @map("legacy_id")
-  name          String?
-  description   String?
-  teamOwnerId   String        @map("team_owner_id")
-  owner         User          @relation(fields: [teamOwnerId], references: [id], onDelete: Cascade)
-  teamMem       Int           @default(0)  @map("team_mem")     // Max members allowed
-  countMem      Int           @default(0)  @map("count_mem")    // Current member count
-  appType       AppType?      @map("app_type")
-  appContext    UserVersion   @default(free) @map("app_context")
-  verifyTeam    String?       @map("verify_team")
-  status        PlanStatus    @default(active)
-  members       TeamMember[]
-  invites       TeamInvite[]
-  createdAt     DateTime      @default(now()) @map("created_at")
-  updatedAt     DateTime?     @map("updated_at")
-  deletedAt     DateTime?     @map("deleted_at")
+  id          String       @id @default(cuid())
+  legacyId    Int?         @map("legacy_id")
+  name        String?
+  description String?
+  teamOwnerId String       @map("team_owner_id")
+  owner       User         @relation(fields: [teamOwnerId], references: [id], onDelete: Cascade)
+  teamMem     Int          @default(0) @map("team_mem") // Max members allowed
+  countMem    Int          @default(0) @map("count_mem") // Current member count
+  appType     AppType?     @map("app_type")
+  appContext  UserVersion  @default(free) @map("app_context")
+  verifyTeam  String?      @map("verify_team")
+  status      PlanStatus   @default(active)
+  members     TeamMember[]
+  invites     TeamInvite[]
+  flows       Flow[]
+  chatGroups  ChatGroup[]
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime?    @map("updated_at")
+  deletedAt   DateTime?    @map("deleted_at")
 
   @@index([teamOwnerId])
   @@index([appContext])
@@ -520,21 +534,21 @@ model Team {
 // ============================================================
 
 model TeamInvite {
-  id          String      @id @default(cuid())
-  teamId      String      @map("team_id")
-  team        Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  email       String
-  token       String      @unique
-  status      String      @default("pending") // pending, accepted, expired
-  invitedBy   String?     @map("invited_by")
-  inviter     User?       @relation("TeamInviteSender", fields: [invitedBy], references: [id], onDelete: SetNull)
-  acceptedBy  String?     @map("accepted_by")
-  acceptor    User?       @relation("TeamInviteAcceptor", fields: [acceptedBy], references: [id], onDelete: SetNull)
-  role        String      @default("MEMBER") // OWNER, ADMIN, MEMBER
-  appContext  UserVersion @default(free) @map("app_context")
-  expiresAt   DateTime    @map("expires_at")
-  acceptedAt  DateTime?   @map("accepted_at")
-  createdAt   DateTime    @default(now()) @map("created_at")
+  id         String      @id @default(cuid())
+  teamId     String      @map("team_id")
+  team       Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  email      String
+  token      String      @unique
+  status     String      @default("pending") // pending, accepted, expired
+  invitedBy  String?     @map("invited_by")
+  inviter    User?       @relation("TeamInviteSender", fields: [invitedBy], references: [id], onDelete: SetNull)
+  acceptedBy String?     @map("accepted_by")
+  acceptor   User?       @relation("TeamInviteAcceptor", fields: [acceptedBy], references: [id], onDelete: SetNull)
+  role       String      @default("MEMBER") // OWNER, ADMIN, MEMBER
+  appContext UserVersion @default(free) @map("app_context")
+  expiresAt  DateTime    @map("expires_at")
+  acceptedAt DateTime?   @map("accepted_at")
+  createdAt  DateTime    @default(now()) @map("created_at")
 
   @@index([teamId])
   @@index([token])
@@ -570,47 +584,52 @@ model TeamMember {
 // ============================================================
 
 model Flow {
-  id            String          @id @default(cuid())
-  legacyId      Int?            @map("legacy_id")
-  legacySource  String?         @map("legacy_source")  // ent_value_chart or ind_value_chart
-  name          String
-  description   String?
-  thumbnail     String?
-  diagramData   String?         @db.Text @default("") @map("diagram_data")  // was flow_data
-  isPublic      Boolean         @default(false) @map("is_public")
-  isFavorite    Boolean         @default(false) @map("is_favorite")
-  ownerId       String          @map("owner_id")
-  owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  projectId     String?         @map("project_id")
-  project       Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  appType       AppType?        @map("app_type")
-  appContext    UserVersion     @default(free) @map("app_context")
-  version       Int             @default(1)
+  id             String          @id @default(cuid())
+  legacyId       Int?            @map("legacy_id")
+  legacySource   String?         @map("legacy_source") // ent_value_chart or ind_value_chart
+  name           String
+  description    String?
+  thumbnail      String?
+  diagramData    String?         @default("") @map("diagram_data") @db.Text // was flow_data
+  isPublic       Boolean         @default(false) @map("is_public")
+  isFavorite     Boolean         @default(false) @map("is_favorite")
+  ownerId        String          @map("owner_id")
+  owner          User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  projectId      String?         @map("project_id")
+  project        Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  // Workspace scoping: null = personal, non-null = belongs to that team.
+  // When a team is deleted, team flows fall back to personal (teamId → null).
+  teamId         String?         @map("team_id")
+  team           Team?           @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  appType        AppType?        @map("app_type")
+  appContext     UserVersion     @default(free) @map("app_context")
+  version        Int             @default(1)
   flowGroupUsers FlowGroupUser[]
   flowPublishes  FlowPublish[]
   flowShares     FlowShare[]
   versions       FlowVersion[]
-  createdAt     DateTime        @default(now()) @map("created_at")
-  updatedAt     DateTime        @updatedAt      @map("updated_at")
-  deletedAt     DateTime?       @map("deleted_at")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+  deletedAt      DateTime?       @map("deleted_at")
 
   @@index([ownerId])
   @@index([appType])
   @@index([appContext])
   @@index([projectId])
+  @@index([teamId])
   @@index([legacyId, legacySource])
   @@map("flows")
 }
 
 model FlowVersion {
-  id          String   @id @default(cuid())
-  flowId      String   @map("flow_id")
-  flow        Flow     @relation(fields: [flowId], references: [id], onDelete: Cascade)
-  xml         String   @db.Text
-  thumbnail   String?  @db.Text
-  savedById   String   @map("saved_by_id")
-  savedBy     User     @relation("FlowVersionSavedBy", fields: [savedById], references: [id], onDelete: Cascade)
-  createdAt   DateTime @default(now()) @map("created_at")
+  id        String   @id @default(cuid())
+  flowId    String   @map("flow_id")
+  flow      Flow     @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  xml       String   @db.Text
+  thumbnail String?  @db.Text
+  savedById String   @map("saved_by_id")
+  savedBy   User     @relation("FlowVersionSavedBy", fields: [savedById], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
 
   @@index([flowId])
   @@index([savedById])
@@ -624,24 +643,24 @@ model FlowVersion {
 // ============================================================
 
 model FlowGroupUser {
-  id              String      @id @default(cuid())
-  legacyId        Int?        @map("legacy_id")
-  legacySource    String?     @map("legacy_source")
-  flowId          String      @map("flow_id")
-  flow            Flow        @relation(fields: [flowId], references: [id], onDelete: Cascade)
-  userId          String      @map("user_id")
-  user            User        @relation("FlowGroupUserUser", fields: [userId], references: [id], onDelete: Cascade)
-  groupId         String?     @map("group_id")
-  group           ShapeGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  typeFlowShare   YesNo       @default(no) @map("type_flow_share")
-  typeFlowChat    YesNo       @default(no) @map("type_flow_chat")
-  teamId          Int         @default(0)  @map("team_id")
-  createdById     String?     @map("created_by_id")
-  createdBy       User?       @relation("FlowGroupUserCreator", fields: [createdById], references: [id], onDelete: SetNull)
-  appType         AppType     @map("app_type")
-  createdAt       DateTime    @default(now()) @map("created_at")
-  updatedAt       DateTime?   @map("updated_at")
-  deletedAt       DateTime?   @map("deleted_at")
+  id            String      @id @default(cuid())
+  legacyId      Int?        @map("legacy_id")
+  legacySource  String?     @map("legacy_source")
+  flowId        String      @map("flow_id")
+  flow          Flow        @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  userId        String      @map("user_id")
+  user          User        @relation("FlowGroupUserUser", fields: [userId], references: [id], onDelete: Cascade)
+  groupId       String?     @map("group_id")
+  group         ShapeGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  typeFlowShare YesNo       @default(no) @map("type_flow_share")
+  typeFlowChat  YesNo       @default(no) @map("type_flow_chat")
+  teamId        Int         @default(0) @map("team_id")
+  createdById   String?     @map("created_by_id")
+  createdBy     User?       @relation("FlowGroupUserCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  appType       AppType     @map("app_type")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime?   @map("updated_at")
+  deletedAt     DateTime?   @map("deleted_at")
 
   @@index([flowId])
   @@index([userId])
@@ -655,17 +674,17 @@ model FlowGroupUser {
 // ============================================================
 
 model FlowLimit {
-  id            String    @id @default(cuid())
-  legacyId      Int?      @map("legacy_id")
-  legacySource  String?   @map("legacy_source")
-  userId        String    @map("user_id")
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  totCount      Int?      @map("tot_count")      // Total allowed flows
-  flowUsed      Int?      @map("flow_used")      // Currently used
-  flowIds       String?   @map("flow_ids")       // Comma-separated flow IDs
-  appType       AppType   @map("app_type")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime? @map("updated_at")
+  id           String    @id @default(cuid())
+  legacyId     Int?      @map("legacy_id")
+  legacySource String?   @map("legacy_source")
+  userId       String    @map("user_id")
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  totCount     Int?      @map("tot_count") // Total allowed flows
+  flowUsed     Int?      @map("flow_used") // Currently used
+  flowIds      String?   @map("flow_ids") // Comma-separated flow IDs
+  appType      AppType   @map("app_type")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime? @map("updated_at")
 
   @@index([userId])
   @@map("flow_limits")
@@ -677,17 +696,17 @@ model FlowLimit {
 // ============================================================
 
 model FlowPublish {
-  id            String    @id @default(cuid())
-  legacyId      Int?      @map("legacy_id")
-  legacySource  String?   @map("legacy_source")
-  flowId        String    @map("flow_id")
-  flow          Flow      @relation(fields: [flowId], references: [id], onDelete: Cascade)
-  userId        String    @map("user_id")
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  flowData      String?   @db.Text @map("flow_data")
-  appType       AppType   @map("app_type")
-  createdAt     DateTime? @map("created_at")
-  updatedAt     DateTime? @map("updated_at")
+  id           String    @id @default(cuid())
+  legacyId     Int?      @map("legacy_id")
+  legacySource String?   @map("legacy_source")
+  flowId       String    @map("flow_id")
+  flow         Flow      @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  userId       String    @map("user_id")
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flowData     String?   @map("flow_data") @db.Text
+  appType      AppType   @map("app_type")
+  createdAt    DateTime? @map("created_at")
+  updatedAt    DateTime? @map("updated_at")
 
   @@index([flowId])
   @@map("flow_publishes")
@@ -704,17 +723,17 @@ enum SharePermission {
 }
 
 model FlowShare {
-  id            String          @id @default(cuid())
-  flowId        String          @map("flow_id")
-  flow          Flow            @relation(fields: [flowId], references: [id], onDelete: Cascade)
-  sharedById    String          @map("shared_by")
-  sharedBy      User            @relation("FlowShareSharedBy", fields: [sharedById], references: [id], onDelete: Cascade)
-  sharedWithId  String          @map("shared_with")
-  sharedWith    User            @relation("FlowShareSharedWith", fields: [sharedWithId], references: [id], onDelete: Cascade)
-  permission    SharePermission @default(view)
-  appContext    UserVersion     @default(free) @map("app_context")
-  createdAt     DateTime        @default(now()) @map("created_at")
-  updatedAt     DateTime        @updatedAt      @map("updated_at")
+  id           String          @id @default(cuid())
+  flowId       String          @map("flow_id")
+  flow         Flow            @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  sharedById   String          @map("shared_by")
+  sharedBy     User            @relation("FlowShareSharedBy", fields: [sharedById], references: [id], onDelete: Cascade)
+  sharedWithId String          @map("shared_with")
+  sharedWith   User            @relation("FlowShareSharedWith", fields: [sharedWithId], references: [id], onDelete: Cascade)
+  permission   SharePermission @default(view)
+  appContext   UserVersion     @default(free) @map("app_context")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
 
   @@unique([flowId, sharedWithId])
   @@index([sharedWithId])
@@ -730,21 +749,21 @@ model FlowShare {
 // ============================================================
 
 model ShapeGroup {
-  id            String          @id @default(cuid())
-  legacyId      Int?            @map("legacy_id")
-  legacySource  String?         @map("legacy_source")
-  name          String
-  userId        String          @map("user_id")
-  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  isPredefined  Boolean         @default(false) @map("is_predefined")
-  teamId        Int             @default(0) @map("team_id")
-  appType       AppType?        @map("app_type")
-  appContext    UserVersion     @default(free) @map("app_context")
-  shapes        Shape[]
+  id             String          @id @default(cuid())
+  legacyId       Int?            @map("legacy_id")
+  legacySource   String?         @map("legacy_source")
+  name           String
+  userId         String          @map("user_id")
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isPredefined   Boolean         @default(false) @map("is_predefined")
+  teamId         Int             @default(0) @map("team_id")
+  appType        AppType?        @map("app_type")
+  appContext     UserVersion     @default(free) @map("app_context")
+  shapes         Shape[]
   flowGroupUsers FlowGroupUser[]
-  createdAt     DateTime        @default(now()) @map("created_at")
-  updatedAt     DateTime?       @map("updated_at")
-  deletedAt     DateTime?       @map("deleted_at")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime?       @map("updated_at")
+  deletedAt      DateTime?       @map("deleted_at")
 
   @@index([appContext])
   @@map("shape_groups")
@@ -757,28 +776,28 @@ model ShapeGroup {
 // ============================================================
 
 model Shape {
-  id            String          @id @default(cuid())
-  legacyId      Int?            @map("legacy_id")
-  legacySource  String?         @map("legacy_source")
+  id            String      @id @default(cuid())
+  legacyId      Int?        @map("legacy_id")
+  legacySource  String?     @map("legacy_source")
   name          String
-  type          String          @default("stencil")
-  content       String?         @db.Text              // SVG/HTML/Base64 (was 'shape' in MySQL)
-  textAlignment String          @default("bottom") @map("text_alignment")
-  ratioLock     Boolean         @default(true) @map("ratio_lock")
-  shapeType     ShapeType       @default(img)    @map("shape_type")
-  groupId       String?         @map("group_id")
-  group         ShapeGroup?     @relation(fields: [groupId], references: [id], onDelete: SetNull)
-  ownerId       String          @map("owner_id")
-  owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  appType       AppType?        @map("app_type")
-  appContext    UserVersion     @default(free) @map("app_context")
+  type          String      @default("stencil")
+  content       String?     @db.Text // SVG/HTML/Base64 (was 'shape' in MySQL)
+  textAlignment String      @default("bottom") @map("text_alignment")
+  ratioLock     Boolean     @default(true) @map("ratio_lock")
+  shapeType     ShapeType   @default(img) @map("shape_type")
+  groupId       String?     @map("group_id")
+  group         ShapeGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  ownerId       String      @map("owner_id")
+  owner         User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  appType       AppType?    @map("app_type")
+  appContext    UserVersion @default(free) @map("app_context")
   category      String?
-  xmlContent    String?         @db.Text @map("xml_content")  // Legacy
+  xmlContent    String?     @map("xml_content") @db.Text // Legacy
   thumbnail     String?
-  isPublic      Boolean         @default(false) @map("is_public")
-  createdAt     DateTime        @default(now()) @map("created_at")
-  updatedAt     DateTime?       @map("updated_at")
-  deletedAt     DateTime?       @map("deleted_at")
+  isPublic      Boolean     @default(false) @map("is_public")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime?   @map("updated_at")
+  deletedAt     DateTime?   @map("deleted_at")
 
   @@index([groupId])
   @@index([appContext])
@@ -791,28 +810,30 @@ model Shape {
 // ============================================================
 
 model ChatGroup {
-  id            String            @id @default(cuid())
-  legacyId      Int?              @map("legacy_id")
-  legacySource  String?           @map("legacy_source")
-  title         String
-  picture       String?
-  userId        String            @map("user_id")
-  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  teamId        String?           @map("team_id")
-  companyId     Int?              @map("company_id")
-  flowId        Int               @default(0) @map("flow_id")
-  flowItemId    String            @default("") @map("flow_item_id")
-  appType       AppType?          @map("app_type")
-  appContext    UserVersion       @default(free) @map("app_context")
-  members       ChatGroupUser[]
-  messages      ChatMessage[]
-  msgUsers      ChatMessageUser[]
-  createdAt     DateTime?         @map("created_at")
-  updatedAt     DateTime?         @map("updated_at")
-  deletedAt     DateTime?         @map("deleted_at")
+  id           String            @id @default(cuid())
+  legacyId     Int?              @map("legacy_id")
+  legacySource String?           @map("legacy_source")
+  title        String
+  picture      String?
+  userId       String            @map("user_id")
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId       String?           @map("team_id")
+  team         Team?             @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  companyId    Int?              @map("company_id")
+  flowId       Int               @default(0) @map("flow_id")
+  flowItemId   String            @default("") @map("flow_item_id")
+  appType      AppType?          @map("app_type")
+  appContext   UserVersion       @default(free) @map("app_context")
+  members      ChatGroupUser[]
+  messages     ChatMessage[]
+  msgUsers     ChatMessageUser[]
+  createdAt    DateTime?         @map("created_at")
+  updatedAt    DateTime?         @map("updated_at")
+  deletedAt    DateTime?         @map("deleted_at")
 
   @@index([userId])
   @@index([appContext])
+  @@index([teamId])
   @@map("chat_groups")
 }
 
@@ -822,11 +843,11 @@ model ChatGroup {
 // ============================================================
 
 model ChatGroupUser {
-  id        String    @id @default(cuid())
-  userId    String    @map("user_id")
-  groupId   String    @map("group_id")
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  group     ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  groupId    String    @map("group_id")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group      ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
   chatClear  DateTime? @map("chat_clear")
   lastReadAt DateTime? @map("last_read_at")
   createdAt  DateTime? @map("created_at")
@@ -843,24 +864,24 @@ model ChatGroupUser {
 // ============================================================
 
 model ChatMessage {
-  id            String            @id @default(cuid())
-  legacyId      Int?              @map("legacy_id")
-  legacySource  String?           @map("legacy_source")
-  message       String            @db.Text
-  groupId       String            @map("group_id")
-  group         ChatGroup         @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  type          MessageType       @default(text)
-  userId        String            @map("user_id")
-  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  teamId        Int?              @map("team_id")
-  attachPath    String?           @map("attach_path")
-  linkPreview   Json?             @map("link_preview")
-  appType       AppType?          @map("app_type")
-  files         ChatFile[]
-  msgUsers      ChatMessageUser[]
-  createdAt     DateTime          @default(now()) @map("created_at")
-  updatedAt     DateTime?         @map("updated_at")
-  deletedAt     DateTime?         @map("deleted_at")
+  id           String            @id @default(cuid())
+  legacyId     Int?              @map("legacy_id")
+  legacySource String?           @map("legacy_source")
+  message      String            @db.Text
+  groupId      String            @map("group_id")
+  group        ChatGroup         @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  type         MessageType       @default(text)
+  userId       String            @map("user_id")
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId       Int?              @map("team_id")
+  attachPath   String?           @map("attach_path")
+  linkPreview  Json?             @map("link_preview")
+  appType      AppType?          @map("app_type")
+  files        ChatFile[]
+  msgUsers     ChatMessageUser[]
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime?         @map("updated_at")
+  deletedAt    DateTime?         @map("deleted_at")
 
   @@index([userId])
   @@index([groupId])
@@ -873,20 +894,20 @@ model ChatMessage {
 // ============================================================
 
 model ChatMessageUser {
-  id          String       @id @default(cuid())
-  msgId       String       @map("msg_id")
-  msg         ChatMessage  @relation(fields: [msgId], references: [id], onDelete: Cascade)
-  senderId    String       @map("sender_id")
-  sender      User         @relation("ChatMsgSender", fields: [senderId], references: [id], onDelete: Cascade)
-  receiverId  String       @map("receiver_id")
-  receiver    User         @relation("ChatMsgReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
-  isRead      Boolean      @default(false) @map("is_read")
-  groupId     String       @map("group_id")
-  group       ChatGroup    @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  teamId      Int?         @map("team_id")
-  createdAt   DateTime     @default(now()) @map("created_at")
-  updatedAt   DateTime?    @map("updated_at")
-  deletedAt   DateTime?    @map("deleted_at")
+  id         String      @id @default(cuid())
+  msgId      String      @map("msg_id")
+  msg        ChatMessage @relation(fields: [msgId], references: [id], onDelete: Cascade)
+  senderId   String      @map("sender_id")
+  sender     User        @relation("ChatMsgSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiverId String      @map("receiver_id")
+  receiver   User        @relation("ChatMsgReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  isRead     Boolean     @default(false) @map("is_read")
+  groupId    String      @map("group_id")
+  group      ChatGroup   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  teamId     Int?        @map("team_id")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime?   @map("updated_at")
+  deletedAt  DateTime?   @map("deleted_at")
 
   @@index([msgId])
   @@index([receiverId])
@@ -917,13 +938,13 @@ model ChatFile {
 // ============================================================
 
 model Conversation {
-  id          String             @id @default(cuid())
-  private     Boolean            @default(true)
-  data        String?            @db.Text
-  users       ConversationUser[]
-  messages    Message[]
-  createdAt   DateTime?          @map("created_at")
-  updatedAt   DateTime?          @map("updated_at")
+  id        String             @id @default(cuid())
+  private   Boolean            @default(true)
+  data      String?            @db.Text
+  users     ConversationUser[]
+  messages  Message[]
+  createdAt DateTime?          @map("created_at")
+  updatedAt DateTime?          @map("updated_at")
 
   @@map("conversations")
 }
@@ -941,16 +962,16 @@ model ConversationUser {
 }
 
 model Message {
-  id              String                @id @default(cuid())
-  body            String                @db.Text
-  conversationId  String                @map("conversation_id")
-  conversation    Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  userId          String                @map("user_id")
-  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type            String                @default("text")
-  notifications   MessageNotification[]
-  createdAt       DateTime?             @map("created_at")
-  updatedAt       DateTime?             @map("updated_at")
+  id             String                @id @default(cuid())
+  body           String                @db.Text
+  conversationId String                @map("conversation_id")
+  conversation   Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String                @map("user_id")
+  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           String                @default("text")
+  notifications  MessageNotification[]
+  createdAt      DateTime?             @map("created_at")
+  updatedAt      DateTime?             @map("updated_at")
 
   @@index([conversationId])
   @@index([userId])
@@ -958,18 +979,18 @@ model Message {
 }
 
 model MessageNotification {
-  id              String       @id @default(cuid())
-  messageId       String       @map("message_id")
-  message         Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  conversationId  String       @map("conversation_id")
-  userId          String       @map("user_id")
-  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  isSeen          Boolean      @default(false) @map("is_seen")
-  isSender        Boolean      @default(false) @map("is_sender")
-  flagged         Boolean      @default(false)
-  createdAt       DateTime?    @map("created_at")
-  updatedAt       DateTime?    @map("updated_at")
-  deletedAt       DateTime?    @map("deleted_at")
+  id             String    @id @default(cuid())
+  messageId      String    @map("message_id")
+  message        Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  conversationId String    @map("conversation_id")
+  userId         String    @map("user_id")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isSeen         Boolean   @default(false) @map("is_seen")
+  isSender       Boolean   @default(false) @map("is_sender")
+  flagged        Boolean   @default(false)
+  createdAt      DateTime? @map("created_at")
+  updatedAt      DateTime? @map("updated_at")
+  deletedAt      DateTime? @map("deleted_at")
 
   @@index([userId, messageId])
   @@map("message_notifications")
@@ -981,18 +1002,18 @@ model MessageNotification {
 // ============================================================
 
 model IssueItem {
-  id            String    @id @default(cuid())
-  legacyId      Int?      @map("legacy_id")
-  legacySource  String?   @map("legacy_source")
-  title         String
-  flowId        Int       @map("flow_id")
-  flowItemId    String    @default("") @map("flow_item_id")
-  companyId     Int?      @map("company_id")
-  isChecked     Boolean   @default(false) @map("is_checked")
-  createdById   String?   @map("created_by")
-  createdBy     User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
-  appType       AppType?  @map("app_type")
-  createdAt     DateTime  @default(now()) @map("created_at")
+  id           String   @id @default(cuid())
+  legacyId     Int?     @map("legacy_id")
+  legacySource String?  @map("legacy_source")
+  title        String
+  flowId       Int      @map("flow_id")
+  flowItemId   String   @default("") @map("flow_item_id")
+  companyId    Int?     @map("company_id")
+  isChecked    Boolean  @default(false) @map("is_checked")
+  createdById  String?  @map("created_by")
+  createdBy    User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  appType      AppType? @map("app_type")
+  createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([flowId])
   @@map("issue_list")
@@ -1004,20 +1025,20 @@ model IssueItem {
 // ============================================================
 
 model TransactionLog {
-  id              String    @id @default(cuid())
-  legacyId        Int?      @map("legacy_id")
-  legacySource    String?   @map("legacy_source")
-  chargeId        String?   @map("charge_id")
-  txnId           String?   @map("txn_id")
-  amountCharged   Int?      @map("amount_charged")  // In cents
-  paymentMethod   String?   @map("payment_method")
-  holderName      String?   @map("holder_name")
-  currency        String?
-  status          String?
-  appType         AppType?  @map("app_type")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime? @map("updated_at")
-  deletedAt       DateTime? @map("deleted_at")
+  id            String    @id @default(cuid())
+  legacyId      Int?      @map("legacy_id")
+  legacySource  String?   @map("legacy_source")
+  chargeId      String?   @map("charge_id")
+  txnId         String?   @map("txn_id")
+  amountCharged Int?      @map("amount_charged") // In cents
+  paymentMethod String?   @map("payment_method")
+  holderName    String?   @map("holder_name")
+  currency      String?
+  status        String?
+  appType       AppType?  @map("app_type")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime? @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
 
   @@index([chargeId])
   @@map("transaction_logs")
@@ -1030,19 +1051,19 @@ model TransactionLog {
 // ============================================================
 
 model VsmOption {
-  id            String         @id @default(cuid())
-  legacyId      Int?           @map("legacy_id")
-  legacySource  String?        @map("legacy_source")
-  title         String
-  type          VsmOptionType  @default(text)
-  unit          VsmUnit?       @default(None)
-  companyId     Int?           @map("company_id")
-  teamId        Int?           @map("team_id")
-  createdById   String         @map("created_by_id")
-  createdBy     User           @relation(fields: [createdById], references: [id], onDelete: Cascade)
-  appType       AppType?       @map("app_type")
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime?      @map("updated_at")
+  id           String        @id @default(cuid())
+  legacyId     Int?          @map("legacy_id")
+  legacySource String?       @map("legacy_source")
+  title        String
+  type         VsmOptionType @default(text)
+  unit         VsmUnit?      @default(None)
+  companyId    Int?          @map("company_id")
+  teamId       Int?          @map("team_id")
+  createdById  String        @map("created_by_id")
+  createdBy    User          @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  appType      AppType?      @map("app_type")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime?     @map("updated_at")
 
   @@map("vsm_options")
 }
@@ -1056,8 +1077,8 @@ model UserInterest {
   id             String    @id @default(cuid())
   userId         String    @map("user_id")
   user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  userOccupation String?   @db.Text @map("user_occupation")
-  userInterest   Json?     @map("user_interest")  // JSONB
+  userOccupation String?   @map("user_occupation") @db.Text
+  userInterest   Json?     @map("user_interest") // JSONB
   legacySource   String?   @map("legacy_source")
   createdAt      DateTime? @map("created_at")
   updatedAt      DateTime? @map("updated_at")
@@ -1072,18 +1093,18 @@ model UserInterest {
 // ============================================================
 
 model Offer {
-  id            String     @id @default(cuid())
-  offName       String?    @map("off_name")
-  type          String?
-  planOffer     String     @map("plan_offer")
-  userOffer     String?    @map("user_offer")
-  startDate     DateTime?  @map("start_date")
-  expiredDate   DateTime?  @map("expired_date")
-  status        PlanStatus @default(active)
-  afterOfferId  Int?       @map("after_offer_id")
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime?  @map("updated_at")
-  deletedAt     DateTime?  @map("deleted_at")
+  id           String     @id @default(cuid())
+  offName      String?    @map("off_name")
+  type         String?
+  planOffer    String     @map("plan_offer")
+  userOffer    String?    @map("user_offer")
+  startDate    DateTime?  @map("start_date")
+  expiredDate  DateTime?  @map("expired_date")
+  status       PlanStatus @default(active)
+  afterOfferId Int?       @map("after_offer_id")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime?  @map("updated_at")
+  deletedAt    DateTime?  @map("deleted_at")
 
   @@map("offers")
 }
@@ -1094,14 +1115,14 @@ model Offer {
 // ============================================================
 
 model PromoCode {
-  id                  String    @id @default(cuid())
-  promoCode           String?   @map("promo_code")
-  validUpto           DateTime? @map("valid_upto") @db.Date
-  discountPercentage  Float?    @map("discount_percentage")
-  legacySource        String?   @map("legacy_source")
-  createdAt           DateTime? @map("created_at")
-  updatedAt           DateTime? @map("updated_at")
-  deletedAt           DateTime? @map("deleted_at")
+  id                 String    @id @default(cuid())
+  promoCode          String?   @map("promo_code")
+  validUpto          DateTime? @map("valid_upto") @db.Date
+  discountPercentage Float?    @map("discount_percentage")
+  legacySource       String?   @map("legacy_source")
+  createdAt          DateTime? @map("created_at")
+  updatedAt          DateTime? @map("updated_at")
+  deletedAt          DateTime? @map("deleted_at")
 
   @@map("promocodes")
 }
@@ -1112,17 +1133,68 @@ model PromoCode {
 // ============================================================
 
 model UserAction {
-  id           String    @id @default(cuid())
-  action       String
-  actionModel  String?   @map("action_model")
-  actionId     Int?      @map("action_id")
-  userId       String?   @map("user_id")
-  user         User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt    DateTime? @map("created_at")
-  updatedAt    DateTime? @map("updated_at")
+  id          String    @id @default(cuid())
+  action      String
+  actionModel String?   @map("action_model")
+  actionId    Int?      @map("action_id")
+  userId      String?   @map("user_id")
+  user        User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime? @map("created_at")
+  updatedAt   DateTime? @map("updated_at")
 
   @@index([userId])
   @@map("user_actions")
+}
+
+// ============================================================
+// 31a. SUBSCRIPTION HISTORY — archive of past subscriptions
+// Each row is a frozen snapshot of what the Subscription row
+// looked like before it was replaced/cancelled/expired.
+// ============================================================
+
+model SubscriptionHistory {
+  id              String    @id @default(cuid())
+  userId          String    @map("user_id")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planName        String?   @map("plan_name")
+  productType     String?   @map("product_type")
+  status          String
+  price           Float     @default(0)
+  currency        String?
+  isRecurring     Boolean   @default(false) @map("is_recurring")
+  source          String? // 'stripe' | 'admin' | 'unknown'
+  startedAt       DateTime? @map("started_at")
+  expiresAt       DateTime? @map("expires_at")
+  archivedAt      DateTime  @default(now()) @map("archived_at")
+  archivedReason  String?   @map("archived_reason") // 'replaced' | 'cancelled' | 'expired'
+  archivedBy      String?   @map("archived_by") // admin userId if admin-triggered
+  stripePaymentId String?   @map("stripe_payment_id")
+  snapshot        Json? // full original Subscription row for audit
+
+  @@index([userId])
+  @@index([archivedAt])
+  @@map("subscription_history")
+}
+
+// ============================================================
+// 31b. ADMIN LOG — Super admin audit trail (immutable)
+// ============================================================
+
+model AdminLog {
+  id           String   @id @default(cuid())
+  adminId      String   @map("admin_id")
+  admin        User     @relation("AdminLogAdmin", fields: [adminId], references: [id], onDelete: Cascade)
+  targetUserId String?  @map("target_user_id")
+  targetUser   User?    @relation("AdminLogTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+  action       String
+  details      Json?
+  ipAddress    String?  @map("ip_address")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([adminId])
+  @@index([targetUserId])
+  @@index([createdAt])
+  @@map("admin_logs")
 }
 
 // ============================================================
@@ -1131,10 +1203,10 @@ model UserAction {
 // ============================================================
 
 model PasswordReset {
-  id        String    @id @default(cuid())
+  id        String   @id @default(cuid())
   email     String
   token     String
-  createdAt DateTime  @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at")
 
   @@index([email])
   @@map("password_resets")
@@ -1146,15 +1218,15 @@ model PasswordReset {
 // ============================================================
 
 model UserFreeTrial {
-  id           String    @id @default(cuid())
-  userId       String    @unique @map("user_id")
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  proMonthly   Boolean   @default(false) @map("pro_monthly")
-  teamMonthly  Boolean   @default(false) @map("team_monthly")
-  proYearly    Boolean   @default(false) @map("pro_yearly")
-  teamYearly   Boolean   @default(false) @map("team_yearly")
-  createdAt    DateTime? @map("created_at")
-  updatedAt    DateTime? @map("updated_at")
+  id          String    @id @default(cuid())
+  userId      String    @unique @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  proMonthly  Boolean   @default(false) @map("pro_monthly")
+  teamMonthly Boolean   @default(false) @map("team_monthly")
+  proYearly   Boolean   @default(false) @map("pro_yearly")
+  teamYearly  Boolean   @default(false) @map("team_yearly")
+  createdAt   DateTime? @map("created_at")
+  updatedAt   DateTime? @map("updated_at")
 
   @@map("user_free_trials")
 }
@@ -1171,7 +1243,7 @@ model FeedbackQuery {
   user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   msgType   FeedbackType @default(feedback) @map("msg_type")
   appType   AppType      @default(enterprise) @map("app_type")
-  appDevice ClientType   @default(android)    @map("app_device")
+  appDevice ClientType   @default(android) @map("app_device")
   createdAt DateTime     @default(now()) @map("created_at")
   updatedAt DateTime?    @map("updated_at")
 
@@ -1190,10 +1262,10 @@ model Project {
   coverImage  String?     @map("cover_image")
   createdBy   String      @map("created_by")
   creator     User        @relation(fields: [createdBy], references: [id], onDelete: Cascade)
-  appContext  UserVersion  @default(free) @map("app_context")
+  appContext  UserVersion @default(free) @map("app_context")
   flows       Flow[]
   createdAt   DateTime    @default(now()) @map("created_at")
-  updatedAt   DateTime    @updatedAt      @map("updated_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
   deletedAt   DateTime?   @map("deleted_at")
 
   @@index([createdBy])
@@ -1207,13 +1279,13 @@ model Project {
 // ============================================================
 
 model ProFlowPurchase {
-  id                    String    @id @default(cuid())
-  userId                String    @map("user_id")
-  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  flowCount             Int       @map("flow_count")
-  amountCents           Int       @map("amount_cents")
-  stripePaymentIntentId String?   @map("stripe_payment_intent_id")
-  createdAt             DateTime  @default(now()) @map("created_at")
+  id                    String   @id @default(cuid())
+  userId                String   @map("user_id")
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flowCount             Int      @map("flow_count")
+  amountCents           Int      @map("amount_cents")
+  stripePaymentIntentId String?  @map("stripe_payment_intent_id")
+  createdAt             DateTime @default(now()) @map("created_at")
 
   @@index([userId])
   @@map("pro_flow_purchases")
@@ -1233,7 +1305,7 @@ model AiConsent {
   revokedAt   DateTime? @map("revoked_at")
   ipAddress   String?   @map("ip_address")
   createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt      @map("updated_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
 
   @@map("ai_consent")
 }
@@ -1244,13 +1316,13 @@ model AiConsent {
 // ============================================================
 
 model AiConversation {
-  id         String    @id @default(cuid())
-  userId     String    @map("user_id")
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id         String      @id @default(cuid())
+  userId     String      @map("user_id")
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   title      String?
-  appContext String?   @map("app_context")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  updatedAt  DateTime  @updatedAt      @map("updated_at")
+  appContext String?     @map("app_context")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime    @updatedAt @map("updated_at")
   messages   AiMessage[]
 
   @@index([userId])
@@ -1266,7 +1338,7 @@ model AiMessage {
   id             String         @id @default(cuid())
   conversationId String         @map("conversation_id")
   conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  role           String         // 'user' | 'assistant' | 'system'
+  role           String // 'user' | 'assistant' | 'system'
   content        String         @db.Text
   diagramXml     String?        @map("diagram_xml") @db.Text
   metadata       Json?
@@ -1274,4 +1346,45 @@ model AiMessage {
 
   @@index([conversationId])
   @@map("ai_messages")
+}
+
+// ============================================================
+// 40. AI CREDIT BALANCE
+// Per-user monthly plan credits + purchased addon credits
+// ============================================================
+
+model AiCreditBalance {
+  id           String      @id @default(cuid())
+  userId       String      @unique @map("user_id")
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planCredits  Int         @default(0) @map("plan_credits")
+  addonCredits Int         @default(0) @map("addon_credits")
+  planResetsAt DateTime?   @map("plan_resets_at")
+  appContext   UserVersion @default(free) @map("app_context")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("ai_credit_balances")
+}
+
+// ============================================================
+// 41. AI CREDIT USAGE
+// Audit log of every credit deducted
+// ============================================================
+
+model AiCreditUsage {
+  id          String      @id @default(cuid())
+  userId      String      @map("user_id")
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  feature     String // 'diagram_generation' | 'doc_to_vsm' | ...
+  creditsUsed Int         @map("credits_used")
+  sourceType  String      @map("source_type") // 'plan' | 'addon'
+  model       String?
+  appContext  UserVersion @default(free) @map("app_context")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("ai_credit_usages")
 }

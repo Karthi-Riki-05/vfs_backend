@@ -9,8 +9,13 @@ class TeamService {
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
+    // NB: do NOT filter by appContext. The caller's `users.current_version`
+    // can drift from the actual team plan (e.g. team owner's row still says
+    // 'free' while their team is appContext='team'), which would silently
+    // hide their own team from the list. Membership/ownership is the
+    // entitlement — show every team the user belongs to.
     const where = {
-      appContext,
+      deletedAt: null,
       OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
     };
 

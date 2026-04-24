@@ -49,7 +49,13 @@ const authenticate = async (req, res, next) => {
     // Verify user still exists in database
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, role: true, userStatus: true, currentVersion: true },
+      select: {
+        id: true,
+        role: true,
+        userStatus: true,
+        currentVersion: true,
+        suspendedAt: true,
+      },
     });
 
     if (!user) {
@@ -70,6 +76,11 @@ const authenticate = async (req, res, next) => {
           "USER_DEACTIVATED",
         ),
       );
+    }
+
+    // Rule #2 — suspended / inactive users cannot use the API
+    if (user.suspendedAt !== null) {
+      return next(new AppError("Account is inactive", 403, "ACCOUNT_INACTIVE"));
     }
 
     req.user = {

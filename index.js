@@ -1,7 +1,6 @@
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const swaggerUi = require("swagger-ui-express");
 require("dotenv").config();
 
@@ -9,15 +8,11 @@ const { initSocketIO, getIO } = require("./src/socket");
 
 const logger = require("./src/utils/logger");
 const AppError = require("./src/utils/AppError");
-const asyncHandler = require("./src/utils/asyncHandler");
 const securityMiddleware = require("./src/middleware/security");
-const { globalLimiter, aiLimiter } = require("./src/middleware/rateLimiter");
+const { globalLimiter } = require("./src/middleware/rateLimiter");
 const errorHandler = require("./src/middleware/errorHandler");
 const requestLogger = require("./src/middleware/requestLogger");
 const timeout = require("./src/middleware/timeout");
-const { authenticate } = require("./src/middleware/auth.middleware");
-const validate = require("./src/middleware/validate");
-const { generateDiagramSchema } = require("./src/validators/ai.validator");
 const swaggerSpec = require("./src/config/swagger");
 
 // Routes
@@ -33,11 +28,14 @@ const chatRoutes = require("./src/routes/chat.routes");
 const issueRoutes = require("./src/routes/issue.routes");
 const paymentRoutes = require("./src/routes/payment.routes");
 const adminRoutes = require("./src/routes/admin.routes");
+const superAdminRoutes = require("./src/routes/superAdmin.routes");
 const cronRoutes = require("./src/routes/cron.routes");
 const projectRoutes = require("./src/routes/project.routes");
 const proRoutes = require("./src/routes/pro.routes");
 const inviteRoutes = require("./src/routes/invite.routes");
 const aiAssistantRoutes = require("./src/routes/ai-assistant.routes");
+const aiCreditRoutes = require("./src/routes/aiCredit.routes");
+const pricingRoutes = require("./src/routes/pricing.routes");
 const dashboardRoutes = require("./src/routes/dashboard.routes");
 
 // Validate required env vars at startup
@@ -161,12 +159,15 @@ app.use("/api/v1/chat", chatRoutes);
 app.use("/api/v1/issues", issueRoutes);
 app.use("/api/v1/payments", paymentRoutes);
 app.use("/api/v1/admin", adminRoutes);
+app.use("/api/v1/super-admin", superAdminRoutes);
 app.use("/api/v1/cron", cronRoutes);
 app.use("/api/v1/projects", projectRoutes);
 app.use("/api/v1/invite", inviteRoutes);
 app.use("/api/v1/upgrade-pro", proRoutes);
 app.use("/api/v1/pro", proRoutes); // backward-compatible alias
 app.use("/api/v1/ai-assistant", aiAssistantRoutes);
+app.use("/api/v1/ai", aiCreditRoutes);
+app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/dashboard", dashboardRoutes);
 app.use("/api/v1/auth/mobile", require("./src/routes/mobile.auth.routes"));
 
@@ -184,138 +185,25 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/issues", issueRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/super-admin", superAdminRoutes);
 app.use("/api/cron", cronRoutes);
 app.use("/api/projects", projectRoutes);
 app.use("/api/invite", inviteRoutes);
 app.use("/api/upgrade-pro", proRoutes);
 app.use("/api/pro", proRoutes); // backward-compatible alias
 app.use("/api/ai-assistant", aiAssistantRoutes);
+app.use("/api/ai", aiCreditRoutes);
+app.use("/api/pricing", pricingRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 
-// AI Generate Diagram (Gemini) — now protected
-const genAI = process.env.GEMINI_API_KEY
-  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
-  : null;
-
-/**
- * @swagger
- * /api/v1/ai/generate-diagram:
- *   post:
- *     summary: Generate a diagram from a text description using AI
- *     tags: [AI]
- *     security:
- *       - BearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [prompt]
- *             properties:
- *               prompt:
- *                 type: string
- *                 description: Business process description
- *                 example: User registration flow with email verification
- *     responses:
- *       200:
- *         description: Generated diagram data
- *       400:
- *         description: Validation error
- *       401:
- *         description: Unauthorized
- *       429:
- *         description: Rate limit exceeded
- *       500:
- *         description: AI processing failed
- */
-function parseAISuggestion(text) {
-  try {
-    const jsonMatch =
-      text.match(/```json\n([\s\S]*?)\n```/) || text.match(/{[\s\S]*}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[1] || jsonMatch[0]);
-    }
-    return { error: "Could not find valid JSON in AI response", raw: text };
-  } catch (e) {
-    return { error: "Failed to parse AI response as JSON", raw: text };
-  }
-}
-
-app.post(
-  "/api/v1/ai/generate-diagram",
-  authenticate,
-  aiLimiter,
-  validate(generateDiagramSchema),
-  asyncHandler(async (req, res) => {
-    const { prompt } = req.body;
-
-    if (!genAI) {
-      throw new AppError(
-        "Gemini API key not configured",
-        500,
-        "GEMINI_NOT_CONFIGURED",
-      );
-    }
-
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-    const systemInstruction = `
-        You are a system architect. Convert business process descriptions into a structured flowchart JSON.
-        The JSON should have an array of 'nodes' (id, label, type) and 'edges' (id, source, target, label).
-        Return ONLY the JSON.
-    `;
-
-    const fullPrompt = `${systemInstruction}\n\nDescription: ${prompt}`;
-    const result = await model.generateContent(fullPrompt);
-    const response = await result.response;
-    const text = response.text();
-    const diagramData = parseAISuggestion(text);
-
-    res.json({
-      success: true,
-      data: { diagramCode: text, structuredData: diagramData },
-    });
-  }),
-);
-
-// Backwards-compatible alias for the old route
-app.post(
-  "/api/ai/generate-diagram",
-  authenticate,
-  aiLimiter,
-  validate(generateDiagramSchema),
-  asyncHandler(async (req, res) => {
-    const { prompt } = req.body;
-
-    if (!genAI) {
-      throw new AppError(
-        "Gemini API key not configured",
-        500,
-        "GEMINI_NOT_CONFIGURED",
-      );
-    }
-
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-    const systemInstruction = `
-        You are a system architect. Convert business process descriptions into a structured flowchart JSON.
-        The JSON should have an array of 'nodes' (id, label, type) and 'edges' (id, source, target, label).
-        Return ONLY the JSON.
-    `;
-
-    const fullPrompt = `${systemInstruction}\n\nDescription: ${prompt}`;
-    const result = await model.generateContent(fullPrompt);
-    const response = await result.response;
-    const text = response.text();
-    const diagramData = parseAISuggestion(text);
-
-    res.json({
-      success: true,
-      data: { diagramCode: text, structuredData: diagramData },
-    });
-  }),
-);
+// DISABLED: Legacy Gemini 1.5-flash route at /api/v1/ai/generate-diagram
+// (and alias /api/ai/generate-diagram) — returned {nodes, edges} JSON
+// instead of mxGraph XML, incompatible with draw.io.
+// The active handler lives in backend/src/routes/aiCredit.routes.js,
+// mounted at /api/v1/ai via aiCreditRoutes above. It uses
+// aiDetectService.generateDiagramXml (Claude Sonnet 4.5 for Pro/Team,
+// Gemini 2.5 Flash for Free) and returns proper mxGraph XML with credit
+// deduction.
 
 // 404 handler
 app.use((req, res) => {
@@ -340,6 +228,27 @@ process.on("uncaughtException", (error) => {
   logger.error("Uncaught Exception:", error);
   process.exit(1);
 });
+
+// Monthly reset cron — runs 1st of every month at midnight.
+// Skipped in test env so Jest does not hang on node-cron's Runner.
+if (process.env.NODE_ENV !== "test") {
+  try {
+    const cron = require("node-cron");
+    const { resetAllPlanCredits } = require("./src/services/aiCredit.service");
+    cron.schedule("0 0 1 * *", async () => {
+      logger.info("[Cron] Starting monthly AI credit reset...");
+      try {
+        const count = await resetAllPlanCredits();
+        logger.info(`[Cron] Monthly reset complete: ${count} users reset`);
+      } catch (err) {
+        logger.error("[Cron] Monthly reset failed:", err);
+      }
+    });
+    logger.info("[Cron] AI credit monthly reset scheduled (0 0 1 * *)");
+  } catch (err) {
+    logger.warn(`[Cron] Failed to schedule AI credit reset: ${err.message}`);
+  }
+}
 
 // Create HTTP server (used by both Express and Socket.IO)
 const server = http.createServer(app);

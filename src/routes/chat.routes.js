@@ -1,43 +1,46 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const multer = require('multer');
-const path = require('path');
-const chatController = require('../controllers/chat.controller');
-const { authenticate } = require('../middleware/auth.middleware');
-const { checkTeamAccess } = require('../middleware/checkTeamAccess');
-const validate = require('../middleware/validate');
+const multer = require("multer");
+const path = require("path");
+const chatController = require("../controllers/chat.controller");
+const { authenticate } = require("../middleware/auth.middleware");
+const { checkTeamAccess } = require("../middleware/checkTeamAccess");
+const validate = require("../middleware/validate");
 const {
-    createChatGroupSchema,
-    sendMessageSchema,
-    markReadSchema,
-    getMessagesQuerySchema,
-    idParamSchema,
-    markGroupReadSchema,
-    addMembersSchema,
-    updateGroupSchema,
-    removeMemberSchema,
-    ALLOWED_FILE_TYPES,
-    MAX_FILE_SIZE,
-} = require('../validators/chat.validator');
+  createChatGroupSchema,
+  sendMessageSchema,
+  markReadSchema,
+  getMessagesQuerySchema,
+  idParamSchema,
+  markGroupReadSchema,
+  addMembersSchema,
+  updateGroupSchema,
+  removeMemberSchema,
+  ALLOWED_FILE_TYPES,
+  MAX_FILE_SIZE,
+} = require("../validators/chat.validator");
 
 // File upload configuration — 25MB limit with file type validation
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, path.join(__dirname, '../../uploads/chat')),
-    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  destination: (req, file, cb) =>
+    cb(null, path.join(__dirname, "../../uploads/chat")),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
 });
 
 const fileFilter = (req, file, cb) => {
-    if (ALLOWED_FILE_TYPES.includes(file.mimetype)) {
-        cb(null, true);
-    } else {
-        cb(new Error(`File type ${file.mimetype} is not allowed`), false);
-    }
+  if (ALLOWED_FILE_TYPES.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    const err = new Error(`File type ${file.mimetype} is not allowed`);
+    err.code = "INVALID_FILE_TYPE";
+    cb(err, false);
+  }
 };
 
 const upload = multer({
-    storage,
-    limits: { fileSize: MAX_FILE_SIZE },
-    fileFilter,
+  storage,
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter,
 });
 
 router.use(authenticate);
@@ -51,7 +54,7 @@ router.use(authenticate);
  *     security:
  *       - BearerAuth: []
  */
-router.get('/sidebar', chatController.getSidebar);
+router.get("/sidebar", chatController.getSidebar);
 
 /**
  * @swagger
@@ -65,7 +68,7 @@ router.get('/sidebar', chatController.getSidebar);
  *       200:
  *         description: List of chat groups with last message preview and unread count
  */
-router.get('/groups', chatController.getChatGroups);
+router.get("/groups", chatController.getChatGroups);
 
 /**
  * @swagger
@@ -76,7 +79,12 @@ router.get('/groups', chatController.getChatGroups);
  *     security:
  *       - BearerAuth: []
  */
-router.post('/groups', checkTeamAccess, validate(createChatGroupSchema), chatController.createChatGroup);
+router.post(
+  "/groups",
+  checkTeamAccess,
+  validate(createChatGroupSchema),
+  chatController.createChatGroup,
+);
 
 /**
  * @swagger
@@ -87,7 +95,11 @@ router.post('/groups', checkTeamAccess, validate(createChatGroupSchema), chatCon
  *     security:
  *       - BearerAuth: []
  */
-router.get('/groups/:id/messages', validate(getMessagesQuerySchema), chatController.getMessages);
+router.get(
+  "/groups/:id/messages",
+  validate(getMessagesQuerySchema),
+  chatController.getMessages,
+);
 
 /**
  * @swagger
@@ -98,7 +110,11 @@ router.get('/groups/:id/messages', validate(getMessagesQuerySchema), chatControl
  *     security:
  *       - BearerAuth: []
  */
-router.post('/groups/:id/messages', validate(sendMessageSchema), chatController.sendMessage);
+router.post(
+  "/groups/:id/messages",
+  validate(sendMessageSchema),
+  chatController.sendMessage,
+);
 
 /**
  * @swagger
@@ -109,7 +125,11 @@ router.post('/groups/:id/messages', validate(sendMessageSchema), chatController.
  *     security:
  *       - BearerAuth: []
  */
-router.put('/groups/:id/read', validate(markGroupReadSchema), chatController.markGroupRead);
+router.put(
+  "/groups/:id/read",
+  validate(markGroupReadSchema),
+  chatController.markGroupRead,
+);
 
 /**
  * @swagger
@@ -120,7 +140,7 @@ router.put('/groups/:id/read', validate(markGroupReadSchema), chatController.mar
  *     security:
  *       - BearerAuth: []
  */
-router.post('/groups/:id/members', chatController.addMember);
+router.post("/groups/:id/members", chatController.addMember);
 
 /**
  * @swagger
@@ -129,7 +149,11 @@ router.post('/groups/:id/members', chatController.addMember);
  *     summary: Add multiple members to a chat group (from teams)
  *     tags: [Chat]
  */
-router.post('/groups/:id/members/batch', validate(addMembersSchema), chatController.addMembers);
+router.post(
+  "/groups/:id/members/batch",
+  validate(addMembersSchema),
+  chatController.addMembers,
+);
 
 /**
  * @swagger
@@ -138,7 +162,11 @@ router.post('/groups/:id/members/batch', validate(addMembersSchema), chatControl
  *     summary: Remove a member from a chat group (admin only)
  *     tags: [Chat]
  */
-router.delete('/groups/:id/members/:userId', validate(removeMemberSchema), chatController.removeMember);
+router.delete(
+  "/groups/:id/members/:userId",
+  validate(removeMemberSchema),
+  chatController.removeMember,
+);
 
 /**
  * @swagger
@@ -147,7 +175,7 @@ router.delete('/groups/:id/members/:userId', validate(removeMemberSchema), chatC
  *     summary: Get group info with member list
  *     tags: [Chat]
  */
-router.get('/groups/:id/info', chatController.getGroupInfo);
+router.get("/groups/:id/info", chatController.getGroupInfo);
 
 /**
  * @swagger
@@ -156,7 +184,7 @@ router.get('/groups/:id/info', chatController.getGroupInfo);
  *     summary: Get team members available to add to this group
  *     tags: [Chat]
  */
-router.get('/groups/:id/available-members', chatController.getAvailableMembers);
+router.get("/groups/:id/available-members", chatController.getAvailableMembers);
 
 /**
  * @swagger
@@ -165,7 +193,11 @@ router.get('/groups/:id/available-members', chatController.getAvailableMembers);
  *     summary: Update group (rename)
  *     tags: [Chat]
  */
-router.put('/groups/:id', validate(updateGroupSchema), chatController.updateGroup);
+router.put(
+  "/groups/:id",
+  validate(updateGroupSchema),
+  chatController.updateGroup,
+);
 
 /**
  * @swagger
@@ -174,7 +206,7 @@ router.put('/groups/:id', validate(updateGroupSchema), chatController.updateGrou
  *     summary: Delete a chat group (creator only)
  *     tags: [Chat]
  */
-router.delete('/groups/:id', chatController.deleteGroup);
+router.delete("/groups/:id", chatController.deleteGroup);
 
 /**
  * @swagger
@@ -183,7 +215,7 @@ router.delete('/groups/:id', chatController.deleteGroup);
  *     summary: Leave a chat group
  *     tags: [Chat]
  */
-router.post('/groups/:id/leave', chatController.leaveGroup);
+router.post("/groups/:id/leave", chatController.leaveGroup);
 
 /**
  * @swagger
@@ -194,7 +226,11 @@ router.post('/groups/:id/leave', chatController.leaveGroup);
  *     security:
  *       - BearerAuth: []
  */
-router.put('/messages/:id/read', validate(markReadSchema), chatController.markRead);
+router.put(
+  "/messages/:id/read",
+  validate(markReadSchema),
+  chatController.markRead,
+);
 
 /**
  * @swagger
@@ -205,7 +241,7 @@ router.put('/messages/:id/read', validate(markReadSchema), chatController.markRe
  *     security:
  *       - BearerAuth: []
  */
-router.get('/unread-count', chatController.getUnreadCounts);
+router.get("/unread-count", chatController.getUnreadCounts);
 
 /**
  * @swagger
@@ -216,7 +252,7 @@ router.get('/unread-count', chatController.getUnreadCounts);
  *     security:
  *       - BearerAuth: []
  */
-router.post('/upload', upload.single('file'), chatController.uploadFile);
+router.post("/upload", upload.single("file"), chatController.uploadFile);
 
 /**
  * @swagger
@@ -227,7 +263,7 @@ router.post('/upload', upload.single('file'), chatController.uploadFile);
  *     security:
  *       - BearerAuth: []
  */
-router.get('/files/:id', chatController.downloadFile);
+router.get("/files/:id", chatController.downloadFile);
 
 /**
  * @swagger
@@ -238,6 +274,6 @@ router.get('/files/:id', chatController.downloadFile);
  *     security:
  *       - BearerAuth: []
  */
-router.get('/files/:id/preview', chatController.previewFile);
+router.get("/files/:id/preview", chatController.previewFile);
 
 module.exports = router;

@@ -1,28 +1,31 @@
 const flowService = require("../services/flow.service");
 const asyncHandler = require("../utils/asyncHandler");
 const { prisma } = require("../lib/prisma");
-const multer = require("multer");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const OpenAI = require("openai");
+const { docUpload } = require("../middleware/docUpload");
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
-});
 
 class FlowController {
   getAllFlows = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
     const { search, page, limit, nonEmpty, draftsOnly } = req.query;
+    // teamId may arrive as a query param or via the X-Team-Context header
+    // set by the frontend axios interceptor.
+    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const result = await flowService.getAllFlows(
       userId,
-      { search, page, limit, nonEmpty, draftsOnly },
+      { search, page, limit, nonEmpty, draftsOnly, teamId },
       appContext,
     );
-    const shared = await flowService.getSharedFlows(userId, appContext);
+    const shared = await flowService.getSharedFlows(
+      userId,
+      appContext,
+      teamId || null,
+    );
     res.json({ success: true, data: { ...result, shared } });
   });
 
@@ -41,7 +44,14 @@ class FlowController {
   createFlow = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
-    const flow = await flowService.createFlow(userId, req.body, appContext);
+    // teamId may also come from a header (axios interceptor) so both are
+    // accepted.
+    const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
+    const flow = await flowService.createFlow(
+      userId,
+      { ...req.body, teamId: teamId || null },
+      appContext,
+    );
     res.status(201).json({ success: true, data: flow });
   });
 
@@ -156,12 +166,17 @@ class FlowController {
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
     const { search, page, limit, nonEmpty, draftsOnly } = req.query;
+    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const own = await flowService.getAllFlows(
       userId,
-      { search, page, limit, nonEmpty, draftsOnly },
+      { search, page, limit, nonEmpty, draftsOnly, teamId },
       appContext,
     );
-    const shared = await flowService.getSharedFlows(userId, appContext);
+    const shared = await flowService.getSharedFlows(
+      userId,
+      appContext,
+      teamId || null,
+    );
     res.json({ success: true, data: { ...own, shared } });
   });
 
@@ -199,12 +214,18 @@ class FlowController {
   });
 
   generateFromDocument = [
-    upload.single("document"),
+    docUpload.single("document"),
     asyncHandler(async (req, res) => {
       if (!req.file) {
         return res
           .status(400)
           .json({ success: false, error: { message: "No file uploaded" } });
+      }
+      if (!req.file.size || req.file.size <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: { code: "EMPTY_FILE", message: "Empty file uploaded" },
+        });
       }
 
       let extractedText = "";
@@ -320,14 +341,46 @@ HARD RULES — follow exactly or the diagram will fail to render:
     const flowId = req.params.id;
     const userId = req.user.id;
 
+    // Owner can always read their own versions.
+    // Super admin gets read-only access for support / audit (same pattern
+    // as getFlowByIdWithAccess).
     const flow = await prisma.flow.findFirst({
-      where: { id: flowId, ownerId: userId },
+      where: { id: flowId, deletedAt: null },
     });
     if (!flow) {
-      return res.status(403).json({
+      return res.status(404).json({
         success: false,
-        error: { message: "Access denied or flow not found" },
+        error: { message: "Flow not found" },
       });
+    }
+
+    if (flow.ownerId !== userId) {
+      // Shared members (any permission) can view history — it's read-only.
+      // If this flow belongs to a team, every team member can see it.
+      // Super admin keeps read access for support / audit.
+      const [share, teamMember, requester] = await Promise.all([
+        prisma.flowShare.findFirst({
+          where: { flowId, sharedWithId: userId },
+          select: { id: true },
+        }),
+        flow.teamId
+          ? prisma.teamMember.findFirst({
+              where: { teamId: flow.teamId, userId },
+              select: { id: true },
+            })
+          : Promise.resolve(null),
+        prisma.user.findUnique({
+          where: { id: userId },
+          select: { role: true },
+        }),
+      ]);
+      const isSuperAdmin = requester?.role === "super_admin";
+      if (!share && !teamMember && !isSuperAdmin) {
+        return res.status(403).json({
+          success: false,
+          error: { message: "Access denied" },
+        });
+      }
     }
 
     const versions = await prisma.flowVersion.findMany({
