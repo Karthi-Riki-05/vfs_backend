@@ -64,6 +64,17 @@ class UserController {
       resolvedHasPro = true;
     }
 
+    // App-isolation: caller's current workspace decides which teams appear
+    // in the switcher. Pro app shows only Pro-context teams; Team app shows
+    // only Team-context teams. Reads from query/header/user.currentVersion
+    // in that priority so the FE can override during transitions.
+    const requestedApp =
+      req.query?.appContext ||
+      req.headers["x-app-context"] ||
+      dbUser?.currentVersion ||
+      "free";
+    const isProApp = requestedApp === "pro";
+
     // Switcher only makes sense for teams the user was INVITED into —
     // not teams they own. A team owner already has the team plan as
     // their primary account; no switching needed.
@@ -71,6 +82,9 @@ class UserController {
       where: {
         userId,
         role: { not: "OWNER" }, // exclude OWNER membership rows
+        team: isProApp
+          ? { appContext: "pro", deletedAt: null }
+          : { appContext: { not: "pro" }, deletedAt: null },
       },
       include: {
         team: {

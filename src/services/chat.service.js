@@ -267,7 +267,66 @@ class ChatService {
       });
     }
 
+    // Push notifications for OFFLINE members (best-effort, never blocks the
+    // chat response). Online members already received the socket emit above.
+    setImmediate(() =>
+      this._notifyOfflineChatMembers({
+        groupId,
+        senderId: userId,
+        members,
+        messageType: data.type || "text",
+        content: data.message,
+      }).catch((err) => logger.warn(`[push] chat send failed: ${err.message}`)),
+    );
+
     return message;
+  }
+
+  async _notifyOfflineChatMembers({
+    groupId,
+    senderId,
+    members,
+    messageType,
+    content,
+  }) {
+    if (!Array.isArray(members) || members.length === 0) return;
+    const userSocketMap = require("../socket/userSocketMap");
+    const offlineUserIds = members
+      .map((m) => m.userId)
+      .filter((uid) => uid && !userSocketMap.isOnline(uid));
+    if (offlineUserIds.length === 0) return;
+
+    const [sender, group] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: senderId },
+        select: { name: true },
+      }),
+      prisma.chatGroup.findUnique({
+        where: { id: groupId },
+        select: { name: true },
+      }),
+    ]);
+    const senderFirstName = (sender?.name || "Someone").split(" ")[0];
+
+    let preview;
+    if (messageType === "image") {
+      preview = `${senderFirstName} sent an image`;
+    } else if (messageType !== "text") {
+      preview = `${senderFirstName} sent a file`;
+    } else {
+      const text = (content || "").trim();
+      preview = text.length > 50 ? `${text.slice(0, 50)}…` : text;
+    }
+    if (group?.name) preview = preview ? `${preview}` : preview;
+
+    const push = require("./push.service");
+    const notification = push.builders.newMessage({
+      senderName: senderFirstName,
+      preview,
+      groupId,
+    });
+    if (group?.name) notification.title = `${senderFirstName} • ${group.name}`;
+    await push.sendPushToMultipleUsers(offlineUserIds, notification);
   }
 
   async createFileMessage(groupId, userId, fileData) {
@@ -364,6 +423,19 @@ class ChatService {
     } catch (err) {
       logger.error("Socket emit error:", err.message);
     }
+
+    // Push to offline members (file/image preview text built by the helper).
+    setImmediate(() =>
+      this._notifyOfflineChatMembers({
+        groupId,
+        senderId: userId,
+        members,
+        messageType: fullMessage?.type || "docs",
+        content: fileData?.originalname || "",
+      }).catch((err) =>
+        logger.warn(`[push] chat file send failed: ${err.message}`),
+      ),
+    );
 
     return fullMessage;
   }
@@ -474,27 +546,51 @@ class ChatService {
   }
 
   async getSidebarData(userId, appContext = "free", activeTeamId = null) {
-    // PERSONAL CONTEXT (no activeTeamId) → chat is a team feature, so the
-    // sidebar is effectively empty. Return an empty shell and let the UI
-    // render a "locked" placeholder.
+    // App-isolation: in Pro workspace, only Pro-context teams are visible.
+    const appCtxFilter = appContext === "pro" ? { appContext: "pro" } : {};
+
+    // No activeTeamId from the client → if the user OWNS a team in this
+    // workspace, auto-resolve to it. Team owners don't switch contexts (they
+    // don't appear in the header switcher per /users/team-context), so chat
+    // must work for them out of the box. Only show the locked placeholder
+    // when the user truly has no team at all in this workspace.
     if (!activeTeamId) {
-      return {
-        teams: [],
-        groups: [],
-        contacts: [],
-        allGroups: [],
-        locked: true,
-      };
+      const ownedTeam = await prisma.team.findFirst({
+        where: { teamOwnerId: userId, deletedAt: null, ...appCtxFilter },
+        orderBy: { createdAt: "asc" },
+        select: { id: true },
+      });
+      if (ownedTeam) {
+        activeTeamId = ownedTeam.id;
+      } else {
+        return {
+          teams: [],
+          groups: [],
+          contacts: [],
+          allGroups: [],
+          locked: true,
+        };
+      }
     }
 
-    // TEAM CONTEXT → verify membership, then return ONLY this team's data.
+    // TEAM CONTEXT → verify membership AND that the team belongs to the
+    // current workspace. Pro app must reject Team-app teamIds and vice-versa.
     const [membership, ownedTeam] = await Promise.all([
       prisma.teamMember.findFirst({
-        where: { teamId: activeTeamId, userId },
+        where: {
+          teamId: activeTeamId,
+          userId,
+          team: { deletedAt: null, ...appCtxFilter },
+        },
         select: { id: true },
       }),
       prisma.team.findFirst({
-        where: { id: activeTeamId, teamOwnerId: userId },
+        where: {
+          id: activeTeamId,
+          teamOwnerId: userId,
+          deletedAt: null,
+          ...appCtxFilter,
+        },
         select: { id: true },
       }),
     ]);

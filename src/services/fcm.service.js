@@ -46,4 +46,54 @@ async function sendToUser(userId, title, body, data = {}) {
   return sendPushNotification(fb.fcmToken, title, body, data);
 }
 
-module.exports = { sendPushNotification, sendToUser };
+async function broadcastToAll(title, body, data = {}) {
+  init();
+  if (!initialized) return { success: false, error: "FCM not configured" };
+  const rows = await prisma.firebaseUser.findMany({
+    where: { fcmToken: { not: null }, deletedAt: null },
+    select: { id: true, fcmToken: true },
+  });
+  if (rows.length === 0) return { success: true, sent: 0, failed: 0, total: 0 };
+
+  const stringData = Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [k, String(v)]),
+  );
+  const tokens = rows.map((r) => r.fcmToken);
+
+  const res = await admin.messaging().sendEachForMulticast({
+    tokens,
+    notification: { title, body },
+    data: stringData,
+    android: { priority: "high" },
+    apns: { payload: { aps: { sound: "default" } } },
+    webpush: data.url ? { fcmOptions: { link: data.url } } : undefined,
+  });
+
+  // Clean up tokens FCM says are no longer registered
+  const stale = [];
+  res.responses.forEach((r, i) => {
+    if (
+      !r.success &&
+      (r.error?.code === "messaging/registration-token-not-registered" ||
+        r.error?.code === "messaging/invalid-registration-token")
+    ) {
+      stale.push(rows[i].id);
+    }
+  });
+  if (stale.length > 0) {
+    await prisma.firebaseUser.updateMany({
+      where: { id: { in: stale } },
+      data: { fcmToken: null },
+    });
+  }
+
+  return {
+    success: true,
+    total: rows.length,
+    sent: res.successCount,
+    failed: res.failureCount,
+    cleaned: stale.length,
+  };
+}
+
+module.exports = { sendPushNotification, sendToUser, broadcastToAll };

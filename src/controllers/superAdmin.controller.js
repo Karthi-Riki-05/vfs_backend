@@ -2,6 +2,8 @@ const argon2 = require("argon2");
 const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const { prisma } = require("../lib/prisma");
+const { getStripe } = require("../lib/stripe");
+const fcmService = require("../services/fcm.service");
 
 /**
  * Builds (but doesn't execute) the PrismaPromise that archives the given
@@ -2351,6 +2353,57 @@ class SuperAdminController {
       success: true,
       data: { message: "Password reset successfully" },
     });
+  });
+
+  processRefund = asyncHandler(async (req, res) => {
+    const { chargeId, amount, reason } = req.body;
+    if (!chargeId) {
+      throw new AppError("chargeId is required", 400, "MISSING_CHARGE_ID");
+    }
+
+    const stripe = getStripe();
+    const refund = await stripe.refunds.create({
+      charge: chargeId,
+      ...(amount ? { amount: Math.round(Number(amount) * 100) } : {}),
+      reason: reason || "requested_by_customer",
+      metadata: {
+        processedBy: req.user.id,
+        processedAt: new Date().toISOString(),
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        refundId: refund.id,
+        status: refund.status,
+        amount: refund.amount / 100,
+        currency: refund.currency,
+      },
+    });
+  });
+
+  broadcastNotification = asyncHandler(async (req, res) => {
+    const { title, body, url, kind } = req.body || {};
+    if (!title || !body) {
+      throw new AppError(
+        "title and body are required",
+        400,
+        "VALIDATION_ERROR",
+      );
+    }
+    const data = {};
+    if (url) data.url = url;
+    if (kind) data.kind = kind;
+    const result = await fcmService.broadcastToAll(title, body, data);
+    res.json({ success: true, data: result });
+  });
+
+  countDevices = asyncHandler(async (req, res) => {
+    const total = await prisma.firebaseUser.count({
+      where: { fcmToken: { not: null }, deletedAt: null },
+    });
+    res.json({ success: true, data: { total } });
   });
 }
 

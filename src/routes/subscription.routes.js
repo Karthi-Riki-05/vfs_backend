@@ -1,12 +1,17 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const subscriptionController = require('../controllers/subscription.controller');
-const { authenticate } = require('../middleware/auth.middleware');
-const validate = require('../middleware/validate');
-const { subscribeSchema, createCheckoutSchema, changePlanSchema, verifySessionSchema } = require('../validators/subscription.validator');
+const subscriptionController = require("../controllers/subscription.controller");
+const { authenticate } = require("../middleware/auth.middleware");
+const validate = require("../middleware/validate");
+const {
+  subscribeSchema,
+  createCheckoutSchema,
+  changePlanSchema,
+  verifySessionSchema,
+} = require("../validators/subscription.validator");
 
 // Stripe webhook (no auth, raw body)
-router.post('/webhook', subscriptionController.handleWebhook);
+router.post("/webhook", subscriptionController.handleWebhook);
 
 /**
  * @swagger
@@ -18,88 +23,112 @@ router.post('/webhook', subscriptionController.handleWebhook);
  *       200:
  *         description: List of plans
  */
-router.get('/plans', subscriptionController.getPlans);
+router.get("/plans", subscriptionController.getPlans);
 
 // Subscription info (dashboard widget) — needs auth
-router.get('/info', authenticate, async (req, res) => {
+router.get("/info", authenticate, async (req, res) => {
+  try {
+    const { prisma } = require("../lib/prisma");
+    const userId = req.user.id;
+
+    // Get user's subscription with plan
+    let sub = null;
     try {
-        const { prisma } = require('../lib/prisma');
-        const userId = req.user.id;
-
-        // Get user's subscription with plan
-        let sub = null;
-        try {
-            sub = await prisma.subscription.findUnique({
-                where: { userId },
-                include: { plan: true },
-            });
-        } catch { /* table may not exist */ }
-
-        // Get user for pro status
-        let user = null;
-        try {
-            user = await prisma.user.findUnique({
-                where: { id: userId },
-                select: { hasPro: true, currentVersion: true },
-            });
-        } catch { /* fields may not exist */ }
-
-        // Count chat messages (last 30 days)
-        let messagesUsed = 0;
-        try {
-            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-            messagesUsed = await prisma.chatMessage.count({
-                where: { senderId: userId, createdAt: { gte: thirtyDaysAgo } },
-            });
-        } catch { /* table may not exist */ }
-
-        // Storage estimate from flows
-        let storageUsedMb = 0;
-        try {
-            const flows = await prisma.flow.findMany({
-                where: { ownerId: userId, deletedAt: null },
-                select: { diagramData: true },
-            });
-            const totalBytes = flows.reduce((sum, f) => sum + (f.diagramData?.length || 0), 0);
-            storageUsedMb = Math.round((totalBytes / 1024 / 1024) * 100) / 100;
-        } catch { /* ignore */ }
-
-        // Build response
-        if (!sub) {
-            return res.json({ success: true, data: {
-                plan: 'Free',
-                is_active: true,
-                is_pro: !!(user?.hasPro),
-                expires_at: null,
-                billing_period_days: 30,
-                messages_used: messagesUsed,
-                messages_limit: 50,
-                storage_used_mb: storageUsedMb,
-                storage_limit_mb: 100,
-            }});
-        }
-
-        const isActive = sub.status === 'active' || sub.status === 'trialing';
-        const expiresAt = sub.expiresAt || null;
-
-        res.json({ success: true, data: {
-            plan: sub.plan?.name || 'Free',
-            is_active: isActive,
-            is_pro: !!(user?.hasPro),
-            expires_at: expiresAt,
-            billing_period_days: sub.plan?.duration === 'yearly' ? 365 : 30,
-            messages_used: messagesUsed,
-            messages_limit: sub.plan?.tier >= 1 ? 500 : 50,
-            storage_used_mb: storageUsedMb,
-            storage_limit_mb: sub.plan?.tier >= 1 ? 1000 : 100,
-        }});
-    } catch (err) {
-        console.error('Subscription info error:', err);
-        res.json({ success: true, data: {
-            plan: 'Free', is_active: true, is_pro: false,
-            expires_at: null, messages_used: 0, messages_limit: 50,
-        }});
+      sub = await prisma.subscription.findUnique({
+        where: { userId },
+        include: { plan: true },
+      });
+    } catch {
+      /* table may not exist */
     }
+
+    // Get user for pro status
+    let user = null;
+    try {
+      user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { hasPro: true, currentVersion: true },
+      });
+    } catch {
+      /* fields may not exist */
+    }
+
+    // Count chat messages (last 30 days)
+    let messagesUsed = 0;
+    try {
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      messagesUsed = await prisma.chatMessage.count({
+        where: { senderId: userId, createdAt: { gte: thirtyDaysAgo } },
+      });
+    } catch {
+      /* table may not exist */
+    }
+
+    // Storage estimate from flows
+    let storageUsedMb = 0;
+    try {
+      const flows = await prisma.flow.findMany({
+        where: { ownerId: userId, deletedAt: null },
+        select: { diagramData: true },
+      });
+      const totalBytes = flows.reduce(
+        (sum, f) => sum + (f.diagramData?.length || 0),
+        0,
+      );
+      storageUsedMb = Math.round((totalBytes / 1024 / 1024) * 100) / 100;
+    } catch {
+      /* ignore */
+    }
+
+    // Build response
+    if (!sub) {
+      return res.json({
+        success: true,
+        data: {
+          plan: "Free",
+          is_active: true,
+          is_pro: !!user?.hasPro,
+          expires_at: null,
+          billing_period_days: 30,
+          messages_used: messagesUsed,
+          messages_limit: 50,
+          storage_used_mb: storageUsedMb,
+          storage_limit_mb: 100,
+        },
+      });
+    }
+
+    const isActive = sub.status === "active" || sub.status === "trialing";
+    const expiresAt = sub.expiresAt || null;
+
+    res.json({
+      success: true,
+      data: {
+        plan: sub.plan?.name || "Free",
+        is_active: isActive,
+        is_pro: !!user?.hasPro,
+        expires_at: expiresAt,
+        billing_period_days: sub.plan?.duration === "yearly" ? 365 : 30,
+        messages_used: messagesUsed,
+        messages_limit: sub.plan?.tier >= 1 ? 500 : 50,
+        storage_used_mb: storageUsedMb,
+        storage_limit_mb: sub.plan?.tier >= 1 ? 1000 : 100,
+      },
+    });
+  } catch (err) {
+    console.error("Subscription info error:", err);
+    res.json({
+      success: true,
+      data: {
+        plan: "Free",
+        is_active: true,
+        is_pro: false,
+        expires_at: null,
+        messages_used: 0,
+        messages_limit: 50,
+      },
+    });
+  }
 });
 
 // All routes below require authentication
@@ -131,9 +160,17 @@ router.use(authenticate);
  *       200:
  *         description: Stripe checkout session created
  */
-router.post('/create-checkout-session', validate(createCheckoutSchema), subscriptionController.createCheckoutSession);
+router.post(
+  "/create-checkout-session",
+  validate(createCheckoutSchema),
+  subscriptionController.createCheckoutSession,
+);
 
-router.post('/verify-session', validate(verifySessionSchema), subscriptionController.verifySession);
+router.post(
+  "/verify-session",
+  validate(verifySessionSchema),
+  subscriptionController.verifySession,
+);
 
 /**
  * @swagger
@@ -147,7 +184,7 @@ router.post('/verify-session', validate(verifySessionSchema), subscriptionContro
  *       200:
  *         description: Subscription status
  */
-router.get('/status', subscriptionController.getStatus);
+router.get("/status", subscriptionController.getStatus);
 
 /**
  * @swagger
@@ -175,7 +212,11 @@ router.get('/status', subscriptionController.getStatus);
  *       200:
  *         description: Plan changed successfully
  */
-router.post('/change-plan', validate(changePlanSchema), subscriptionController.changePlan);
+router.post(
+  "/change-plan",
+  validate(changePlanSchema),
+  subscriptionController.changePlan,
+);
 
 /**
  * @swagger
@@ -191,7 +232,7 @@ router.post('/change-plan', validate(changePlanSchema), subscriptionController.c
  *       401:
  *         description: Unauthorized
  */
-router.get('/current', subscriptionController.getCurrentSubscription);
+router.get("/current", subscriptionController.getCurrentSubscription);
 
 /**
  * @swagger
@@ -217,7 +258,11 @@ router.get('/current', subscriptionController.getCurrentSubscription);
  *       400:
  *         description: Validation error
  */
-router.post('/subscribe', validate(subscribeSchema), subscriptionController.subscribe);
+router.post(
+  "/subscribe",
+  validate(subscribeSchema),
+  subscriptionController.subscribe,
+);
 
 /**
  * @swagger
@@ -231,7 +276,7 @@ router.post('/subscribe', validate(subscribeSchema), subscriptionController.subs
  *       200:
  *         description: Subscription cancelled
  */
-router.post('/cancel', subscriptionController.cancel);
+router.post("/cancel", subscriptionController.cancel);
 
 /**
  * @swagger
@@ -249,7 +294,7 @@ router.post('/cancel', subscriptionController.cancel);
  *       404:
  *         description: No subscription found
  */
-router.post('/reactivate', subscriptionController.reactivate);
+router.post("/reactivate", subscriptionController.reactivate);
 
 /**
  * @swagger
@@ -265,7 +310,7 @@ router.post('/reactivate', subscriptionController.reactivate);
  *       400:
  *         description: No scheduled change found
  */
-router.post('/activate-now', subscriptionController.activateNow);
+router.post("/activate-now", subscriptionController.activateNow);
 
 /**
  * @swagger
@@ -281,6 +326,36 @@ router.post('/activate-now', subscriptionController.activateNow);
  *       400:
  *         description: No scheduled change found
  */
-router.post('/cancel-scheduled', subscriptionController.cancelScheduled);
+router.post("/cancel-scheduled", subscriptionController.cancelScheduled);
+
+/**
+ * @swagger
+ * /api/v1/subscription/customer-portal:
+ *   post:
+ *     summary: Create a Stripe Customer Portal session
+ *     tags: [Subscription]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Returns Stripe-hosted portal URL
+ *       400:
+ *         description: User has no Stripe customer
+ */
+router.post("/customer-portal", subscriptionController.createPortalSession);
+
+/**
+ * @swagger
+ * /api/v1/subscription/history:
+ *   get:
+ *     summary: Get user's subscription history (past plans)
+ *     tags: [Subscription]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Paginated subscription history
+ */
+router.get("/history", subscriptionController.getHistory);
 
 module.exports = router;

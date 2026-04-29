@@ -198,6 +198,13 @@ model User {
   proFlowLimit                Int         @default(10) @map("pro_flow_limit")
   proAdditionalFlowsPurchased Int         @default(0) @map("pro_additional_flows_purchased")
   proUnlimitedFlows           Boolean     @default(false) @map("pro_unlimited_flows")
+  // Pack-lifecycle tracking. activeFlowPackId is the most recent ACTIVE
+  // ProFlowPurchase; nulled when the pack expires past grace period.
+  // isInFlowPickerPhase is set when a user with >10 personal flows expires
+  // out of grace and must select 10 flows to keep.
+  activeFlowPackId            String?     @map("active_flow_pack_id")
+  flowPackExpiresAt           DateTime?   @map("flow_pack_expires_at")
+  isInFlowPickerPhase         Boolean     @default(false) @map("is_in_flow_picker_phase")
   currentVersion              UserVersion @default(free) @map("current_version")
   refreshToken                String?     @map("refresh_token") @db.Text
 
@@ -257,6 +264,7 @@ model User {
   addUserSubs          AddUserSubscription[]
   projects             Project[]
   proFlowPurchases     ProFlowPurchase[]
+  notifications        Notification[]
   teamInvitesSent      TeamInvite[]          @relation("TeamInviteSender")
   teamInvitesAccepted  TeamInvite[]          @relation("TeamInviteAcceptor")
   flowSharesGiven      FlowShare[]           @relation("FlowShareSharedBy")
@@ -269,6 +277,7 @@ model User {
   adminLogsGiven       AdminLog[]            @relation("AdminLogAdmin")
   adminLogsReceived    AdminLog[]            @relation("AdminLogTarget")
   subscriptionHistory  SubscriptionHistory[]
+  transactionLogs      TransactionLog[]
 
   @@index([legacyVsId])
   @@index([companyId])
@@ -519,6 +528,7 @@ model Team {
   members     TeamMember[]
   invites     TeamInvite[]
   flows       Flow[]
+  projects    Project[]
   chatGroups  ChatGroup[]
   createdAt   DateTime     @default(now()) @map("created_at")
   updatedAt   DateTime?    @map("updated_at")
@@ -603,6 +613,10 @@ model Flow {
   team           Team?           @relation(fields: [teamId], references: [id], onDelete: SetNull)
   appType        AppType?        @map("app_type")
   appContext     UserVersion     @default(free) @map("app_context")
+  // Flagged true when an expired flow pack pushes the flow into the
+  // 30-day trash queue. Cleared on plan renewal (auto-restore) or user
+  // selection in the flow picker.
+  markedForDowngrade Boolean    @default(false) @map("marked_for_downgrade")
   version        Int             @default(1)
   flowGroupUsers FlowGroupUser[]
   flowPublishes  FlowPublish[]
@@ -1028,6 +1042,8 @@ model TransactionLog {
   id            String    @id @default(cuid())
   legacyId      Int?      @map("legacy_id")
   legacySource  String?   @map("legacy_source")
+  userId        String?   @map("user_id")
+  user          User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
   chargeId      String?   @map("charge_id")
   txnId         String?   @map("txn_id")
   amountCharged Int?      @map("amount_charged") // In cents
@@ -1041,6 +1057,7 @@ model TransactionLog {
   deletedAt     DateTime? @map("deleted_at")
 
   @@index([chargeId])
+  @@index([userId])
   @@map("transaction_logs")
 }
 
@@ -1262,6 +1279,8 @@ model Project {
   coverImage  String?     @map("cover_image")
   createdBy   String      @map("created_by")
   creator     User        @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  teamId      String?     @map("team_id")
+  team        Team?       @relation(fields: [teamId], references: [id], onDelete: Cascade)
   appContext  UserVersion @default(free) @map("app_context")
   flows       Flow[]
   createdAt   DateTime    @default(now()) @map("created_at")
@@ -1269,6 +1288,7 @@ model Project {
   deletedAt   DateTime?   @map("deleted_at")
 
   @@index([createdBy])
+  @@index([teamId])
   @@index([appContext])
   @@map("projects")
 }
@@ -1285,10 +1305,53 @@ model ProFlowPurchase {
   flowCount             Int      @map("flow_count")
   amountCents           Int      @map("amount_cents")
   stripePaymentIntentId String?  @map("stripe_payment_intent_id")
+  // Lifecycle: 30-day pack with 3-day grace period.
+  // status: active | grace | expired | renewed
+  packType              String   @default("fifty_flows") @map("pack_type")
+  isUnlimited           Boolean  @default(false) @map("is_unlimited")
+  expiresAt             DateTime? @map("expires_at")
+  gracePeriodEndsAt     DateTime? @map("grace_period_ends_at")
+  status                String   @default("active") @map("status")
+  notified7Days         Boolean  @default(false) @map("notified_7_days")
+  notified3Days         Boolean  @default(false) @map("notified_3_days")
+  notified1Day          Boolean  @default(false) @map("notified_1_day")
+  renewedFromId         String?  @map("renewed_from_id")
+  renewedFrom           ProFlowPurchase?  @relation("PackRenewal", fields: [renewedFromId], references: [id], onDelete: SetNull)
+  renewals              ProFlowPurchase[] @relation("PackRenewal")
   createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
 
   @@index([userId])
+  @@index([status])
+  @@index([expiresAt])
   @@map("pro_flow_purchases")
+}
+
+// ============================================================
+// 36b. NOTIFICATIONS
+// In-app notification feed (bell icon). Lifecycle managed by the
+// flow-pack expiry cron and any future event sources.
+// ============================================================
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Examples: flow_pack_7day, flow_pack_3day, flow_pack_1day,
+  //           flow_pack_grace, flow_pack_expired, flow_picker_required,
+  //           flows_restored.
+  type      String
+  title     String
+  message   String    @db.Text
+  isRead    Boolean   @default(false) @map("is_read")
+  actionUrl String?   @map("action_url")
+  metadata  Json?
+  createdAt DateTime  @default(now()) @map("created_at")
+  expiresAt DateTime? @map("expires_at")
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
 }
 
 // ============================================================

@@ -169,6 +169,8 @@ app.use("/api/v1/ai-assistant", aiAssistantRoutes);
 app.use("/api/v1/ai", aiCreditRoutes);
 app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/dashboard", dashboardRoutes);
+app.use("/api/v1/notifications", require("./src/routes/notification.routes"));
+app.use("/api/notifications", require("./src/routes/notification.routes"));
 app.use("/api/v1/auth/mobile", require("./src/routes/mobile.auth.routes"));
 
 // Backwards-compatible aliases (old /api/ routes -> /api/v1/)
@@ -245,6 +247,24 @@ if (process.env.NODE_ENV !== "test") {
       }
     });
     logger.info("[Cron] AI credit monthly reset scheduled (0 0 1 * *)");
+
+    // Daily flow-pack expiry sweep at 09:00 UTC. Runs in-process by
+    // calling the service directly (no HTTP round-trip needed when we
+    // already share a Node runtime).
+    const flowPackExpiry = require("./src/services/flowPackExpiry.service");
+    cron.schedule(
+      "0 9 * * *",
+      async () => {
+        try {
+          const summary = await flowPackExpiry.runDailyCheck();
+          logger.info(`[Cron] Flow-pack expiry: ${JSON.stringify(summary)}`);
+        } catch (err) {
+          logger.error("[Cron] Flow-pack expiry failed:", err);
+        }
+      },
+      { timezone: "UTC" },
+    );
+    logger.info("[Cron] Flow-pack expiry scheduled (0 9 * * * UTC)");
   } catch (err) {
     logger.warn(`[Cron] Failed to schedule AI credit reset: ${err.message}`);
   }

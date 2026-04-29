@@ -5,7 +5,7 @@ class DashboardController {
   getStats = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
-    const { teamId } = req.query;
+    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const stats = await dashboardService.getStats(userId, appContext, teamId);
     res.json({ success: true, data: stats });
   });
@@ -13,7 +13,7 @@ class DashboardController {
   getActivity = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
-    const { teamId } = req.query;
+    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const activity = await dashboardService.getActivity(
       userId,
       appContext,
@@ -26,7 +26,7 @@ class DashboardController {
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
     const limit = Math.min(Number(req.query.limit) || 5, 20);
-    const { teamId } = req.query;
+    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const flows = await dashboardService.getRecentFlows(
       userId,
       appContext,
@@ -39,7 +39,12 @@ class DashboardController {
   getTeamActivity = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const limit = Math.min(Number(req.query.limit) || 10, 50);
-    const activity = await dashboardService.getTeamActivity(userId, limit);
+    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    const activity = await dashboardService.getTeamActivity(
+      userId,
+      limit,
+      teamId,
+    );
     res.json({ success: true, data: activity });
   });
 }

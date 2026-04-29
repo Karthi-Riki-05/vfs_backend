@@ -56,7 +56,6 @@ const getFlowsQuerySchema = z.object({
       .pipe(z.number().int().min(1).max(100))
       .optional(),
     nonEmpty: z.enum(["true", "false"]).optional(),
-    draftsOnly: z.enum(["true", "false"]).optional(),
     sort: z.string().max(32).optional(),
     teamId: z.string().max(128).optional(),
   }),

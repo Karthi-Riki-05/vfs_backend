@@ -9,15 +9,19 @@ class TeamService {
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // NB: do NOT filter by appContext. The caller's `users.current_version`
-    // can drift from the actual team plan (e.g. team owner's row still says
-    // 'free' while their team is appContext='team'), which would silently
-    // hide their own team from the list. Membership/ownership is the
-    // entitlement — show every team the user belongs to.
+    // App-isolation: Pro app and Team app are separate workspaces. When the
+    // caller is inside Pro (currentVersion='pro'), they must ONLY see teams
+    // they created in the Pro workspace (team.appContext='pro'). Team-app
+    // teams (appContext='free'|'team') stay invisible from inside Pro and
+    // vice-versa. Keep legacy behavior for non-Pro contexts: show every
+    // team the user belongs to.
     const where = {
       deletedAt: null,
       OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
     };
+    if (appContext === "pro") {
+      where.appContext = "pro";
+    }
 
     const [teams, total] = await Promise.all([
       prisma.team.findMany({
@@ -47,12 +51,17 @@ class TeamService {
     };
   }
 
-  async getTeamById(teamId, userId) {
+  async getTeamById(teamId, userId, appContext = "free") {
+    const where = {
+      id: teamId,
+      OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
+    };
+    // App-isolation: in Pro app, only Pro-context teams are visible.
+    if (appContext === "pro") {
+      where.appContext = "pro";
+    }
     const team = await prisma.team.findFirst({
-      where: {
-        id: teamId,
-        OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
-      },
+      where,
       include: {
         owner: { select: { id: true, name: true, email: true } },
         members: {
@@ -164,8 +173,15 @@ class TeamService {
     if (!team)
       throw new AppError("Team not found or not owner", 404, "NOT_FOUND");
 
-    // Check member limit
-    if (team.teamMem > 0) {
+    // Pro lifetime owners: unlimited team members (skip seat-limit check).
+    const owner = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { hasPro: true, proPurchasedAt: true },
+    });
+    const isProOwner = !!(owner?.hasPro && owner?.proPurchasedAt);
+
+    // Check member limit (skip for Pro lifetime owners)
+    if (!isProOwner && team.teamMem > 0) {
       const memberCount = await prisma.teamMember.count({ where: { teamId } });
       if (memberCount >= team.teamMem) {
         throw new AppError("Team member limit reached", 400, "MEMBER_LIMIT");
@@ -346,6 +362,26 @@ class TeamService {
           acceptUrl,
         });
       }
+
+      // Best-effort FCM push if the invitee already has an account + token.
+      try {
+        if (existingUser) {
+          const fcm = require("./fcm.service");
+          const isProInvite = (inviteTeam.appContext || appContext) === "pro";
+          await fcm.sendToUser(
+            existingUser.id,
+            `${inviter?.name || "Someone"} invited you to a team`,
+            `Join ${inviteTeam.name || "their team"} on ValueChart${isProInvite ? " Pro" : ""}`,
+            {
+              type: "team_invite",
+              token,
+              url: `/invite/accept?token=${token}`,
+            },
+          );
+        }
+      } catch {
+        // never block invite on FCM failure
+      }
     }
 
     return results;
@@ -385,15 +421,30 @@ class TeamService {
       throw new AppError("Invitation has expired", 400, "EXPIRED");
     }
 
+    // Pro-app invites require the invitee to hold lifetime Pro ($1) before
+    // joining. Surface that requirement so the FE can route to the
+    // /invite/pro-purchase flow when needed.
+    const inviteAppContext =
+      invite.appContext || invite.team?.appContext || "free";
+    let requiresProPurchase = false;
+    if (inviteAppContext === "pro") {
+      const invitee = await prisma.user.findUnique({
+        where: { email: invite.email.toLowerCase() },
+        select: { hasPro: true, proPurchasedAt: true },
+      });
+      requiresProPurchase = !invitee?.hasPro || !invitee?.proPurchasedAt;
+    }
+
     return {
       teamName: invite.team?.name || "Unknown Team",
       teamId: invite.team?.id,
       inviterName:
         invite.inviter?.name || invite.inviter?.email || "A team member",
       inviterEmail: invite.inviter?.email,
-      appContext: invite.appContext || invite.team?.appContext || "free",
+      appContext: inviteAppContext,
       role: invite.role,
       email: invite.email,
+      requiresProPurchase,
     };
   }
 
@@ -413,7 +464,7 @@ class TeamService {
     // Verify the accepting user's email matches the invitation
     const acceptingUser = await prisma.user.findUnique({
       where: { id: userId },
-      select: { email: true },
+      select: { email: true, hasPro: true, proPurchasedAt: true },
     });
     if (!acceptingUser) throw new AppError("User not found", 404, "NOT_FOUND");
 
@@ -422,6 +473,19 @@ class TeamService {
         `This invitation was sent to ${invite.email}. Please log in with that email to accept.`,
         403,
         "EMAIL_MISMATCH",
+      );
+    }
+
+    // Pro-app invites require the lifetime $1 entitlement before joining.
+    // Caller should hand the user off to /invite/pro-purchase first.
+    if (
+      invite.appContext === "pro" &&
+      (!acceptingUser.hasPro || !acceptingUser.proPurchasedAt)
+    ) {
+      throw new AppError(
+        "This team uses ValueChart Pro. Purchase Pro ($1 lifetime) to join.",
+        402,
+        "PRO_REQUIRED",
       );
     }
 

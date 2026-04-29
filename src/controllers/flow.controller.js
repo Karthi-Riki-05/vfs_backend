@@ -12,13 +12,13 @@ class FlowController {
   getAllFlows = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
-    const { search, page, limit, nonEmpty, draftsOnly } = req.query;
+    const { search, page, limit, nonEmpty } = req.query;
     // teamId may arrive as a query param or via the X-Team-Context header
     // set by the frontend axios interceptor.
     const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const result = await flowService.getAllFlows(
       userId,
-      { search, page, limit, nonEmpty, draftsOnly, teamId },
+      { search, page, limit, nonEmpty, teamId },
       appContext,
     );
     const shared = await flowService.getSharedFlows(
@@ -165,11 +165,11 @@ class FlowController {
   getAllFlowsWithShared = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
-    const { search, page, limit, nonEmpty, draftsOnly } = req.query;
+    const { search, page, limit, nonEmpty } = req.query;
     const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const own = await flowService.getAllFlows(
       userId,
-      { search, page, limit, nonEmpty, draftsOnly, teamId },
+      { search, page, limit, nonEmpty, teamId },
       appContext,
     );
     const shared = await flowService.getSharedFlows(
@@ -427,6 +427,24 @@ HARD RULES — follow exactly or the diagram will fail to render:
       success: true,
       data: { message: "Flow restored to selected version" },
     });
+  });
+
+  pickerList = asyncHandler(async (req, res) => {
+    const flows = await flowService.getPickerList(req.user.id);
+    res.json({ success: true, data: flows });
+  });
+
+  confirmSelection = asyncHandler(async (req, res) => {
+    const result = await flowService.confirmSelection(
+      req.user.id,
+      req.body?.selectedFlowIds || [],
+    );
+    res.json({ success: true, data: result });
+  });
+
+  packStatus = asyncHandler(async (req, res) => {
+    const status = await flowService.getPackStatus(req.user.id);
+    res.json({ success: true, data: status });
   });
 }
 

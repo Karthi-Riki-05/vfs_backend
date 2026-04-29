@@ -229,4 +229,30 @@ router.post("/fcm-token", authenticate, c.registerFcmToken);
  */
 router.get("/editor-url/:flowId", authenticate, c.getMobileEditorUrl);
 
+/**
+ * @swagger
+ * /api/v1/auth/mobile/register-device:
+ *   post:
+ *     summary: Register a mobile device (FCM token + metadata)
+ *     tags: [Mobile Auth]
+ *     security: [{ bearerAuth: [] }]
+ */
+router.post("/register-device", authenticate, c.registerDevice);
+
+/**
+ * @swagger
+ * /api/v1/auth/mobile/app-version:
+ *   get:
+ *     summary: Build/force-update gate for mobile clients
+ *     tags: [Mobile Auth]
+ *     parameters:
+ *       - in: query
+ *         name: platform
+ *         schema: { type: string, enum: [ios, android] }
+ *       - in: query
+ *         name: version
+ *         schema: { type: string, example: "1.2.0" }
+ */
+router.get("/app-version", c.appVersion);
+
 module.exports = router;

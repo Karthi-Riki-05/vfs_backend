@@ -14,7 +14,12 @@ class TeamController {
   });
 
   getTeamById = asyncHandler(async (req, res) => {
-    const team = await teamService.getTeamById(req.params.id, req.user.id);
+    const appContext = req.user.currentVersion || "free";
+    const team = await teamService.getTeamById(
+      req.params.id,
+      req.user.id,
+      appContext,
+    );
     res.json({ success: true, data: team });
   });
 
@@ -91,12 +96,10 @@ class TeamController {
       emailList,
       appContext,
     );
-    res
-      .status(201)
-      .json({
-        success: true,
-        data: { message: "Invitations processed", results },
-      });
+    res.status(201).json({
+      success: true,
+      data: { message: "Invitations processed", results },
+    });
   });
 
   verifyInvite = asyncHandler(async (req, res) => {

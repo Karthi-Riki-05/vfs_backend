@@ -3,6 +3,35 @@ const { getStripe, getStripeCurrency } = require("../lib/stripe");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const proService = require("./pro.service");
+const { sendEmail, emailTemplates } = require("../utils/email");
+
+// Reset paid user back to free tier — called when Stripe sub is deleted/expired.
+async function downgradeUser(userId) {
+  if (!userId) return;
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, hasPro: true, currentVersion: true },
+  });
+  if (!user) return;
+  if (!user.hasPro && user.currentVersion === "free") return;
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      hasPro: false,
+      currentVersion: "free",
+      proUnlimitedFlows: false,
+      proFlowLimit: 10,
+    },
+  });
+
+  await prisma.aiCreditBalance.updateMany({
+    where: { userId },
+    data: { planCredits: 20 },
+  });
+
+  logger.info(`[Payment] User ${userId} downgraded to free`);
+}
 
 class PaymentService {
   async createCheckoutSession(userId, planId, urls = {}) {
@@ -87,11 +116,75 @@ class PaymentService {
       case "customer.subscription.deleted":
         await this._handleSubscriptionDeleted(event.data.object);
         break;
+      case "charge.refunded":
+        await this._handleChargeRefunded(event.data.object);
+        break;
       default:
         logger.info(`Unhandled webhook event: ${event.type}`);
     }
 
     return { received: true };
+  }
+
+  async _handleChargeRefunded(charge) {
+    const isFull = charge.amount_refunded >= charge.amount;
+    const newStatus = isFull ? "refunded" : "partially_refunded";
+
+    const idCandidates = [charge.id, charge.payment_intent].filter(Boolean);
+
+    // Update transaction log(s) for this charge / payment_intent
+    await prisma.transactionLog.updateMany({
+      where: {
+        OR: [
+          ...idCandidates.map((id) => ({ chargeId: id })),
+          ...idCandidates.map((id) => ({ txnId: id })),
+        ],
+      },
+      data: { status: newStatus, updatedAt: new Date() },
+    });
+
+    // Find the txn directly to get user
+    const txLog = await prisma.transactionLog.findFirst({
+      where: {
+        OR: [
+          ...idCandidates.map((id) => ({ chargeId: id })),
+          ...idCandidates.map((id) => ({ txnId: id })),
+        ],
+      },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    const user = txLog?.user || null;
+
+    if (user?.email) {
+      const amount = (charge.amount_refunded / 100).toFixed(2);
+      const currency = (charge.currency || "usd").toUpperCase();
+      sendEmail({
+        to: user.email,
+        subject: "Refund Processed — ValueChart",
+        html: `
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
+  <div style="text-align:center;padding:24px 0;background:#3CB371;border-radius:8px 8px 0 0">
+    <h1 style="color:#fff;margin:0;font-size:22px">Refund Processed ✅</h1>
+  </div>
+  <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
+    <p style="font-size:15px">Hi ${user.name || "there"},</p>
+    <p style="font-size:15px;line-height:1.6">A refund of <strong>${currency} $${amount}</strong> has been processed to your original payment method.</p>
+    <p style="font-size:14px;color:#666">Please allow 5–10 business days for it to appear on your statement.</p>
+    <p style="color:#888;font-size:12px;margin-top:24px;border-top:1px solid #eee;padding-top:16px">Questions? Reply to this email or contact support.</p>
+  </div>
+</div>`,
+        text: `Hi ${user.name || "there"},\n\nA refund of ${currency} $${amount} has been processed. Allow 5-10 business days for it to appear on your statement.`,
+      }).catch((err) =>
+        logger.error(`[Email] refund send failed: ${err.message}`),
+      );
+    }
+
+    logger.info(
+      `[Webhook] Refund processed: charge=${charge.id} amount=${charge.amount_refunded}/${charge.amount} status=${newStatus}`,
+    );
   }
 
   async _handleCheckoutComplete(session) {
@@ -137,12 +230,14 @@ class PaymentService {
       if (!existingTxn) {
         await prisma.transactionLog.create({
           data: {
+            userId: uid,
             chargeId: session.payment_intent || session.id,
             txnId: session.id,
             amountCharged: session.amount_total || 0,
             currency: session.currency || getStripeCurrency(),
             status: "success",
             paymentMethod: session.payment_method_types?.[0] || "card",
+            appType: "individual",
           },
         });
       }
@@ -179,12 +274,16 @@ class PaymentService {
       }),
       prisma.transactionLog.create({
         data: {
+          userId,
           chargeId: session.payment_intent || session.id,
           txnId: session.id,
           amountCharged: session.amount_total || 0,
           currency: session.currency || getStripeCurrency(),
           status: "success",
           paymentMethod: session.payment_method_types?.[0] || "card",
+          // Team plan = enterprise (Pro = individual). Drives billing
+          // page filtering between Pro app and Team app.
+          appType: "enterprise",
         },
       }),
     ]);
@@ -209,18 +308,42 @@ class PaymentService {
   }
 
   async _handlePaymentFailed(invoice) {
-    if (invoice.subscription) {
-      const sub = await prisma.subscription.findFirst({
-        where: { paymentId: invoice.subscription },
-      });
-      if (sub) {
-        await prisma.subscription.update({
-          where: { id: sub.id },
-          data: { status: "past_due" },
-        });
-      }
+    if (!invoice.subscription) {
+      logger.warn(`Payment failed for invoice ${invoice.id} (no sub)`);
+      return;
     }
-    logger.warn(`Payment failed for invoice ${invoice.id}`);
+    const sub = await prisma.subscription.findFirst({
+      where: { paymentId: invoice.subscription },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+        plan: { select: { name: true } },
+      },
+    });
+    if (!sub) return;
+
+    await prisma.subscription.update({
+      where: { id: sub.id },
+      data: { status: "past_due" },
+    });
+    logger.warn(
+      `Payment failed for invoice ${invoice.id} (attempt ${invoice.attempt_count})`,
+    );
+
+    if (invoice.attempt_count >= 4) {
+      logger.error(
+        `[Payment] FINAL payment failure for user ${sub.userId}. Stripe will cancel subscription.`,
+      );
+    }
+
+    if (sub.user?.email) {
+      const tpl = emailTemplates.paymentFailed(
+        sub.user,
+        sub.plan?.name || "Your Plan",
+      );
+      sendEmail({ to: sub.user.email, ...tpl }).catch((err) =>
+        logger.error(`[Email] paymentFailed send failed: ${err.message}`),
+      );
+    }
   }
 
   async _handleSubscriptionUpdated(subscription) {
@@ -241,32 +364,58 @@ class PaymentService {
   async _handleSubscriptionDeleted(subscription) {
     const sub = await prisma.subscription.findFirst({
       where: { paymentId: subscription.id },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+      },
     });
-    if (sub) {
-      await prisma.subscription.update({
-        where: { id: sub.id },
-        data: { status: "cancelled" },
-      });
+    if (!sub) return;
+
+    await prisma.subscription.update({
+      where: { id: sub.id },
+      data: { status: "cancelled", deletedAt: new Date() },
+    });
+
+    // CRITICAL: revoke paid access
+    await downgradeUser(sub.userId);
+
+    if (sub.user?.email) {
+      const tpl = emailTemplates.subscriptionCancelled(sub.user, sub.expiresAt);
+      sendEmail({ to: sub.user.email, ...tpl }).catch((err) =>
+        logger.error(
+          `[Email] subscriptionCancelled send failed: ${err.message}`,
+        ),
+      );
     }
   }
 
   async getTransactions(userId, options = {}) {
-    const { page = 1, limit = 20 } = options;
+    const { page = 1, limit = 20, appType } = options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // Get the user's subscription to find their payment IDs
+    // Direct lookup by userId (new column). Fall back to legacy lookup
+    // via subscription.paymentId for transactions stamped before the
+    // user_id column existed.
     const subscription = await prisma.subscription.findUnique({
       where: { userId },
     });
-    const where = subscription?.paymentId
-      ? {
-          OR: [
-            { chargeId: subscription.paymentId },
-            { txnId: subscription.paymentId },
-          ],
-        }
-      : { chargeId: "__none__" }; // No subscription = no transactions
+    const legacyOr = subscription?.paymentId
+      ? [
+          { chargeId: subscription.paymentId },
+          { txnId: subscription.paymentId },
+        ]
+      : [];
+
+    const where = {
+      OR: [{ userId }, ...legacyOr],
+    };
+
+    // App-type filter: 'individual' = Pro purchases, 'enterprise' = Team
+    // subscription. Untagged legacy rows are returned only when no filter
+    // is requested, so the Pro/Team billing pages stay clean.
+    if (appType === "individual" || appType === "enterprise") {
+      where.appType = appType;
+    }
 
     const [transactions, total] = await Promise.all([
       prisma.transactionLog.findMany({

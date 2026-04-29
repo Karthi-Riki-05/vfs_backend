@@ -4,14 +4,7 @@ const AppError = require("../utils/AppError");
 
 class FlowService {
   async getAllFlows(userId, options = {}, appContext = "free") {
-    const {
-      search,
-      page = 1,
-      limit = 10,
-      nonEmpty,
-      draftsOnly,
-      teamId,
-    } = options;
+    const { search, page = 1, limit = 10, nonEmpty, teamId } = options;
     const take = Math.min(Number(limit) || 10, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
@@ -62,21 +55,6 @@ class FlowService {
           in: ["", "{}", "<mxGraphModel></mxGraphModel>", "<mxGraphModel/>"],
         },
       };
-    }
-
-    // Filter to drafts only (empty or no diagram data)
-    // Use AND to avoid overwriting search OR clause
-    if (draftsOnly === "true") {
-      if (!where.AND) where.AND = [];
-      where.AND.push({
-        OR: [
-          { diagramData: null },
-          { diagramData: "" },
-          { diagramData: "{}" },
-          { diagramData: "<mxGraphModel></mxGraphModel>" },
-          { diagramData: "<mxGraphModel/>" },
-        ],
-      });
     }
 
     const [flows, total] = await Promise.all([
@@ -748,6 +726,169 @@ class FlowService {
     });
 
     return updatedDiagramData;
+  }
+
+  // Flows shown in the picker modal. Order: shared first, then most-
+  // recently updated. Only PERSONAL flows (teamId null) are at risk.
+  async getPickerList(userId) {
+    const flows = await prisma.flow.findMany({
+      where: {
+        ownerId: userId,
+        teamId: null,
+        // Include both active and currently-marked-for-downgrade flows
+        // so the user can see what's at risk and pick from everything.
+        OR: [{ deletedAt: null }, { markedForDowngrade: true }],
+      },
+      select: {
+        id: true,
+        name: true,
+        thumbnail: true,
+        updatedAt: true,
+        markedForDowngrade: true,
+        deletedAt: true,
+        _count: { select: { flowShares: true } },
+      },
+    });
+    flows.sort((a, b) => {
+      const aShared = a._count.flowShares > 0 ? 1 : 0;
+      const bShared = b._count.flowShares > 0 ? 1 : 0;
+      if (aShared !== bShared) return bShared - aShared;
+      return b.updatedAt - a.updatedAt;
+    });
+    return flows.map((f) => ({
+      id: f.id,
+      name: f.name,
+      thumbnail: f.thumbnail,
+      updatedAt: f.updatedAt,
+      shareCount: f._count.flowShares,
+      isShared: f._count.flowShares > 0,
+      markedForDowngrade: f.markedForDowngrade,
+    }));
+  }
+
+  // Confirm the user's 10-flow selection. Trashes everything else.
+  async confirmSelection(userId, selectedIds) {
+    if (!Array.isArray(selectedIds)) {
+      throw new AppError(
+        "selectedFlowIds must be an array",
+        400,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (selectedIds.length > 10) {
+      throw new AppError("You can keep at most 10 flows", 400, "TOO_MANY");
+    }
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { isInFlowPickerPhase: true },
+    });
+    if (!user?.isInFlowPickerPhase) {
+      throw new AppError(
+        "Not in flow-picker phase",
+        400,
+        "NOT_IN_PICKER_PHASE",
+      );
+    }
+
+    // Verify ownership of every selected ID.
+    const owned = await prisma.flow.findMany({
+      where: { id: { in: selectedIds }, ownerId: userId },
+      select: { id: true },
+    });
+    if (owned.length !== selectedIds.length) {
+      throw new AppError(
+        "One or more flows are not owned by you",
+        403,
+        "FORBIDDEN",
+      );
+    }
+
+    const allPersonal = await prisma.flow.findMany({
+      where: { ownerId: userId, teamId: null },
+      select: { id: true, deletedAt: true },
+    });
+    const selectedSet = new Set(selectedIds);
+    const toTrash = allPersonal.filter(
+      (f) => !selectedSet.has(f.id) && f.deletedAt === null,
+    );
+    const trashedIds = toTrash.map((f) => f.id);
+
+    const now = new Date();
+    await prisma.$transaction([
+      prisma.flow.updateMany({
+        where: { id: { in: trashedIds } },
+        data: { deletedAt: now, markedForDowngrade: true },
+      }),
+      // Selected stay active; clear the downgrade flag in case it was set.
+      prisma.flow.updateMany({
+        where: { id: { in: Array.from(selectedSet) } },
+        data: { markedForDowngrade: false, deletedAt: null },
+      }),
+      prisma.user.update({
+        where: { id: userId },
+        data: {
+          isInFlowPickerPhase: false,
+          proFlowLimit: 10,
+        },
+      }),
+    ]);
+
+    return {
+      keptFlows: selectedIds.length,
+      trashedFlows: trashedIds.length,
+      trashedIds,
+    };
+  }
+
+  // Pack-status snapshot used by the frontend banner.
+  async getPackStatus(userId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        proFlowLimit: true,
+        proAdditionalFlowsPurchased: true,
+        proUnlimitedFlows: true,
+        activeFlowPackId: true,
+        flowPackExpiresAt: true,
+        isInFlowPickerPhase: true,
+      },
+    });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    const activePack = user.activeFlowPackId
+      ? await prisma.proFlowPurchase.findUnique({
+          where: { id: user.activeFlowPackId },
+        })
+      : null;
+
+    const flowCount = await prisma.flow.count({
+      where: { ownerId: userId, teamId: null, deletedAt: null },
+    });
+
+    const limit = user.proUnlimitedFlows
+      ? -1
+      : user.proFlowLimit + user.proAdditionalFlowsPurchased;
+
+    let daysUntilExpiry = null;
+    if (user.flowPackExpiresAt) {
+      daysUntilExpiry = Math.ceil(
+        (new Date(user.flowPackExpiresAt).getTime() - Date.now()) /
+          (24 * 3600 * 1000),
+      );
+    }
+
+    return {
+      activePackId: user.activeFlowPackId,
+      packType: activePack?.packType || null,
+      isUnlimited: !!user.proUnlimitedFlows,
+      expiresAt: user.flowPackExpiresAt,
+      gracePeriodEndsAt: activePack?.gracePeriodEndsAt || null,
+      status: activePack?.status || null,
+      flowCount,
+      flowLimit: limit,
+      isInPickerPhase: !!user.isInFlowPickerPhase,
+      daysUntilExpiry,
+    };
   }
 }
 

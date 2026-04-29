@@ -70,6 +70,11 @@ router.get("/favorites", flowController.getFavorites);
 router.get("/trash", flowController.getTrash);
 router.get("/share/members", flowController.getAvailableShareMembers);
 
+// Flow-pack lifecycle
+router.get("/picker-list", flowController.pickerList);
+router.post("/confirm-selection", flowController.confirmSelection);
+router.get("/pack-status", flowController.packStatus);
+
 /**
  * @swagger
  * /api/v1/flows/{id}:

@@ -123,4 +123,19 @@ router.delete(
   superAdminController.removeSuperAdmin,
 );
 
+// Refunds
+router.post(
+  "/refunds",
+  logAdminAction("refund_processed"),
+  superAdminController.processRefund,
+);
+
+// Notifications (push broadcast — used for tests + maintenance announcements)
+router.get("/notifications/devices", superAdminController.countDevices);
+router.post(
+  "/notifications/broadcast",
+  logAdminAction("notification_broadcast"),
+  superAdminController.broadcastNotification,
+);
+
 module.exports = router;

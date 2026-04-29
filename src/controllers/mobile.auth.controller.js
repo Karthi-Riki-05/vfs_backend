@@ -302,6 +302,70 @@ class MobileAuthController {
     res.json({ success: true, data: { message: "FCM token registered" } });
   });
 
+  // Richer device-registration variant. Stores fcmToken via FirebaseUser and
+  // accepts metadata (platform, app version, device ids) so support &
+  // analytics can identify a device without breaking the lighter
+  // /fcm-token endpoint mobile already uses.
+  registerDevice = asyncHandler(async (req, res) => {
+    const { fcmToken, platform, appVersion, deviceId, deviceName } =
+      req.body || {};
+    if (!fcmToken) {
+      throw new AppError("fcmToken is required", 400, "VALIDATION_ERROR");
+    }
+    await prisma.firebaseUser.upsert({
+      where: { userId: req.user.id },
+      create: {
+        userId: req.user.id,
+        fcmToken,
+        fcmUsername: deviceName || platform || null,
+        fcmUserId: deviceId || null,
+        updatedAt: new Date(),
+      },
+      update: {
+        fcmToken,
+        fcmUsername: deviceName || platform || undefined,
+        fcmUserId: deviceId || undefined,
+        updatedAt: new Date(),
+      },
+    });
+    res.json({
+      success: true,
+      data: { message: "Device registered", platform, appVersion },
+    });
+  });
+
+  // Lightweight build/force-update gate consumed by mobile clients on
+  // launch. Values come from env so ops can bump min/required versions
+  // without a code change.
+  appVersion = asyncHandler(async (req, res) => {
+    const minVersion = process.env.MOBILE_MIN_VERSION || "1.0.0";
+    const currentVersion = process.env.MOBILE_CURRENT_VERSION || "1.0.0";
+    const platform = (req.query.platform || "").toString().toLowerCase();
+    const cmp = (a, b) => {
+      const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+      const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+      }
+      return 0;
+    };
+    const clientVersion = (req.query.version || "0.0.0").toString();
+    const updateRequired = cmp(clientVersion, minVersion) < 0;
+    res.json({
+      success: true,
+      data: {
+        minVersion,
+        currentVersion,
+        updateRequired,
+        platform,
+        updateUrl: {
+          ios: process.env.MOBILE_IOS_URL || "",
+          android: process.env.MOBILE_ANDROID_URL || "",
+        },
+      },
+    });
+  });
+
   getMobileEditorUrl = asyncHandler(async (req, res) => {
     const { flowId } = req.params;
 

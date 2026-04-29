@@ -20,10 +20,12 @@ const DISPLAY_RATES = {
 };
 
 const BASE_PRICES_USD = {
-  pro_monthly: 599,
-  pro_yearly: 4999,
-  team_monthly: 999,
-  team_yearly: 7999,
+  pro_monthly: 100, // $1 one-time lifetime (key kept for backward compat with frontend)
+  pro_yearly: 100, // unused — Pro is one-time lifetime, not yearly
+  // Team plan is per-seat. These are PER-USER amounts that the UI multiplies
+  // by the seat count. Must stay in sync with PRICING in subscription.service.js.
+  team_monthly: 100, // $1.00/user/month → 5 users = $5/month
+  team_yearly: 720, // $7.20/user/year → 5 users = $36/year
   addon_starter: 199,
   addon_standard: 399,
   addon_proppack: 799,
