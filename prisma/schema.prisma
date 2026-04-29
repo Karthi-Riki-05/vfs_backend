@@ -172,6 +172,8 @@ model User {
   name          String?
   email         String?   @unique
   emailVerified DateTime?
+  verifyToken           String?   @map("verify_token")
+  verifyTokenExpiresAt  DateTime? @map("verify_token_expires_at")
   image         String?
   password      String?
   rememberToken String?   @map("remember_token")

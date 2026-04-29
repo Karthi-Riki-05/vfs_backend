@@ -237,6 +237,80 @@ If you didn't request this, you can safely ignore this email.`,
   }
 }
 
+async function sendVerificationEmail({ to, name, otp }) {
+  const mailOptions = {
+    from:
+      process.env.SMTP_FROM ||
+      process.env.SMTP_USER ||
+      "noreply@valuecharts.com",
+    to: resolveRecipient(to),
+    subject: `Your ValueChart verification code: ${otp}`,
+    html: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0; padding:0; background-color:#f5f5f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5; padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+          <tr>
+            <td style="background-color:#3CB371; padding:32px 40px; text-align:center;">
+              <h1 style="color:#ffffff; margin:0; font-size:24px; font-weight:600;">ValueChart</h1>
+              <p style="color:rgba(255,255,255,0.9); margin:8px 0 0 0; font-size:14px;">AI-Powered Diagramming</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:40px;">
+              <h2 style="color:#1a1a1a; text-align:center; margin:0 0 16px 0; font-size:22px; font-weight:600;">Verify Your Email</h2>
+              <p style="color:#555555; font-size:16px; line-height:1.6;">Hi ${name || "there"},</p>
+              <p style="color:#555555; font-size:16px; line-height:1.6;">Use the code below to verify your email and activate your ValueChart account.</p>
+              <div style="text-align:center; margin:32px 0;">
+                <div style="display:inline-block; background:#F0FDF4; border:2px solid #3CB371; border-radius:12px; padding:18px 32px; font-size:32px; font-weight:700; letter-spacing:8px; color:#15803D; font-family:'Courier New', monospace;">
+                  ${otp}
+                </div>
+              </div>
+              <p style="color:#999999; font-size:13px; text-align:center;">This code expires in <strong>15 minutes</strong>.</p>
+              <p style="color:#999999; font-size:13px; text-align:center;">If you didn't create an account, you can safely ignore this email.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="background-color:#f8f9fa; padding:24px 40px; border-top:1px solid #eeeeee;">
+              <p style="color:#bbbbbb; font-size:11px; text-align:center; margin:0;">&copy; ${new Date().getFullYear()} ValueChart. All rights reserved.</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+        `,
+    text: `Hi ${name || "there"},
+
+Your ValueChart verification code is: ${otp}
+
+This code expires in 15 minutes. If you didn't create an account, ignore this email.`,
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    logger.info(`Verification OTP email sent to ${to}`);
+    const previewUrl = nodemailer.getTestMessageUrl(info);
+    if (previewUrl) {
+      logger.info(`Mail preview URL: ${previewUrl}`);
+    }
+  } catch (error) {
+    logger.error(
+      `Failed to send verification email to ${to}: ${error.message}`,
+    );
+    throw error;
+  }
+}
+
 async function sendEmail({ to, subject, html, text }) {
   if (!process.env.SMTP_USER) {
     logger.warn("[Email] SMTP not configured — skipping send");
@@ -437,6 +511,7 @@ const emailTemplates = {
 module.exports = {
   sendTeamInviteEmail,
   sendPasswordResetEmail,
+  sendVerificationEmail,
   sendEmail,
   emailTemplates,
 };

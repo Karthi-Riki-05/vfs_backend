@@ -1,9 +1,15 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const authController = require('../controllers/auth.controller');
-const validate = require('../middleware/validate');
-const { authLimiter } = require('../middleware/rateLimiter');
-const { registerSchema, validateSchema, oauthSyncSchema } = require('../validators/auth.validator');
+const authController = require("../controllers/auth.controller");
+const validate = require("../middleware/validate");
+const { authLimiter } = require("../middleware/rateLimiter");
+const {
+  registerSchema,
+  validateSchema,
+  oauthSyncSchema,
+  resendVerificationSchema,
+  verifyOtpSchema,
+} = require("../validators/auth.validator");
 
 /**
  * @swagger
@@ -53,7 +59,12 @@ const { registerSchema, validateSchema, oauthSyncSchema } = require('../validato
  *       429:
  *         description: Too many authentication attempts
  */
-router.post('/register', authLimiter, validate(registerSchema), authController.register);
+router.post(
+  "/register",
+  authLimiter,
+  validate(registerSchema),
+  authController.register,
+);
 
 /**
  * @swagger
@@ -100,8 +111,32 @@ router.post('/register', authLimiter, validate(registerSchema), authController.r
  *       429:
  *         description: Too many authentication attempts
  */
-router.post('/validate', authLimiter, validate(validateSchema), authController.validateUser);
+router.post(
+  "/validate",
+  authLimiter,
+  validate(validateSchema),
+  authController.validateUser,
+);
 
-router.post('/oauth-sync', authLimiter, validate(oauthSyncSchema), authController.oauthSync);
+router.post(
+  "/oauth-sync",
+  authLimiter,
+  validate(oauthSyncSchema),
+  authController.oauthSync,
+);
+
+router.post(
+  "/verify-otp",
+  authLimiter,
+  validate(verifyOtpSchema),
+  authController.verifyOtp,
+);
+
+router.post(
+  "/resend-verification",
+  authLimiter,
+  validate(resendVerificationSchema),
+  authController.resendVerification,
+);
 
 module.exports = router;
