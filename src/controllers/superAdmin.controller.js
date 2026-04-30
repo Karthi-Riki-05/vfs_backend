@@ -319,6 +319,7 @@ class SuperAdminController {
       seats, // team only — 5/10/15/20/25/30
       inviteEmails, // team only — string[]
       flowLimit, // pro/team only — integer override for user.proFlowLimit (0 or -1 → unlimited)
+      isVerified, // boolean toggle for email verification
     } = req.body;
 
     if (!name || !email || !password) {
@@ -520,6 +521,7 @@ class SuperAdminController {
           userStatus: "success",
           clientType: "web",
           userType: isPro ? "pro_user" : "free_user",
+          emailVerified: isVerified === true ? new Date() : null,
           suspendedAt: normalizedStatus === "inactive" ? new Date() : null,
           suspendedBy: normalizedStatus === "inactive" ? req.user.id : null,
           ...(isPro ? { proPurchasedAt: new Date() } : {}),
@@ -833,6 +835,7 @@ class SuperAdminController {
       proFlowLimit,
       proUnlimitedFlows,
       confirmDowngrade, // ack flag for downgrading a team owner
+      isVerified, // boolean toggle to manually verify/unverify
     } = req.body || {};
 
     // Prevent self-demotion out of super_admin
@@ -939,6 +942,9 @@ class SuperAdminController {
       data.proFlowLimit = parseInt(proFlowLimit, 10);
     if (proUnlimitedFlows !== undefined)
       data.proUnlimitedFlows = !!proUnlimitedFlows;
+    if (isVerified !== undefined) {
+      data.emailVerified = isVerified ? new Date() : null;
+    }
 
     const ops = [
       ...(downgradeOps || []),
@@ -1012,11 +1018,47 @@ class SuperAdminController {
     }
 
     if (hard === "true" || hard === true) {
-      // Hard delete — cascade wipes flows, AI data, subscription, history.
-      await prisma.user.delete({ where: { id: userId } });
+      // Hard delete — manually wipe non-cascading or problematic relations first
+      // to ensure a clean wipe without foreign key violations.
+      await prisma.$transaction(async (tx) => {
+        // 1. Delete billing & subscriptions
+        await tx.subscription.deleteMany({ where: { userId } });
+        await tx.subscriptionHistory.deleteMany({ where: { userId } });
+        await tx.subscriptionQueue.deleteMany({ where: { userId } });
+        await tx.addUserSubscription.deleteMany({ where: { userId } });
+
+        // 2. Delete AI & Chat data
+        await tx.aiCreditBalance.deleteMany({ where: { userId } });
+        await tx.aiCreditUsage.deleteMany({ where: { userId } });
+        await tx.aiConversation.deleteMany({ where: { userId } });
+        await tx.chatMessageUser.deleteMany({
+          where: { OR: [{ senderId: userId }, { receiverId: userId }] },
+        });
+        await tx.chatGroupUser.deleteMany({ where: { userId } });
+
+        // 3. Delete App data (Flows, Teams, Projects)
+        // Flows and Teams usually have cascade, but we'll be explicit for safety.
+        await tx.teamMember.deleteMany({ where: { userId } });
+        await tx.team.deleteMany({ where: { teamOwnerId: userId } });
+        await tx.flow.deleteMany({ where: { ownerId: userId } });
+        await tx.project.deleteMany({ where: { createdBy: userId } });
+
+        // 4. Delete Auth & System data
+        await tx.account.deleteMany({ where: { userId } });
+        await tx.session.deleteMany({ where: { userId } });
+        await tx.firebaseUser.deleteMany({ where: { userId } });
+        await tx.userAction.deleteMany({ where: { userId } });
+        await tx.userInterest.deleteMany({ where: { userId } });
+        await tx.feedbackQuery.deleteMany({ where: { userId } });
+        await tx.adminLog.deleteMany({ where: { targetUserId: userId } });
+
+        // 5. Finally, delete the user
+        await tx.user.delete({ where: { id: userId } });
+      });
+
       res.json({
         success: true,
-        data: { message: "User hard-deleted (all data removed)" },
+        data: { message: "User and all related data hard-deleted successfully" },
       });
     } else {
       // Soft delete — userStatus='deleted', filtered out of lists.
