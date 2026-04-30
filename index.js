@@ -106,8 +106,9 @@ app.use((req, res, next) => {
 // Request logging
 app.use(requestLogger);
 
-// Request timeout (30 seconds)
-app.use(timeout(30000));
+// Request timeout: 120 seconds (needed for Gemini API on free users — can take 40-60s)
+// AI diagram generation is the slowest operation in the app
+app.use(timeout(120000));
 
 // Global rate limiter
 app.use(globalLimiter);
@@ -411,6 +412,13 @@ async function autoSeed() {
 // Only start server if not in test mode
 if (process.env.NODE_ENV !== "test") {
   const PORT = process.env.PORT || 5000;
+  
+  // Set socket timeout to 130 seconds (longer than request timeout to allow requests to complete)
+  // This prevents Node.js from forcibly closing connections during long AI operations
+  server.setTimeout(130000);
+  server.keepAliveTimeout = 130000;
+  server.headersTimeout = 132000;
+  
   server.listen(PORT, "0.0.0.0", async () => {
     logger.info(`Server running on port ${PORT}`);
     logger.info(`API Docs available at http://localhost:${PORT}/api-docs`);

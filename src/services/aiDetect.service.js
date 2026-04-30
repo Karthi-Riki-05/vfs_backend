@@ -128,38 +128,8 @@ async function isDiagramRequest(userMessage) {
   if (!userMessage || typeof userMessage !== "string") return false;
   const lower = userMessage.toLowerCase().trim();
 
-  // Immediate NO — UI complaints, questions, analysis requests
-  const noPatterns = [
-    "button",
-    "not working",
-    "not seeing",
-    "cant see",
-    "can't see",
-    "where is",
-    "how do i",
-    "what is",
-    "why",
-    "help me",
-    "confused",
-    "issue",
-    "problem",
-    "error",
-    "not shown",
-    "not visible",
-    "analyze",
-    "analyse",
-    "what does",
-    "explain",
-    "tell me about",
-    "what information",
-    "summary",
-    "upload",
-    "uploaded",
-  ];
-  if (noPatterns.some((p) => lower.includes(p))) return false;
-
   // Must have explicit create/generate + diagram keyword
-  const createWords = ["create", "generate", "make", "draw", "build", "design"];
+  const createWords = ["create", "generate", "make", "draw", "build", "design", "produce"];
   const diagramWords = [
     "diagram",
     "flow",
@@ -170,12 +140,48 @@ async function isDiagramRequest(userMessage) {
     "process map",
     "org chart",
     "map",
+    "visualization",
+    "visualisation",
   ];
 
   const hasCreate = createWords.some((w) => lower.includes(w));
   const hasDiagram = diagramWords.some((w) => lower.includes(w));
 
-  return hasCreate && hasDiagram;
+  // If the message has BOTH a create word AND a diagram word,
+  // it is a diagram request — even if it also contains analysis keywords
+  // like 'analyse', 'explain', etc. (e.g. "analyse this and generate a diagram")
+  if (hasCreate && hasDiagram) return true;
+
+  // Soft-block patterns — only block when there is NO diagram intent.
+  // These keywords alone (without create+diagram) mean the user just wants chat.
+  const noPatterns = [
+    "button",
+    "not working",
+    "not seeing",
+    "cant see",
+    "can't see",
+    "where is",
+    "how do i",
+    "what is",
+    "help me",
+    "confused",
+    "issue",
+    "problem",
+    "error",
+    "not shown",
+    "not visible",
+    "what does",
+    "explain",
+    "tell me about",
+    "what information",
+    "summary",
+    "upload",
+    "uploaded",
+  ];
+  if (noPatterns.some((p) => lower.includes(p))) return false;
+
+  // No clear create+diagram pair found
+  return false;
 }
 
 function sanitizeXml(xml) {
