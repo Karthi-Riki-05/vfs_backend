@@ -61,7 +61,7 @@ class AiCreditController {
   });
 
   generateDiagram = asyncHandler(async (req, res) => {
-    const { message, confirmed, conversationId } = req.body || {};
+    const { message, confirmed, conversationId, messageId } = req.body || {};
     const userId = req.user.id;
     const appContext = req.user.currentVersion || "free";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
@@ -106,7 +106,7 @@ class AiCreditController {
       teamId,
     );
 
-    // Persist to conversation if conversationId provided
+    // Persist to conversation
     let convId = conversationId || null;
     try {
       if (convId) {
@@ -116,6 +116,7 @@ class AiCreditController {
         });
         if (!owned) convId = null;
       }
+
       if (!convId) {
         const title =
           message.length > 50 ? message.substring(0, 50) + "..." : message;
@@ -124,24 +125,38 @@ class AiCreditController {
         });
         convId = conv.id;
       }
-      await prisma.aiMessage.create({
-        data: { conversationId: convId, role: "user", content: message },
-      });
-      await prisma.aiMessage.create({
-        data: {
-          conversationId: convId,
-          role: "assistant",
-          content: "Here is your diagram.",
-          diagramXml: xml,
-          metadata: { intent: "generate_diagram", model },
-        },
-      });
+
+      if (messageId) {
+        // Update the existing message (usually a suggestion) to show the result
+        await prisma.aiMessage.update({
+          where: { id: messageId },
+          data: {
+            content: "Diagram generated. Preview below — click Insert to add to canvas.",
+            diagramXml: xml,
+            metadata: { intent: "generate_diagram", model, wasUpdated: true },
+          },
+        });
+      } else {
+        // Create new message pair
+        await prisma.aiMessage.create({
+          data: { conversationId: convId, role: "user", content: message },
+        });
+        await prisma.aiMessage.create({
+          data: {
+            conversationId: convId,
+            role: "assistant",
+            content: "Here is your diagram.",
+            diagramXml: xml,
+            metadata: { intent: "generate_diagram", model },
+          },
+        });
+      }
+
       await prisma.aiConversation.update({
         where: { id: convId },
         data: { updatedAt: new Date() },
       });
     } catch (err) {
-      // Non-fatal: persistence failure shouldn't block diagram response
       console.error("[aiCredit] conversation persist error:", err.message);
     }
 
