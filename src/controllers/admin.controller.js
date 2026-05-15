@@ -17,6 +17,8 @@ class AdminController {
         res.json({ success: true, data: plans });
     });
 
+
+    
     createPlan = asyncHandler(async (req, res) => {
         const plan = await adminService.createPlan(req.body);
         res.status(201).json({ success: true, data: plan });
