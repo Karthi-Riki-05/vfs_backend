@@ -1,5 +1,7 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const logger = require("../utils/logger");
+const { getUserAiTier, getTierByUserId } = require("../utils/userTier");
+const { logAiRequest } = require("../utils/aiLogger");
 
 const DIAGRAM_SYSTEM_PROMPT = `You are an expert mxGraph XML diagram generator for the ValueCharts platform.
 
@@ -129,7 +131,15 @@ async function isDiagramRequest(userMessage) {
   const lower = userMessage.toLowerCase().trim();
 
   // Must have explicit create/generate + diagram keyword
-  const createWords = ["create", "generate", "make", "draw", "build", "design", "produce"];
+  const createWords = [
+    "create",
+    "generate",
+    "make",
+    "draw",
+    "build",
+    "design",
+    "produce",
+  ];
   const diagramWords = [
     "diagram",
     "flow",
@@ -237,7 +247,7 @@ async function generateWithClaude(userMessage) {
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-5",
+    model: "claude-sonnet-4-6",
     max_tokens: 2000,
     system: DIAGRAM_SYSTEM_PROMPT,
     messages: [{ role: "user", content: userMessage }],
@@ -247,7 +257,7 @@ async function generateWithClaude(userMessage) {
   if (!xml || !xml.includes("<mxGraphModel")) {
     throw new Error("Claude did not return valid mxGraph XML");
   }
-  return { xml, model: "claude-sonnet-4-5" };
+  return { xml, model: "claude-sonnet-4-6" };
 }
 
 async function generateWithGemini(userMessage) {
@@ -266,15 +276,32 @@ async function generateWithGemini(userMessage) {
   return { xml, model: "gemini-2.5-flash" };
 }
 
-async function generateDiagramXml(userMessage, userPlan = "free") {
+async function generateDiagramXml(userMessage, user = null) {
+  // Tier resolution — accepts user object, userId string, or null.
+  // Always falls back to DB lookup (B2 approach) so the result is
+  // accurate even if req.user is missing hasPro / subscription.
+  let userId = null;
+  if (user && typeof user === "object") {
+    userId = user.id;
+  } else if (typeof user === "string") {
+    userId = user;
+  }
+
+  const tier = userId ? await getTierByUserId(userId) : "free";
+
   const useClaude =
-    (userPlan === "pro" || userPlan === "team") &&
+    (tier === "pro" || tier === "team") &&
     process.env.ANTHROPIC_API_KEY &&
     process.env.ANTHROPIC_API_KEY !== "placeholder";
+
+  logger.info(
+    `[AIDetect] tier=${tier} provider=${useClaude ? "claude" : "gemini"} userId=${userId || "anon"}`,
+  );
 
   const maxAttempts = 3;
   let currentPrompt = userMessage;
   let lastError = null;
+  const _t0 = Date.now();
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -319,15 +346,44 @@ No explanation. No markdown. No backticks.
 Simple ASCII labels only. No special characters.`;
           continue;
         }
+        logAiRequest({
+          userId,
+          plan: tier,
+          model: result.model,
+          endpoint: "aiDetect.generateDiagramXml",
+          success: false,
+          durationMs: Date.now() - _t0,
+          error: validation.error,
+          meta: { attempts: attempt },
+        });
         throw new Error(
           `XML generation failed after ${maxAttempts} attempts: ${validation.error}`,
         );
       }
 
+      logAiRequest({
+        userId,
+        plan: tier,
+        model: result.model,
+        endpoint: "aiDetect.generateDiagramXml",
+        success: true,
+        durationMs: Date.now() - _t0,
+        meta: { attempts: attempt },
+      });
       return result;
     } catch (err) {
       lastError = err.message;
       if (attempt >= maxAttempts) {
+        logAiRequest({
+          userId,
+          plan: tier,
+          model: useClaude ? "claude-sonnet-4-6" : "gemini-2.5-flash",
+          endpoint: "aiDetect.generateDiagramXml",
+          success: false,
+          durationMs: Date.now() - _t0,
+          error: err.message,
+          meta: { attempts: attempt },
+        });
         throw err;
       }
       logger.warn(

@@ -1,4 +1,5 @@
 const rateLimit = require("express-rate-limit");
+const { ipKeyGenerator } = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 
 // In-process rate limiters share state across an entire Jest worker.
@@ -12,7 +13,7 @@ const passthrough = (_req, _res, next) => next();
 // Fallback to IP for unauthenticated requests. This prevents one
 // front-end proxy IP from counting as "one user" and blowing the
 // limit across everyone's session.
-function keyByUserOrIp(req) {
+function keyByUserOrIp(req, res) {
   try {
     const auth = req.headers.authorization;
     if (auth && auth.startsWith("Bearer ")) {
@@ -23,7 +24,7 @@ function keyByUserOrIp(req) {
   } catch {
     // fall through to IP
   }
-  return req.ip;
+  return ipKeyGenerator(req, res);
 }
 
 const globalLimiter = isTest

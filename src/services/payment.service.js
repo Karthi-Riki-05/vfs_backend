@@ -208,7 +208,7 @@ class PaymentService {
       return await proService.handleExtraFlowsWebhook(session);
     }
     if (purchaseType === "ai_addon_credits") {
-      const { userId: uid, credits } = session.metadata || {};
+      const { userId: uid, credits, packType } = session.metadata || {};
       const amount = parseInt(credits, 10);
       if (!uid || !amount || amount <= 0) {
         logger.warn(
@@ -216,31 +216,86 @@ class PaymentService {
         );
         return;
       }
-      const { addAddonCredits } = require("./aiCredit.service");
-      // Use the balance's own appContext (falls back to 'free' inside service)
-      await addAddonCredits(uid, amount, "free");
-      logger.info(
-        `[ai_addon_credits] Added ${amount} credits for user ${uid} (session: ${session.id})`,
-      );
 
-      // Idempotency guard — don't double-log transaction
+      // Idempotency: if we've already logged this Stripe session, bail out
+      // before granting credits again (Stripe retries failed webhooks).
       const existingTxn = await prisma.transactionLog.findFirst({
         where: { txnId: session.id },
       });
-      if (!existingTxn) {
-        await prisma.transactionLog.create({
+      if (existingTxn) {
+        logger.info(
+          `[ai_addon_credits] Session ${session.id} already processed — skipping`,
+        );
+        return;
+      }
+
+      // Prefer the appContext + teamId captured at checkout time (so a
+      // team-context purchase routes to the team owner's balance even if
+      // the user switched workspace before the webhook arrived). Fall
+      // back to the user's currentVersion when metadata is missing.
+      const metaAppContext = session.metadata?.appContext;
+      const metaTeamId = session.metadata?.teamId || null;
+      let appContext = metaAppContext;
+      if (!appContext) {
+        const user = await prisma.user.findUnique({
+          where: { id: uid },
+          select: { currentVersion: true },
+        });
+        appContext = user?.currentVersion || "free";
+      }
+
+      const { addAddonCredits } = require("./aiCredit.service");
+      await addAddonCredits(uid, amount, appContext, metaTeamId);
+      logger.info(
+        `[ai_addon_credits] Added ${amount} credits for user ${uid} appContext=${appContext} (session: ${session.id})`,
+      );
+
+      const amountTotal = session.amount_total || 0;
+      const currency = session.currency || getStripeCurrency();
+      const planLabel = `AI Credits Addon${packType ? ` — ${packType}` : ""} (${amount} credits)`;
+
+      // Audit row (admin transaction log) and user-facing subscription
+      // history row, in a single transaction so they stay in sync.
+      // Both rows are tagged with appContext so each app's Billing /
+      // History page only shows its own purchases.
+      await prisma.$transaction([
+        prisma.transactionLog.create({
           data: {
             userId: uid,
             chargeId: session.payment_intent || session.id,
             txnId: session.id,
-            amountCharged: session.amount_total || 0,
-            currency: session.currency || getStripeCurrency(),
+            amountCharged: amountTotal,
+            currency,
             status: "success",
             paymentMethod: session.payment_method_types?.[0] || "card",
-            appType: "individual",
+            appType: appContext === "team" ? "enterprise" : "individual",
+            appContext,
           },
-        });
-      }
+        }),
+        prisma.subscriptionHistory.create({
+          data: {
+            userId: uid,
+            planName: planLabel,
+            productType: "ai_addon_credits",
+            status: "completed",
+            // Stripe amount_total is in the smallest currency unit (cents/paise)
+            price: amountTotal / 100,
+            currency,
+            isRecurring: false,
+            source: "stripe",
+            startedAt: new Date(),
+            archivedReason: "one_time_purchase",
+            stripePaymentId: session.payment_intent || session.id,
+            appContext,
+            snapshot: {
+              sessionId: session.id,
+              packType: packType || null,
+              credits: amount,
+              appContext,
+            },
+          },
+        }),
+      ]);
       return;
     }
 
@@ -284,6 +339,7 @@ class PaymentService {
           // Team plan = enterprise (Pro = individual). Drives billing
           // page filtering between Pro app and Team app.
           appType: "enterprise",
+          appContext: "team",
         },
       }),
     ]);

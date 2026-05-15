@@ -141,7 +141,8 @@ exports.resendVerification = asyncHandler(async (req, res) => {
 });
 
 exports.oauthSync = asyncHandler(async (req, res) => {
-  const { email, name, image, provider } = req.body;
+  const { email, name, image, provider, providerAccountId, accountType } =
+    req.body;
 
   let user = await prisma.user.findUnique({ where: { email } });
 
@@ -166,6 +167,30 @@ exports.oauthSync = asyncHandler(async (req, res) => {
         data: updates,
       });
     }
+  }
+
+  // Persist the OAuth account link so the super-admin Login Type column
+  // can show "Google" / "LinkedIn" etc. The Account table is otherwise
+  // never written because we use JWT strategy (no PrismaAdapter).
+  if (provider && providerAccountId) {
+    await prisma.account.upsert({
+      where: {
+        provider_providerAccountId: {
+          provider,
+          providerAccountId: String(providerAccountId),
+        },
+      },
+      create: {
+        userId: user.id,
+        type: accountType || "oauth",
+        provider,
+        providerAccountId: String(providerAccountId),
+      },
+      update: {
+        userId: user.id,
+        type: accountType || "oauth",
+      },
+    });
   }
 
   res.json({

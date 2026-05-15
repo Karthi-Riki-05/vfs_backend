@@ -101,7 +101,17 @@ class SubscriptionController {
   });
 
   getHistory = asyncHandler(async (req, res) => {
-    const result = await subscriptionService.getHistory(req.user.id, req.query);
+    // Default to the user's current workspace so each app's Billing page
+    // shows only its own purchases. Pass ?appContext=all to bypass
+    // (admin / debugging only).
+    const appContext =
+      req.query?.appContext === "all"
+        ? null
+        : req.query?.appContext || req.user.currentVersion || "free";
+    const result = await subscriptionService.getHistory(req.user.id, {
+      ...req.query,
+      appContext,
+    });
     res.json({ success: true, data: result });
   });
 }

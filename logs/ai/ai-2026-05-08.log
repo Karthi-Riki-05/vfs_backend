@@ -1,0 +1,9 @@
+
+{"ts":"2026-05-08T07:29:20.641Z","userId":"cmoahlsmo00294j7ag8fn46le","app":"free","plan":"team","model":"gemini-2.5-flash","endpoint":"aiDetect.generateDiagramXml","success":true,"durationMs":12760,"meta":{"attempts":1}}
+{"ts":"2026-05-08T07:29:38.995Z","userId":"cmoahlsmo00294j7ag8fn46le","app":"free","plan":"team","model":"gemini-2.5-flash","endpoint":"ai-assistant.chat","success":true,"durationMs":1625}
+{"ts":"2026-05-08T07:30:01.634Z","userId":"sim-free-001","app":"free","plan":"free","model":"gemini-2.5-flash","endpoint":"aiDetect.generateDiagramXml","success":true,"durationMs":14983,"meta":{"attempts":1}}
+{"ts":"2026-05-08T07:31:13.845Z","userId":"cmoahlsmo00294j7ag8fn46le","app":"free","plan":"team","model":"gemini-2.5-flash","endpoint":"aiDetect.generateDiagramXml","success":true,"durationMs":56731,"meta":{"attempts":1}}
+{"ts":"2026-05-08T07:38:22.074Z","userId":"cmoahlsmo00294j7ag8fn46le","app":"free","plan":"team","model":"gemini-2.5-flash","endpoint":"ai-assistant.chat","success":true,"durationMs":1551}
+{"ts":"2026-05-08T07:39:19.887Z","userId":"cmoahlsmo00294j7ag8fn46le","app":"free","plan":"team","model":"gemini-2.5-flash","endpoint":"aiDetect.generateDiagramXml","success":true,"durationMs":53627,"meta":{"attempts":1}}
+{"ts":"2026-05-08T09:30:02.427Z","userId":"cmoahlsmo00294j7ag8fn46le","app":"free","plan":"team","model":"gemini-2.5-flash","endpoint":"ai-assistant.chat","success":true,"durationMs":2173}
+{"ts":"2026-05-08T09:30:56.102Z","userId":"cmoahlsmo00294j7ag8fn46le","app":"free","plan":"team","model":"gemini-2.5-flash","endpoint":"aiDetect.generateDiagramXml","success":true,"durationMs":47806,"meta":{"attempts":1}}

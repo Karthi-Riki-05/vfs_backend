@@ -120,13 +120,16 @@ class ProService {
       throw new AppError("Not a Pro purchase session", 400, "INVALID_SESSION");
     }
 
-    // Check if already activated
+    // Check if already activated.
+    // IMPORTANT: check proPurchasedAt, NOT hasPro.
+    // hasPro can be true from admin team grants without a real Pro purchase.
+    // Only skip activation if the user has explicitly purchased Pro ($1 product).
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { hasPro: true },
+      select: { hasPro: true, proPurchasedAt: true },
     });
 
-    if (user?.hasPro) {
+    if (user?.proPurchasedAt) {
       console.log(
         "[ProService.verifyPurchase] Already active for user:",
         userId,
@@ -151,7 +154,7 @@ class ProService {
     nextReset.setDate(1);
     nextReset.setHours(0, 0, 0, 0);
     await prisma.aiCreditBalance.upsert({
-      where: { userId },
+      where: { userId_appContext: { userId, appContext: "pro" } },
       create: {
         userId,
         planCredits: 100,
@@ -161,7 +164,6 @@ class ProService {
       },
       update: {
         planCredits: 100,
-        appContext: "pro",
         planResetsAt: nextReset,
       },
     });
@@ -181,6 +183,7 @@ class ProService {
           status: "success",
           paymentMethod: session.payment_method_types?.[0] || "card",
           appType: "individual",
+          appContext: "pro",
         },
       });
     }
@@ -288,7 +291,7 @@ class ProService {
       },
       // Stripe Adaptive Pricing (account-level setting) converts to local currency
       success_url: `${baseUrl}/upgrade-pro/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/upgrade-pro`,
+      cancel_url: `${baseUrl}/upgrade-pro?cancelled=true`,
     };
 
     const session = await stripe.checkout.sessions.create(sessionConfig);
@@ -421,7 +424,7 @@ class ProService {
     nextReset.setHours(0, 0, 0, 0);
     try {
       await prisma.aiCreditBalance.upsert({
-        where: { userId },
+        where: { userId_appContext: { userId, appContext: "pro" } },
         create: {
           userId,
           planCredits: 100,
@@ -431,7 +434,6 @@ class ProService {
         },
         update: {
           planCredits: 100,
-          appContext: "pro",
           planResetsAt: nextReset,
         },
       });
@@ -457,6 +459,7 @@ class ProService {
           status: "success",
           paymentMethod: session.payment_method_types?.[0] || "card",
           appType: "individual",
+          appContext: "pro",
         },
       });
     }
@@ -730,6 +733,7 @@ class ProService {
         status: "success",
         paymentMethod: session.payment_method_types?.[0] || "card",
         appType: "individual",
+        appContext: "pro",
       },
     });
 

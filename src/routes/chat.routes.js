@@ -20,13 +20,8 @@ const {
   MAX_FILE_SIZE,
 } = require("../validators/chat.validator");
 
-// File upload configuration — 25MB limit with file type validation
-const storage = multer.diskStorage({
-  destination: (req, file, cb) =>
-    cb(null, path.join(__dirname, "../../uploads/chat")),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
-});
-
+// File upload — memory storage so the buffer can be forwarded to S3
+// (or written to local disk via storage.service fallback in development).
 const fileFilter = (req, file, cb) => {
   if (ALLOWED_FILE_TYPES.includes(file.mimetype)) {
     cb(null, true);
@@ -38,7 +33,7 @@ const fileFilter = (req, file, cb) => {
 };
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_SIZE },
   fileFilter,
 });

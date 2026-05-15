@@ -1,50 +1,31 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const openaiController = require('../controllers/openai.controller');
-const { authenticate } = require('../middleware/auth.middleware');
-const validate = require('../middleware/validate');
-const { aiLimiter } = require('../middleware/rateLimiter');
-const { proxySchema } = require('../validators/openai.validator');
+const { authenticate } = require("../middleware/auth.middleware");
 
 /**
  * @swagger
  * /api/v1/openai:
  *   post:
- *     summary: Proxy request to OpenAI API
+ *     summary: DEPRECATED — use /api/v1/ai-assistant/chat instead
  *     tags: [AI]
  *     security:
  *       - BearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [messages]
- *             properties:
- *               messages:
- *                 type: array
- *                 items:
- *                   type: object
- *                   properties:
- *                     role:
- *                       type: string
- *                       enum: [system, user, assistant]
- *                     content:
- *                       type: string
- *               model:
- *                 type: string
- *                 default: gpt-4
  *     responses:
- *       200:
- *         description: AI response
- *       400:
- *         description: Validation error
  *       401:
  *         description: Unauthorized
- *       429:
- *         description: Rate limit exceeded
+ *       410:
+ *         description: Gone — endpoint deprecated
  */
-router.post('/', authenticate, aiLimiter, validate(proxySchema), openaiController.proxy);
+router.all("/", authenticate, (req, res) => {
+  res.status(410).json({
+    success: false,
+    error: {
+      code: "DEPRECATED",
+      message:
+        "This endpoint is deprecated as of May 2026. " +
+        "Use /api/v1/ai-assistant/chat instead.",
+    },
+  });
+});
 
 module.exports = router;

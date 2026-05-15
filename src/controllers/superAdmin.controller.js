@@ -31,6 +31,9 @@ function buildArchiveSubscriptionOp(sub, reason, archivedBy = null) {
       archivedReason: reason,
       archivedBy,
       stripePaymentId: sub.paymentId,
+      // Tag history row with the app context the sub belonged to so each
+      // app's Billing page only shows its own purchases.
+      appContext: sub.appType === "enterprise" ? "team" : "pro",
       snapshot: {
         id: sub.id,
         planId: sub.planId,
@@ -250,6 +253,7 @@ class SuperAdminController {
           image: true,
           role: true,
           hasPro: true,
+          proPurchasedAt: true,
           currentVersion: true,
           clientType: true,
           userStatus: true,
@@ -275,11 +279,12 @@ class SuperAdminController {
               price: true,
             },
           },
-          aiCreditBalance: {
+          aiCreditBalances: {
             select: {
               planCredits: true,
               addonCredits: true,
               planResetsAt: true,
+              appContext: true,
             },
           },
           accounts: {
@@ -540,13 +545,23 @@ class SuperAdminController {
         },
       });
 
-      await tx.aiCreditBalance.create({
-        data: {
+      await tx.aiCreditBalance.upsert({
+        where: {
+          userId_appContext: {
+            userId: user.id,
+            appContext: normalizedPlan,
+          },
+        },
+        create: {
           userId: user.id,
           planCredits: planCreditsMap[normalizedPlan],
           addonCredits: 0,
           planResetsAt: isPro ? expiresAt : null,
           appContext: normalizedPlan,
+        },
+        update: {
+          planCredits: planCreditsMap[normalizedPlan],
+          planResetsAt: isPro ? expiresAt : null,
         },
       });
 
@@ -684,7 +699,7 @@ class SuperAdminController {
           orderBy: { archivedAt: "desc" },
           take: 20,
         },
-        aiCreditBalance: true,
+        aiCreditBalances: true,
         accounts: { select: { provider: true, type: true } },
         sessions: {
           select: { expires: true, sessionToken: true },
@@ -1058,7 +1073,9 @@ class SuperAdminController {
 
       res.json({
         success: true,
-        data: { message: "User and all related data hard-deleted successfully" },
+        data: {
+          message: "User and all related data hard-deleted successfully",
+        },
       });
     } else {
       // Soft delete — userStatus='deleted', filtered out of lists.
@@ -1393,7 +1410,9 @@ class SuperAdminController {
         },
       }),
       prisma.aiCreditBalance.upsert({
-        where: { userId },
+        where: {
+          userId_appContext: { userId, appContext: normalizedPlan },
+        },
         create: {
           userId,
           planCredits: grantCredits,
@@ -1404,7 +1423,6 @@ class SuperAdminController {
         update: {
           planCredits: grantCredits,
           planResetsAt: expiresAt,
-          appContext: normalizedPlan,
         },
       }),
       // Migrate the user's existing non-deleted flows into the new workspace
@@ -1420,12 +1438,14 @@ class SuperAdminController {
       // Financial audit entry — zero amount, type marker for admin-granted
       prisma.transactionLog.create({
         data: {
+          userId,
           chargeId: `admin_grant_${Date.now()}`,
           txnId: `admin_grant_${userId}_${Date.now()}`,
           amountCharged: 0,
           currency: "usd",
           status: "success",
           paymentMethod: "admin",
+          appContext: normalizedPlan,
         },
       }),
     ]);
@@ -1530,14 +1550,14 @@ class SuperAdminController {
           },
         }),
         prisma.aiCreditBalance.upsert({
-          where: { userId },
+          where: { userId_appContext: { userId, appContext: "free" } },
           create: {
             userId,
             planCredits: 20,
             addonCredits: 0,
             appContext: "free",
           },
-          update: { planCredits: 20, appContext: "free" },
+          update: { planCredits: 20 },
         }),
         prisma.flow.updateMany({
           where: {
@@ -1597,14 +1617,14 @@ class SuperAdminController {
         data: { hasPro: false, currentVersion: "free" },
       }),
       prisma.aiCreditBalance.upsert({
-        where: { userId },
+        where: { userId_appContext: { userId, appContext: "free" } },
         create: {
           userId,
           planCredits: 20,
           addonCredits: 0,
           appContext: "free",
         },
-        update: { planCredits: 20, appContext: "free" },
+        update: { planCredits: 20 },
       }),
       prisma.flow.updateMany({
         where: {
@@ -1632,14 +1652,15 @@ class SuperAdminController {
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
 
+    const appContext = user.currentVersion || "free";
     const updated = await prisma.aiCreditBalance.upsert({
-      where: { userId },
+      where: { userId_appContext: { userId, appContext } },
       create: {
         userId,
         planCredits: planCredits !== undefined ? parseInt(planCredits, 10) : 0,
         addonCredits:
           addonCredits !== undefined ? parseInt(addonCredits, 10) : 0,
-        appContext: user.currentVersion || "free",
+        appContext,
       },
       update: {
         ...(planCredits !== undefined && {
@@ -1746,8 +1767,8 @@ class SuperAdminController {
         subscription: {
           select: { productType: true, status: true, expiresAt: true },
         },
-        aiCreditBalance: {
-          select: { planCredits: true, addonCredits: true },
+        aiCreditBalances: {
+          select: { planCredits: true, addonCredits: true, appContext: true },
         },
       },
       orderBy: { createdAt: "desc" },
@@ -2026,7 +2047,7 @@ class SuperAdminController {
     ]);
 
     const apiKeys = {
-      openai: !!process.env.OPENAI_API_KEY,
+      // OpenAI deprecated May 2026 — chat + diagrams now run on Gemini / Claude.
       anthropic:
         !!process.env.ANTHROPIC_API_KEY &&
         process.env.ANTHROPIC_API_KEY !== "placeholder",

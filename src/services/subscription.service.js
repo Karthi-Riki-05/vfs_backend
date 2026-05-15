@@ -1037,6 +1037,7 @@ class SubscriptionService {
               expiresAt: existingSub.expiresAt,
               archivedReason: "replaced_by_stripe",
               stripePaymentId: existingSub.paymentId,
+              appContext: existingSub.appType === "enterprise" ? "team" : "pro",
               snapshot: {
                 id: existingSub.id,
                 planId: existingSub.planId,
@@ -1094,7 +1095,7 @@ class SubscriptionService {
       }),
       // Grant team-tier AI credits (300/mo) scoped to team appContext.
       prisma.aiCreditBalance.upsert({
-        where: { userId },
+        where: { userId_appContext: { userId, appContext: "team" } },
         create: {
           userId,
           planCredits: 300,
@@ -1105,7 +1106,6 @@ class SubscriptionService {
         update: {
           planCredits: 300,
           planResetsAt: expiresAt,
-          appContext: "team",
         },
       }),
       // Migrate the user's existing flows into the new team workspace so
@@ -1124,6 +1124,35 @@ class SubscriptionService {
           currency: session.currency || getStripeCurrency(),
           status: "success",
           paymentMethod: session.payment_method_types?.[0] || "card",
+          appType: "enterprise",
+          appContext: "team",
+        },
+      }),
+      // Mirror the Team purchase in subscription_history so it shows up
+      // on the user's Billing page in the Team app (separate from the
+      // Free / Pro app history thanks to the appContext column).
+      prisma.subscriptionHistory.create({
+        data: {
+          userId,
+          planName:
+            dbPlan?.name ||
+            (plan === "yearly" ? "Team Yearly" : "Team Monthly"),
+          productType: plan === "yearly" ? "team_yearly" : "team_monthly",
+          status: "active",
+          price: (session.amount_total || 0) / 100,
+          currency: session.currency || getStripeCurrency(),
+          isRecurring: true,
+          source: "stripe",
+          startedAt: new Date(),
+          expiresAt,
+          appContext: "team",
+          stripePaymentId: session.payment_intent || session.id,
+          archivedReason: "purchase",
+          snapshot: {
+            sessionId: session.id,
+            members,
+            plan,
+          },
         },
       }),
     ]);
@@ -1362,18 +1391,23 @@ class SubscriptionService {
   }
 
   async getHistory(userId, options = {}) {
-    const { page = 1, limit = 20 } = options;
+    const { page = 1, limit = 20, appContext } = options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
+    // When the caller passes their current workspace context (free / pro
+    // / team), each app's Billing page sees only its own purchases.
+    // Without it we return every row (admin / debug usage).
+    const where = appContext ? { userId, appContext } : { userId };
+
     const [history, total] = await Promise.all([
       prisma.subscriptionHistory.findMany({
-        where: { userId },
+        where,
         skip,
         take,
         orderBy: { archivedAt: "desc" },
       }),
-      prisma.subscriptionHistory.count({ where: { userId } }),
+      prisma.subscriptionHistory.count({ where }),
     ]);
 
     return {

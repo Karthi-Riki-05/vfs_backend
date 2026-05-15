@@ -1,11 +1,60 @@
-const OpenAI = require("openai");
+// Chat provider: Google Gemini 2.0 Flash
+// Migrated from OpenAI GPT-4 / GPT-4o.
+// Diagram generation lives in aiDetect.service.js:
+//   Pro / Team → Claude Sonnet
+//   Free       → Gemini
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
+const { logAiRequest } = require("../utils/aiLogger");
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const CHAT_MODEL = "gemini-2.5-flash";
+
+let _geminiAiClient = null;
+function getGeminiAiClient() {
+  if (!_geminiAiClient) {
+    if (!process.env.GEMINI_API_KEY) {
+      throw new AppError(
+        "GEMINI_API_KEY not configured",
+        500,
+        "AI_NOT_CONFIGURED",
+      );
+    }
+    _geminiAiClient = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  }
+  return _geminiAiClient;
+}
+
+// Convert OpenAI-style history to Gemini history format.
+// OpenAI roles: system | user | assistant | document(custom)
+// Gemini roles: user | model  (no system — passed via systemInstruction)
+// 'document' rows are coerced into a user turn with a [Attached document] prefix.
+function toGeminiHistory(rows) {
+  const history = [];
+  for (const msg of rows) {
+    if (msg.role === "system") continue;
+    if (msg.role === "document") {
+      const fileName = msg.metadata?.fileName || "file";
+      history.push({
+        role: "user",
+        parts: [
+          {
+            text: `[Attached document: ${fileName}]\n${(msg.content || "").substring(0, 6000)}`,
+          },
+        ],
+      });
+      continue;
+    }
+    history.push({
+      role: msg.role === "assistant" ? "model" : "user",
+      parts: [{ text: msg.content || "" }],
+    });
+  }
+  // Gemini requires the first turn to be 'user'.
+  while (history.length && history[0].role !== "user") history.shift();
+  return history;
+}
 
 const SYSTEM_PROMPT = `You are ValueCharts AI Assistant — a smart, friendly, and
 context-aware assistant built into the ValueCharts diagramming platform.
@@ -519,7 +568,7 @@ class AiAssistantService {
       );
     }
 
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.GEMINI_API_KEY) {
       throw new AppError("AI service not configured", 500, "AI_NOT_CONFIGURED");
     }
 
@@ -562,17 +611,26 @@ class AiAssistantService {
       },
     });
 
-    // Get conversation history (last 20 messages for context — excludes the user msg just saved,
-    // we'll reattach it at the end so OpenAI sees the full thread in order)
-    const history = await prisma.aiMessage.findMany({
+    // Conversation history (last 20 turns) — used as Gemini chat history.
+    // Excludes the user message just saved; we send that via sendMessage().
+    const historyRows = await prisma.aiMessage.findMany({
       where: {
         conversationId: conversation.id,
         role: { in: ["user", "assistant", "document"] },
       },
       orderBy: { createdAt: "desc" },
-      take: 20,
+      take: 21, // 20 prior turns + the just-saved user msg we'll strip
     });
-    const orderedHistory = history.reverse();
+    const orderedHistory = historyRows.reverse();
+    // Drop the last message (the user prompt we just wrote) — we send it
+    // via chat.sendMessage so it appears as the live turn, not history.
+    if (
+      orderedHistory.length &&
+      orderedHistory[orderedHistory.length - 1].role === "user" &&
+      orderedHistory[orderedHistory.length - 1].content === message
+    ) {
+      orderedHistory.pop();
+    }
 
     // ALWAYS gather fresh context from the database (not from frontend)
     const ctx = await this.getUserContext(userId, appContext);
@@ -581,32 +639,26 @@ class AiAssistantService {
     const contextBlock = this._buildContextBlock(ctx);
 
     const fullSystemPrompt = SYSTEM_PROMPT + contextBlock;
+    const geminiHistory = toGeminiHistory(orderedHistory);
 
-    // Build OpenAI messages (role "document" → include as user attachment context)
-    const openaiMessages = [
-      { role: "system", content: fullSystemPrompt },
-      ...orderedHistory.map((msg) => {
-        if (msg.role === "document") {
-          return {
-            role: "user",
-            content: `[Attached document]\n${(msg.content || "").substring(0, 6000)}`,
-          };
-        }
-        return {
-          role: msg.role === "user" ? "user" : "assistant",
-          content: msg.content,
-        };
-      }),
-    ];
-
+    const _t0 = Date.now();
     try {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4",
-        messages: openaiMessages,
-        max_tokens: 4000,
+      const genAI = getGeminiAiClient();
+      const model = genAI.getGenerativeModel({
+        model: CHAT_MODEL,
+        systemInstruction: fullSystemPrompt,
       });
-
-      const aiContent = completion.choices[0].message.content;
+      const chatSession = model.startChat({ history: geminiHistory });
+      const result = await chatSession.sendMessage(message);
+      const aiContent = result.response.text();
+      logAiRequest({
+        userId,
+        app: appContext,
+        model: CHAT_MODEL,
+        endpoint: "ai-assistant.chat",
+        success: true,
+        durationMs: Date.now() - _t0,
+      });
 
       // Check if response contains draw.io XML
       const xmlMatch = aiContent.match(/<mxGraphModel[\s\S]*?<\/mxGraphModel>/);
@@ -677,6 +729,15 @@ class AiAssistantService {
       };
     } catch (error) {
       logger.error("AI chat error", { error: error.message, userId });
+      logAiRequest({
+        userId,
+        app: appContext,
+        model: CHAT_MODEL,
+        endpoint: "ai-assistant.chat",
+        success: false,
+        durationMs: Date.now() - _t0,
+        error: error.message,
+      });
 
       if (error.status === 429) {
         throw new AppError(
@@ -710,34 +771,36 @@ class AiAssistantService {
       );
     }
 
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.GEMINI_API_KEY) {
       throw new AppError("AI service not configured", 500, "AI_NOT_CONFIGURED");
     }
 
-    const messages = [{ role: "system", content: DIAGRAM_SYSTEM_PROMPT }];
+    const userPrompt = existingXml
+      ? `Here is the existing diagram XML:\n${existingXml}\n\nUser request: ${message}\n\nModify or extend the diagram based on the request.`
+      : `Generate a draw.io diagram for: ${message}`;
 
-    if (existingXml) {
-      messages.push({
-        role: "user",
-        content: `Here is the existing diagram XML:\n${existingXml}\n\nUser request: ${message}\n\nModify or extend the diagram based on the request.`,
-      });
-    } else {
-      messages.push({
-        role: "user",
-        content: `Generate a draw.io diagram for: ${message}`,
-      });
-    }
-
+    const _t0 = Date.now();
     try {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages,
-        response_format: { type: "json_object" },
-        max_tokens: 4000,
-        temperature: 0.3,
+      const genAI = getGeminiAiClient();
+      const model = genAI.getGenerativeModel({
+        model: CHAT_MODEL,
+        systemInstruction: DIAGRAM_SYSTEM_PROMPT,
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.3,
+          maxOutputTokens: 4000,
+        },
       });
-
-      const parsed = JSON.parse(completion.choices[0].message.content);
+      const result = await model.generateContent(userPrompt);
+      const parsed = JSON.parse(result.response.text());
+      logAiRequest({
+        userId,
+        app: appContext,
+        model: CHAT_MODEL,
+        endpoint: "ai-assistant.generateDiagramFromText",
+        success: true,
+        durationMs: Date.now() - _t0,
+      });
 
       // Save to conversation if provided
       if (conversationId) {
@@ -771,6 +834,15 @@ class AiAssistantService {
         error: error.message,
         userId,
       });
+      logAiRequest({
+        userId,
+        app: appContext,
+        model: CHAT_MODEL,
+        endpoint: "ai-assistant.generateDiagramFromText",
+        success: false,
+        durationMs: Date.now() - _t0,
+        error: error.message,
+      });
       if (error.status === 429) {
         throw new AppError(
           "AI rate limit exceeded. Please try again later.",
@@ -793,26 +865,32 @@ class AiAssistantService {
       );
     }
 
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.GEMINI_API_KEY) {
       throw new AppError("AI service not configured", 500, "AI_NOT_CONFIGURED");
     }
 
+    const _t0 = Date.now();
     try {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          { role: "system", content: DIAGRAM_SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: `Analyze this document and generate the most appropriate draw.io diagram.\n\nDocument name: ${fileName}\nDocument content:\n---\n${documentText.substring(0, 8000)}\n---\n\nDetermine what type of diagram best represents this document (flowchart, process map, org chart, ER diagram, VSM, etc.) and generate it.\nInclude all key entities, processes, and relationships from the document.`,
-          },
-        ],
-        response_format: { type: "json_object" },
-        max_tokens: 4000,
-        temperature: 0.3,
+      const userPrompt = `Analyze this document and generate the most appropriate draw.io diagram.\n\nDocument name: ${fileName}\nDocument content:\n---\n${documentText.substring(0, 8000)}\n---\n\nDetermine what type of diagram best represents this document (flowchart, process map, org chart, ER diagram, VSM, etc.) and generate it.\nInclude all key entities, processes, and relationships from the document.`;
+      const genAI = getGeminiAiClient();
+      const model = genAI.getGenerativeModel({
+        model: CHAT_MODEL,
+        systemInstruction: DIAGRAM_SYSTEM_PROMPT,
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.3,
+          maxOutputTokens: 4000,
+        },
       });
-
-      const parsed = JSON.parse(completion.choices[0].message.content);
+      const result = await model.generateContent(userPrompt);
+      const parsed = JSON.parse(result.response.text());
+      logAiRequest({
+        userId,
+        model: CHAT_MODEL,
+        endpoint: "ai-assistant.generateDiagramFromDocument",
+        success: true,
+        durationMs: Date.now() - _t0,
+      });
 
       return {
         intent: "generate_diagram_from_document",
@@ -825,6 +903,14 @@ class AiAssistantService {
       logger.error("Document diagram generation error", {
         error: error.message,
         userId,
+      });
+      logAiRequest({
+        userId,
+        model: CHAT_MODEL,
+        endpoint: "ai-assistant.generateDiagramFromDocument",
+        success: false,
+        durationMs: Date.now() - _t0,
+        error: error.message,
       });
       if (error.status === 429) {
         throw new AppError(
@@ -1117,7 +1203,7 @@ class AiAssistantService {
         "CONSENT_REQUIRED",
       );
     }
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.GEMINI_API_KEY) {
       throw new AppError("AI service not configured", 500, "AI_NOT_CONFIGURED");
     }
 
@@ -1162,44 +1248,49 @@ class AiAssistantService {
       },
     });
 
-    // Build OpenAI messages — include doc + history
-    const history = await prisma.aiMessage.findMany({
+    // Conversation history (doc + prior turns) — Gemini chat format.
+    // The just-saved user instruction is the live turn (sendMessage).
+    const historyRows = await prisma.aiMessage.findMany({
       where: {
         conversationId: conversation.id,
         role: { in: ["user", "assistant", "document"] },
       },
       orderBy: { createdAt: "desc" },
-      take: 20,
+      take: 21,
     });
-    const orderedHistory = history.reverse();
+    const orderedHistory = historyRows.reverse();
+    if (
+      orderedHistory.length &&
+      orderedHistory[orderedHistory.length - 1].role === "user" &&
+      orderedHistory[orderedHistory.length - 1].content === userInstruction
+    ) {
+      orderedHistory.pop();
+    }
 
     const ctx = await this.getUserContext(userId, appContext);
     const contextBlock = this._buildContextBlock(ctx);
     const fullSystemPrompt = SYSTEM_PROMPT + contextBlock;
+    const geminiHistory = toGeminiHistory(orderedHistory);
 
-    const openaiMessages = [
-      { role: "system", content: fullSystemPrompt },
-      ...orderedHistory.map((msg) => {
-        if (msg.role === "document") {
-          return {
-            role: "user",
-            content: `[Attached document: ${msg.metadata?.fileName || "file"}]\n${(msg.content || "").substring(0, 6000)}`,
-          };
-        }
-        return {
-          role: msg.role === "user" ? "user" : "assistant",
-          content: msg.content,
-        };
-      }),
-    ];
-
+    const _t0 = Date.now();
     try {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: openaiMessages,
-        max_tokens: 2000,
+      const genAI = getGeminiAiClient();
+      const model = genAI.getGenerativeModel({
+        model: CHAT_MODEL,
+        systemInstruction: fullSystemPrompt,
+        generationConfig: { maxOutputTokens: 2000 },
       });
-      const aiContent = completion.choices[0].message.content;
+      const chatSession = model.startChat({ history: geminiHistory });
+      const result = await chatSession.sendMessage(userInstruction);
+      const aiContent = result.response.text();
+      logAiRequest({
+        userId,
+        app: appContext,
+        model: CHAT_MODEL,
+        endpoint: "ai-assistant.analyzeDocument",
+        success: true,
+        durationMs: Date.now() - _t0,
+      });
 
       await prisma.aiMessage.create({
         data: {
@@ -1217,6 +1308,15 @@ class AiAssistantService {
       };
     } catch (error) {
       logger.error("Document analysis error", { error: error.message, userId });
+      logAiRequest({
+        userId,
+        app: appContext,
+        model: CHAT_MODEL,
+        endpoint: "ai-assistant.analyzeDocument",
+        success: false,
+        durationMs: Date.now() - _t0,
+        error: error.message,
+      });
       throw new AppError("Failed to analyze document.", 500, "AI_ERROR");
     }
   }

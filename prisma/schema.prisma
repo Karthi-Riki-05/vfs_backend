@@ -273,7 +273,7 @@ model User {
   flowSharesReceived   FlowShare[]           @relation("FlowShareSharedWith")
   aiConsent            AiConsent?
   aiConversations      AiConversation[]
-  aiCreditBalance      AiCreditBalance?
+  aiCreditBalances     AiCreditBalance[]
   aiCreditUsages       AiCreditUsage[]
   flowVersions         FlowVersion[]         @relation("FlowVersionSavedBy")
   adminLogsGiven       AdminLog[]            @relation("AdminLogAdmin")
@@ -1041,25 +1041,27 @@ model IssueItem {
 // ============================================================
 
 model TransactionLog {
-  id            String    @id @default(cuid())
-  legacyId      Int?      @map("legacy_id")
-  legacySource  String?   @map("legacy_source")
-  userId        String?   @map("user_id")
-  user          User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
-  chargeId      String?   @map("charge_id")
-  txnId         String?   @map("txn_id")
-  amountCharged Int?      @map("amount_charged") // In cents
-  paymentMethod String?   @map("payment_method")
-  holderName    String?   @map("holder_name")
+  id            String      @id @default(cuid())
+  legacyId      Int?        @map("legacy_id")
+  legacySource  String?     @map("legacy_source")
+  userId        String?     @map("user_id")
+  user          User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  chargeId      String?     @map("charge_id")
+  txnId         String?     @map("txn_id")
+  amountCharged Int?        @map("amount_charged") // In cents
+  paymentMethod String?     @map("payment_method")
+  holderName    String?     @map("holder_name")
   currency      String?
   status        String?
-  appType       AppType?  @map("app_type")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime? @map("updated_at")
-  deletedAt     DateTime? @map("deleted_at")
+  appType       AppType?    @map("app_type")
+  appContext    UserVersion @default(free) @map("app_context")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime?   @map("updated_at")
+  deletedAt     DateTime?   @map("deleted_at")
 
   @@index([chargeId])
   @@index([userId])
+  @@index([userId, appContext])
   @@map("transaction_logs")
 }
 
@@ -1172,26 +1174,28 @@ model UserAction {
 // ============================================================
 
 model SubscriptionHistory {
-  id              String    @id @default(cuid())
-  userId          String    @map("user_id")
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  planName        String?   @map("plan_name")
-  productType     String?   @map("product_type")
+  id              String      @id @default(cuid())
+  userId          String      @map("user_id")
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planName        String?     @map("plan_name")
+  productType     String?     @map("product_type")
   status          String
-  price           Float     @default(0)
+  price           Float       @default(0)
   currency        String?
-  isRecurring     Boolean   @default(false) @map("is_recurring")
+  isRecurring     Boolean     @default(false) @map("is_recurring")
   source          String? // 'stripe' | 'admin' | 'unknown'
-  startedAt       DateTime? @map("started_at")
-  expiresAt       DateTime? @map("expires_at")
-  archivedAt      DateTime  @default(now()) @map("archived_at")
-  archivedReason  String?   @map("archived_reason") // 'replaced' | 'cancelled' | 'expired'
-  archivedBy      String?   @map("archived_by") // admin userId if admin-triggered
-  stripePaymentId String?   @map("stripe_payment_id")
+  startedAt       DateTime?   @map("started_at")
+  expiresAt       DateTime?   @map("expires_at")
+  archivedAt      DateTime    @default(now()) @map("archived_at")
+  archivedReason  String?     @map("archived_reason") // 'replaced' | 'cancelled' | 'expired'
+  archivedBy      String?     @map("archived_by") // admin userId if admin-triggered
+  stripePaymentId String?     @map("stripe_payment_id")
+  appContext      UserVersion @default(free) @map("app_context")
   snapshot        Json? // full original Subscription row for audit
 
   @@index([userId])
   @@index([archivedAt])
+  @@index([userId, appContext])
   @@map("subscription_history")
 }
 
@@ -1420,7 +1424,7 @@ model AiMessage {
 
 model AiCreditBalance {
   id           String      @id @default(cuid())
-  userId       String      @unique @map("user_id")
+  userId       String      @map("user_id")
   user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   planCredits  Int         @default(0) @map("plan_credits")
   addonCredits Int         @default(0) @map("addon_credits")
@@ -1429,6 +1433,7 @@ model AiCreditBalance {
   createdAt    DateTime    @default(now()) @map("created_at")
   updatedAt    DateTime    @updatedAt @map("updated_at")
 
+  @@unique([userId, appContext])
   @@index([userId])
   @@map("ai_credit_balances")
 }

@@ -26,7 +26,11 @@ const ADDON_PACK_MAP = {
 class AiCreditController {
   getBalance = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.user.currentVersion || "free";
+    // Allow callers to read a specific workspace's balance via query
+    // (used by tests / admin tools). Default to the user's current
+    // workspace.
+    const appContext =
+      req.query?.appContext || req.user.currentVersion || "free";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const balance = await aiCreditService.getBalance(
       userId,
@@ -96,7 +100,7 @@ class AiCreditController {
 
     const { xml, model } = await aiDetectService.generateDiagramXml(
       message,
-      appContext,
+      req.user,
     );
     const result = await aiCreditService.deductCredit(
       userId,
@@ -131,7 +135,8 @@ class AiCreditController {
         await prisma.aiMessage.update({
           where: { id: messageId },
           data: {
-            content: "Diagram generated. Preview below — click Insert to add to canvas.",
+            content:
+              "Diagram generated. Preview below — click Insert to add to canvas.",
             diagramXml: xml,
             metadata: { intent: "generate_diagram", model, wasUpdated: true },
           },
@@ -245,7 +250,7 @@ class AiCreditController {
     const prompt = `Create a VSM diagram from this document:\n\n${extractedText.substring(0, 3000)}`;
     const { xml, model } = await aiDetectService.generateDiagramXml(
       prompt,
-      appContext,
+      req.user,
     );
     const result = await aiCreditService.deductCredit(
       userId,
@@ -268,9 +273,12 @@ class AiCreditController {
   });
 
   handleAddonPurchase = asyncHandler(async (req, res) => {
-    const { credits } = req.body || {};
+    const { credits, packType, source } = req.body || {};
     const userId = req.user.id;
-    const appContext = req.user.currentVersion || "free";
+    // Allow caller to override appContext (admin / test). Default to the
+    // user's current workspace.
+    const appContext =
+      req.body?.appContext || req.user.currentVersion || "free";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const amount = parseInt(credits, 10);
 
@@ -278,7 +286,45 @@ class AiCreditController {
       throw new AppError("Invalid credits amount", 400, "VALIDATION_ERROR");
     }
 
+    // Grant credits + write audit + history rows in one transaction so a
+    // partial failure can't leave the records out of sync (matches what
+    // the Stripe webhook does for a real purchase).
     await aiCreditService.addAddonCredits(userId, amount, appContext, teamId);
+
+    const txnId = `manual_${userId}_${Date.now()}`;
+    const planLabel = `AI Credits Addon${packType ? ` — ${packType}` : ""} (${amount} credits)`;
+    await prisma.$transaction([
+      prisma.transactionLog.create({
+        data: {
+          userId,
+          chargeId: txnId,
+          txnId,
+          amountCharged: 0,
+          currency: "usd",
+          status: "success",
+          paymentMethod: source === "admin" ? "admin" : "manual",
+          appType: appContext === "team" ? "enterprise" : "individual",
+          appContext,
+        },
+      }),
+      prisma.subscriptionHistory.create({
+        data: {
+          userId,
+          planName: planLabel,
+          productType: "ai_addon_credits",
+          status: "completed",
+          price: 0,
+          currency: "usd",
+          isRecurring: false,
+          source: source || "manual",
+          startedAt: new Date(),
+          archivedReason: "manual_grant",
+          appContext,
+          snapshot: { credits: amount, packType: packType || null, appContext },
+        },
+      }),
+    ]);
+
     const balance = await aiCreditService.getBalance(
       userId,
       appContext,
@@ -297,6 +343,8 @@ class AiCreditController {
   createAddonCheckout = asyncHandler(async (req, res) => {
     const { packType } = req.body || {};
     const userId = req.user.id;
+    const appContext = req.user.currentVersion || "free";
+    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
 
     const pack = ADDON_PACK_MAP[packType];
     if (!pack) {
@@ -346,10 +394,12 @@ class AiCreditController {
         purchaseType: "ai_addon_credits",
         credits: String(pack.credits),
         packType,
+        appContext,
+        ...(teamId ? { teamId } : {}),
       },
       // Stripe Adaptive Pricing (account-level setting) converts to local currency
-      success_url: `${baseUrl}/dashboard?addon_success=true&credits=${pack.credits}`,
-      cancel_url: `${baseUrl}/dashboard?addon_cancelled=true`,
+      success_url: `${baseUrl}/dashboard/subscription?addon_success=true&credits=${pack.credits}`,
+      cancel_url: `${baseUrl}/dashboard/subscription?addon_cancelled=true`,
     });
 
     res.json({

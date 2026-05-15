@@ -3,6 +3,8 @@ const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const path = require("path");
 const fs = require("fs");
+const { uploadFile: uploadToStorage } = require("../services/storage.service");
+const { sanitizeSvg, isSvgDangerous } = require("../utils/sanitizeSvg");
 
 class ChatController {
   getSidebar = asyncHandler(async (req, res) => {
@@ -83,13 +85,32 @@ class ChatController {
       throw new AppError("Empty file uploaded", 400, "EMPTY_FILE");
     }
 
-    // Harden against path traversal: only ever expose the basename.
-    const safeName = path.basename(req.file.originalname || req.file.filename);
-    const storedBase = path.basename(req.file.filename);
-    const fileUrl = `/uploads/chat/${storedBase}`;
-    const groupId = req.body.groupId;
+    const safeName = path.basename(req.file.originalname || "upload");
+    let fileBuffer = req.file.buffer;
 
-    // If groupId is provided, create a full file message
+    // SVG sanitisation — strip <script> and dangerous attributes before storage
+    const isSvg =
+      req.file.mimetype === "image/svg+xml" ||
+      safeName.toLowerCase().endsWith(".svg");
+    if (isSvg) {
+      const svgContent = fileBuffer.toString("utf-8");
+      if (isSvgDangerous(svgContent)) {
+        console.warn(
+          `[Security] Dangerous SVG from user ${req.user.id}: ${safeName}`,
+        );
+      }
+      fileBuffer = Buffer.from(sanitizeSvg(svgContent), "utf-8");
+    }
+
+    const result = await uploadToStorage({
+      buffer: fileBuffer,
+      originalName: safeName,
+      mimeType: req.file.mimetype,
+      folder: "chat",
+      userId: req.user.id,
+    });
+
+    const groupId = req.body.groupId;
     if (groupId) {
       const message = await chatService.createFileMessage(
         groupId,
@@ -97,22 +118,21 @@ class ChatController {
         {
           originalname: safeName,
           mimetype: req.file.mimetype,
-          size: req.file.size,
-          url: fileUrl,
+          size: fileBuffer.length,
+          url: result.url,
         },
       );
       return res.json({ success: true, data: message });
     }
 
-    // Otherwise return file info for the client to send as a message
     const isImage = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(safeName);
     res.json({
       success: true,
       data: {
-        url: fileUrl,
+        url: result.url,
         filename: safeName,
         type: isImage ? "image" : "docs",
-        size: req.file.size,
+        size: fileBuffer.length,
         mimetype: req.file.mimetype,
       },
     });
@@ -120,14 +140,21 @@ class ChatController {
 
   downloadFile = asyncHandler(async (req, res) => {
     const file = await chatService.getFile(req.params.id, req.user.id);
-    const filePath = path.join(
+
+    // S3-stored file: filePath is an absolute URL — redirect client directly
+    if (file.filePath && file.filePath.startsWith("http")) {
+      return res.redirect(302, file.filePath);
+    }
+
+    // Local disk fallback
+    const localPath = path.join(
       __dirname,
       "../../uploads/chat",
       path.basename(file.filePath),
     );
 
-    if (!fs.existsSync(filePath)) {
-      throw new AppError("File not found on disk", 404, "FILE_NOT_FOUND");
+    if (!fs.existsSync(localPath)) {
+      throw new AppError("File not found", 404, "FILE_NOT_FOUND");
     }
 
     res.setHeader(
@@ -135,7 +162,7 @@ class ChatController {
       `attachment; filename="${file.fileName}"`,
     );
     res.setHeader("Content-Type", file.fileType);
-    fs.createReadStream(filePath).pipe(res);
+    fs.createReadStream(localPath).pipe(res);
   });
 
   previewFile = asyncHandler(async (req, res) => {

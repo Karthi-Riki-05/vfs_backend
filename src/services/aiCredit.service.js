@@ -43,7 +43,12 @@ function planCreditsFor(appContext) {
 }
 
 async function getOrCreateBalance(userId, appContext = "free") {
-  let balance = await prisma.aiCreditBalance.findUnique({ where: { userId } });
+  // Composite (userId, appContext) key — separate balance per workspace.
+  // A user can hold a Free balance AND a Team balance independently;
+  // credits never leak between apps.
+  let balance = await prisma.aiCreditBalance.findUnique({
+    where: { userId_appContext: { userId, appContext } },
+  });
 
   if (!balance) {
     balance = await prisma.aiCreditBalance.create({
@@ -60,11 +65,10 @@ async function getOrCreateBalance(userId, appContext = "free") {
   // Refill plan credits if the reset date has passed
   if (balance.planResetsAt && new Date() > balance.planResetsAt) {
     balance = await prisma.aiCreditBalance.update({
-      where: { userId },
+      where: { userId_appContext: { userId, appContext } },
       data: {
         planCredits: planCreditsFor(appContext),
         planResetsAt: getNextResetDate(),
-        appContext,
       },
     });
   }
@@ -116,7 +120,9 @@ async function deductCredit(
 
   const [updated] = await prisma.$transaction([
     prisma.aiCreditBalance.update({
-      where: { userId: billing.userId },
+      where: {
+        userId_appContext: { userId: billing.userId, appContext: ctx },
+      },
       data: {
         planCredits: { decrement: planDeduct },
         addonCredits: { decrement: addonDeduct },
@@ -157,7 +163,7 @@ async function addAddonCredits(
   const ctx = billing.appContext || appContext;
   await getOrCreateBalance(billing.userId, ctx);
   return prisma.aiCreditBalance.update({
-    where: { userId: billing.userId },
+    where: { userId_appContext: { userId: billing.userId, appContext: ctx } },
     data: { addonCredits: { increment: credits } },
   });
 }
@@ -186,11 +192,10 @@ async function resetAllPlanCredits() {
   for (const user of users) {
     const appContext = user.currentVersion || "free";
     await prisma.aiCreditBalance.upsert({
-      where: { userId: user.id },
+      where: { userId_appContext: { userId: user.id, appContext } },
       update: {
         planCredits: planCreditsFor(appContext),
         planResetsAt: getNextResetDate(),
-        appContext,
       },
       create: {
         userId: user.id,

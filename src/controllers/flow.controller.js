@@ -3,10 +3,16 @@ const asyncHandler = require("../utils/asyncHandler");
 const { prisma } = require("../lib/prisma");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
-const OpenAI = require("openai");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { docUpload } = require("../middleware/docUpload");
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let _vsmGenAI = null;
+function getVsmGenAI() {
+  if (!_vsmGenAI) {
+    _vsmGenAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  }
+  return _vsmGenAI;
+}
 
 class FlowController {
   getAllFlows = asyncHandler(async (req, res) => {
@@ -279,17 +285,16 @@ HARD RULES — follow exactly or the diagram will fail to render:
 
       const userPrompt = `Create a VSM diagram from this process document:\n\n${extractedText.substring(0, 3000)}`;
 
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.3,
-        max_tokens: 2000,
+      const model = getVsmGenAI().getGenerativeModel({
+        model: "gemini-2.0-flash",
+        systemInstruction: systemPrompt,
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 2000,
+        },
       });
-
-      let xml = completion.choices[0]?.message?.content?.trim() || "";
+      const completion = await model.generateContent(userPrompt);
+      let xml = completion.response.text().trim() || "";
 
       // Strip markdown fences if the model wrapped the XML in ```xml ... ```
       xml = xml
