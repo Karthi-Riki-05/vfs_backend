@@ -1,0 +1,36 @@
+name: Deploy backend to EC2
+
+on:
+  push:
+    branches: [production]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script_stop: true
+          command_timeout: 12m
+          script: |
+            set -euo pipefail
+            cd /var/www/vfs/backend
+            # Pull just enough to update the deploy script itself,
+            # then hand off to it for the full deploy flow.
+            git fetch origin --prune
+            git checkout production
+            git reset --hard origin/production
+            chmod +x scripts/server-deploy.sh
+            bash scripts/server-deploy.sh
