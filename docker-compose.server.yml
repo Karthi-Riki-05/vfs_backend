@@ -1,7 +1,14 @@
-# Production compose — EC2 backend only.
-# Frontend is served by AWS Amplify — no frontend service here.
+# Production compose — EC2: db + backend + frontend.
+# All three services run on the same 2GB instance.
+# mem_limit totals 1.5GB leaving ~512MB for the OS + swap.
+# Ensure 2GB swap is enabled on the host before deploying:
+#   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+#   sudo mkswap /swapfile && sudo swapon /swapfile
+#   echo '/swapfile swap swap defaults 0 0' | sudo tee -a /etc/fstab
+version: "2.4"
 
 services:
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   db:
     image: postgres:15
     container_name: vc-postgres
@@ -10,20 +17,19 @@ services:
       POSTGRES_USER: ${DB_USER:-admin}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
       POSTGRES_DB: value_charts_db
-    ports:
-      - "5432:5432"
-    networks:
-      - vc-network
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - vc-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-admin} -d value_charts_db"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 20s
-    mem_limit: 768m
+    mem_limit: 512m
 
+  # ── Express.js API ─────────────────────────────────────────────────────────
   backend:
     build: ./backend
     container_name: vc-backend
@@ -36,7 +42,7 @@ services:
         condition: service_healthy
     networks:
       - vc-network
-    mem_limit: 1g
+    mem_limit: 512m
     environment:
       DATABASE_URL: postgresql://${DB_USER:-admin}:${DB_PASSWORD:-password}@db:5432/value_charts_db
       GEMINI_API_KEY: ${GEMINI_API_KEY}
@@ -55,23 +61,17 @@ services:
       STRIPE_LIVE_PUBLISHABLE_KEY: ${STRIPE_LIVE_PUBLISHABLE_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
       STRIPE_CURRENCY: ${STRIPE_CURRENCY:-USD}
-      # Stripe — Pro pricing
       STRIPE_PRO_BASE_PRICE: ${STRIPE_PRO_BASE_PRICE}
       STRIPE_PRO_MONTHLY_PRICE: ${STRIPE_PRO_MONTHLY_PRICE}
       STRIPE_PRO_YEARLY_PRICE: ${STRIPE_PRO_YEARLY_PRICE}
-      # Stripe — Team pricing
       STRIPE_TEAM_MONTHLY_PRICE: ${STRIPE_TEAM_MONTHLY_PRICE}
       STRIPE_TEAM_YEARLY_PRICE: ${STRIPE_TEAM_YEARLY_PRICE}
-      # Stripe — Flow Add-on subscriptions
       STRIPE_FLOW_STANDARD_PRICE_ID: ${STRIPE_FLOW_STANDARD_PRICE_ID}
       STRIPE_FLOW_UNLIMITED_PRICE_ID: ${STRIPE_FLOW_UNLIMITED_PRICE_ID}
-      # Stripe — AI credit top-ups
       STRIPE_AI_ADDON_STARTER_PRICE: ${STRIPE_AI_ADDON_STARTER_PRICE}
       STRIPE_AI_ADDON_STANDARD_PRICE: ${STRIPE_AI_ADDON_STANDARD_PRICE}
       STRIPE_AI_ADDON_PROPPACK_PRICE: ${STRIPE_AI_ADDON_PROPPACK_PRICE}
-      # RevenueCat (mobile in-app purchases)
       REVENUECAT_WEBHOOK_SECRET: ${REVENUECAT_WEBHOOK_SECRET:-}
-      # S3 / File storage
       S3_STORAGE: ${S3_STORAGE:-false}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
@@ -79,17 +79,64 @@ services:
       S3_BUCKET_NAME: ${S3_BUCKET_NAME:-}
       S3_ENDPOINT: ${S3_ENDPOINT:-}
       S3_PUBLIC_URL: ${S3_PUBLIC_URL:-}
-      # SMTP
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-465}
       SMTP_SECURE: ${SMTP_SECURE:-true}
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       SMTP_FROM: ${SMTP_FROM}
-      # Firebase Cloud Messaging (firebase-admin)
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL:-}
       FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY:-}
+
+  # ── Next.js Frontend ───────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # NEXT_PUBLIC_* vars are baked into the client bundle at build time
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_BACKEND_URL: ${NEXT_PUBLIC_BACKEND_URL}
+        NEXTAUTH_URL: ${NEXTAUTH_URL}
+        NEXT_PUBLIC_FIREBASE_API_KEY: ${NEXT_PUBLIC_FIREBASE_API_KEY:-}
+        NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN:-}
+        NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${NEXT_PUBLIC_FIREBASE_PROJECT_ID:-}
+        NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET:-}
+        NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID:-}
+        NEXT_PUBLIC_FIREBASE_APP_ID: ${NEXT_PUBLIC_FIREBASE_APP_ID:-}
+        NEXT_PUBLIC_FIREBASE_VAPID_KEY: ${NEXT_PUBLIC_FIREBASE_VAPID_KEY:-}
+    container_name: vc-frontend
+    restart: always
+    command: npm start
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - vc-network
+    mem_limit: 512m
+    environment:
+      NODE_ENV: production
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      # Internal Docker network URL — avoids round-trip through Nginx for SSR calls
+      BACKEND_URL: http://vc-backend:5000
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GITHUB_ID: ${GITHUB_ID:-}
+      GITHUB_SECRET: ${GITHUB_SECRET:-}
+      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+      FACEBOOK_CLIENT_ID: ${FACEBOOK_CLIENT_ID:-}
+      FACEBOOK_CLIENT_SECRET: ${FACEBOOK_CLIENT_SECRET:-}
+      # Firebase web SDK (runtime — some vars needed by server components)
+      NEXT_PUBLIC_FIREBASE_API_KEY: ${NEXT_PUBLIC_FIREBASE_API_KEY:-}
+      NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN:-}
+      NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${NEXT_PUBLIC_FIREBASE_PROJECT_ID:-}
+      NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET:-}
+      NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID:-}
+      NEXT_PUBLIC_FIREBASE_APP_ID: ${NEXT_PUBLIC_FIREBASE_APP_ID:-}
+      NEXT_PUBLIC_FIREBASE_VAPID_KEY: ${NEXT_PUBLIC_FIREBASE_VAPID_KEY:-}
 
 networks:
   vc-network:
