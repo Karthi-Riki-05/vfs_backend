@@ -1,8 +1,5 @@
 # Production compose — EC2 backend only.
 # Frontend is served by AWS Amplify — no frontend service here.
-# Compatible with docker-compose v1 (version 2.4 format for mem_limit +
-# depends_on service_healthy).
-version: "2.4"
 
 services:
   db:
