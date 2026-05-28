@@ -60,6 +60,24 @@ class ProController {
     );
     res.json({ success: true, data: result });
   });
+
+  createFlowAddonCheckout = asyncHandler(async (req, res) => {
+    const result = await proService.createFlowAddonSubscriptionCheckout(
+      req.user.id,
+      req.body.plan,
+    );
+    res.json({ success: true, data: result });
+  });
+
+  cancelFlowAddon = asyncHandler(async (req, res) => {
+    const result = await proService.cancelFlowAddon(req.user.id);
+    res.json({ success: true, data: result });
+  });
+
+  getFlowAddonStatus = asyncHandler(async (req, res) => {
+    const result = await proService.getFlowAddonStatus(req.user.id);
+    res.json({ success: true, data: result });
+  });
 }
 
 module.exports = new ProController();

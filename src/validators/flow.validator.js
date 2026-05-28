@@ -74,10 +74,15 @@ const shareFlowSchema = z.object({
   body: z.object({
     shares: z
       .array(
-        z.object({
-          userId: z.string().min(1),
-          permission: z.enum(["view", "edit"]),
-        }),
+        z
+          .object({
+            userId: z.string().min(1).optional(),
+            email: z.string().email().optional(),
+            permission: z.enum(["view", "edit"]),
+          })
+          .refine((s) => s.userId || s.email, {
+            message: "Each share entry must have userId or email",
+          }),
       )
       .min(1, "At least one share is required"),
   }),

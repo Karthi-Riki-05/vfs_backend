@@ -50,4 +50,17 @@ router.get(
   proController.verifyExtraFlowsPurchase,
 );
 
+// Flow Add-on subscription (recurring monthly)
+router.post(
+  "/flow-addon/checkout",
+  authenticate,
+  proController.createFlowAddonCheckout,
+);
+router.post("/flow-addon/cancel", authenticate, proController.cancelFlowAddon);
+router.get(
+  "/flow-addon/status",
+  authenticate,
+  proController.getFlowAddonStatus,
+);
+
 module.exports = router;

@@ -4,8 +4,8 @@ const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 
 const FLOW_PRICING = {
-  50: 500, // $5.00
-  unlimited: 1000, // $10.00
+  50: 1000, // $10.00/month — Standard (100 flows)
+  unlimited: 2000, // $20.00/month — Unlimited
 };
 
 class ProService {
@@ -21,6 +21,8 @@ class ProService {
         proUnlimitedFlows: true,
         currentVersion: true,
         stripeCustomerId: true,
+        flowAddonStatus: true,
+        flowAddonPlan: true,
       },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
@@ -39,16 +41,22 @@ class ProService {
       });
     }
 
-    const maxFlows = user.proFlowLimit + user.proAdditionalFlowsPurchased;
+    const isAddonUnlimited =
+      user.flowAddonStatus === "active" && user.flowAddonPlan === "unlimited";
+    const isUnlimited = user.proUnlimitedFlows || isAddonUnlimited;
+    const maxFlows =
+      user.flowAddonStatus === "active" && user.flowAddonPlan === "standard_100"
+        ? 100
+        : user.proFlowLimit + user.proAdditionalFlowsPurchased;
 
     return {
       currentApp: user.currentVersion || "free",
       hasPro: user.hasPro,
       proPurchasedAt: user.proPurchasedAt,
-      isUnlimited: user.proUnlimitedFlows,
+      isUnlimited,
       proFlows: {
         used: proFlowsUsed,
-        max: user.proUnlimitedFlows ? -1 : maxFlows,
+        max: isUnlimited ? -1 : maxFlows,
         baseLimit: user.proFlowLimit,
         extraPurchased: user.proAdditionalFlowsPurchased,
       },
@@ -145,10 +153,11 @@ class ProService {
         hasPro: true,
         proPurchasedAt: new Date(),
         currentVersion: "pro",
+        isLegacyPro: false,
       },
     });
 
-    // Grant 100 AI credits/month (idempotent — webhook may also do this)
+    // Grant 200 AI credits/month for new Pro ($5) — idempotent, webhook may also do this.
     const nextReset = new Date();
     nextReset.setMonth(nextReset.getMonth() + 1);
     nextReset.setDate(1);
@@ -157,13 +166,13 @@ class ProService {
       where: { userId_appContext: { userId, appContext: "pro" } },
       create: {
         userId,
-        planCredits: 100,
+        planCredits: 200,
         addonCredits: 0,
         planResetsAt: nextReset,
         appContext: "pro",
       },
       update: {
-        planCredits: 100,
+        planCredits: 200,
         planResetsAt: nextReset,
       },
     });
@@ -277,7 +286,7 @@ class ProService {
               description:
                 "One-time payment — Lifetime access to all Pro & Team features",
             },
-            unit_amount: 100, // $1.00 lifetime
+            unit_amount: 500, // $5.00 one-time
           },
           quantity: 1,
         },
@@ -346,11 +355,13 @@ class ProService {
     }
 
     const isUnlimited = flowPackage === "unlimited";
-    const flowCount = isUnlimited ? -1 : 50;
-    const productName = isUnlimited ? "Unlimited Flows" : "50 Flows Pack";
+    const flowCount = isUnlimited ? -1 : 100;
+    const productName = isUnlimited
+      ? "Unlimited Flows"
+      : "Standard Flow Pack (100 Flows)";
     const description = isUnlimited
-      ? "Unlimited Flows for ValueChart Pro"
-      : "50 Additional Flows for ValueChart Pro";
+      ? "Unlimited Flows for ValueChart Pro — monthly subscription"
+      : "100 Additional Flows for ValueChart Pro — monthly subscription";
 
     const baseUrl = process.env.APP_URL || "http://localhost:3000";
     const session = await stripe.checkout.sessions.create({
@@ -387,92 +398,77 @@ class ProService {
   }
 
   async handleProUpgradeWebhook(session) {
-    const userId = session.metadata.userId;
-    console.log("=== WEBHOOK: pro_upgrade ===");
-    console.log("userId:", userId);
-    console.log("Payment Intent:", session.payment_intent);
+    const { grantProCredits } = require("../lib/grantProCredits");
+
+    const userId = session.metadata?.userId;
+    logger.info("[handleProUpgradeWebhook] pro_upgrade webhook", {
+      userId,
+      paymentIntent: session.payment_intent,
+    });
+
     if (!userId) {
-      console.error("[handleProUpgradeWebhook] No userId in metadata!");
+      logger.error(
+        "[handleProUpgradeWebhook] No userId in metadata — cannot activate Pro",
+      );
       return;
     }
 
-    try {
-      await prisma.user.update({
+    // Idempotency: fetch the user before any writes.
+    // If proPurchasedAt is already set this is a duplicate webhook delivery — skip.
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { proPurchasedAt: true, name: true, email: true },
+    });
+    if (!user) {
+      logger.error(`[handleProUpgradeWebhook] User not found: ${userId}`);
+      return;
+    }
+    if (user.proPurchasedAt) {
+      logger.info(
+        `[handleProUpgradeWebhook] Pro already activated for user ${userId}, skipping duplicate webhook`,
+      );
+      return { alreadyProcessed: true };
+    }
+
+    // Atomic: all core DB writes succeed together or roll back together.
+    // Best-effort side effects (email, push, invite) run after the transaction.
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
         where: { id: userId },
         data: {
           hasPro: true,
           proPurchasedAt: new Date(),
           currentVersion: "pro",
+          isLegacyPro: false,
         },
       });
-      console.log(
-        "[handleProUpgradeWebhook] Database updated: hasPro=true for user:",
+
+      await tx.flowShare.updateMany({
+        where: { sharedWithId: userId, requiresPro: true },
+        data: { requiresPro: false },
+      });
+
+      await grantProCredits(
         userId,
-      );
-    } catch (err) {
-      console.error(
-        "[handleProUpgradeWebhook] FAILED to update user:",
-        err.message,
-      );
-      throw err;
-    }
-
-    // Grant 100 AI credits/month (Pro plan) immediately on purchase.
-    const nextReset = new Date();
-    nextReset.setMonth(nextReset.getMonth() + 1);
-    nextReset.setDate(1);
-    nextReset.setHours(0, 0, 0, 0);
-    try {
-      await prisma.aiCreditBalance.upsert({
-        where: { userId_appContext: { userId, appContext: "pro" } },
-        create: {
-          userId,
-          planCredits: 100,
-          addonCredits: 0,
-          planResetsAt: nextReset,
-          appContext: "pro",
-        },
-        update: {
-          planCredits: 100,
-          planResetsAt: nextReset,
-        },
-      });
-    } catch (err) {
-      console.error(
-        "[handleProUpgradeWebhook] Failed to upsert credits:",
-        err.message,
-      );
-    }
-
-    // Log transaction (skip if already logged by verify-purchase)
-    const existingTxn = await prisma.transactionLog.findFirst({
-      where: { txnId: session.id },
-    });
-    if (!existingTxn) {
-      await prisma.transactionLog.create({
-        data: {
-          userId,
-          chargeId: session.payment_intent || session.id,
+        {
           txnId: session.id,
-          amountCharged: session.amount_total || 100,
+          amountCharged: session.amount_total || 500,
           currency: session.currency || getStripeCurrency(),
-          status: "success",
           paymentMethod: session.payment_method_types?.[0] || "card",
-          appType: "individual",
-          appContext: "pro",
         },
-      });
-    }
+        tx,
+      );
+    });
 
-    // Welcome email (best-effort, non-blocking)
+    logger.info(`[handleProUpgradeWebhook] Pro activated for user ${userId}`);
+
+    // ── Best-effort side effects (non-fatal if these fail) ──────────────────
+
+    // Welcome email
     try {
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { name: true, email: true },
-      });
-      if (user?.email) {
-        const { sendEmail } = require("../utils/email");
-        const dashUrl = `${process.env.APP_URL || "http://localhost:3000"}/dashboard`;
+      const { sendEmail } = require("../utils/email");
+      const dashUrl = `${process.env.APP_URL || "http://localhost:3000"}/dashboard`;
+      if (user.email) {
         await sendEmail({
           to: user.email,
           subject: "Welcome to ValueChart Pro!",
@@ -483,13 +479,13 @@ class ProService {
               <p>Your ValueChart Pro lifetime access is now active.</p>
               <h3 style="margin-top:20px">What you get</h3>
               <ul style="line-height:1.8">
-                <li>100 AI diagram credits/month</li>
-                <li>All team features — FREE</li>
+                <li>200 AI diagram credits per month</li>
+                <li>All team features — included</li>
                 <li>Unlimited team members</li>
                 <li>Team chat</li>
                 <li>10 flows included</li>
               </ul>
-              <p>Need more flows? Buy a flow pack (50 flows for $5 or unlimited for $10) anytime from your dashboard.</p>
+              <p>Need more flows? Buy a flow pack (100 flows for $10 or unlimited for $20) anytime from your dashboard.</p>
               <p style="margin-top:20px">
                 <a href="${dashUrl}" style="background:#3CB371;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Go to Dashboard</a>
               </p>
@@ -499,11 +495,10 @@ class ProService {
         });
       }
     } catch (err) {
-      console.error("[handleProUpgradeWebhook] Email failed:", err.message);
+      logger.error(`[handleProUpgradeWebhook] Email failed: ${err.message}`);
     }
 
-    // Auto-accept pending team invitation if the checkout was started from
-    // an invite link (Pro app flow: "Buy Pro $1 then join team").
+    // Auto-accept pending team invitation started from an invite link
     const pendingInviteToken = session.metadata?.pendingInviteToken;
     if (pendingInviteToken) {
       try {
@@ -516,15 +511,13 @@ class ProService {
           `[handleProUpgradeWebhook] Auto-accepted invite token=${pendingInviteToken} → team=${result?.teamId}`,
         );
       } catch (err) {
-        // Non-fatal — Pro is granted; user can re-click the invite link.
-        console.error(
-          "[handleProUpgradeWebhook] Auto-accept invite failed:",
-          err.message,
+        logger.error(
+          `[handleProUpgradeWebhook] Auto-accept invite failed: ${err.message}`,
         );
       }
     }
 
-    // Best-effort push notification.
+    // Push notification
     try {
       const fcm = require("./fcm.service");
       await fcm.sendToUser(
@@ -534,7 +527,7 @@ class ProService {
         { type: "payment", url: "/dashboard" },
       );
     } catch (err) {
-      console.warn("[handleProUpgradeWebhook] Push failed:", err.message);
+      logger.warn(`[handleProUpgradeWebhook] Push failed: ${err.message}`);
     }
 
     logger.info(`Pro purchased for user: ${userId}`);
@@ -751,6 +744,8 @@ class ProService {
         proFlowLimit: true,
         proAdditionalFlowsPurchased: true,
         proUnlimitedFlows: true,
+        flowAddonStatus: true,
+        flowAddonPlan: true,
       },
     });
 
@@ -758,8 +753,11 @@ class ProService {
       return { isPro: false };
     }
 
-    // Unlimited — no limit
-    if (user.proUnlimitedFlows) {
+    // Unlimited via base flag or active unlimited add-on
+    const isUnlimited =
+      user.proUnlimitedFlows ||
+      (user.flowAddonStatus === "active" && user.flowAddonPlan === "unlimited");
+    if (isUnlimited) {
       return {
         isPro: true,
         allowed: true,
@@ -772,7 +770,12 @@ class ProService {
     const flowCount = await prisma.flow.count({
       where: { ownerId: userId, deletedAt: null, appContext: "pro" },
     });
-    const maxFlows = user.proFlowLimit + user.proAdditionalFlowsPurchased;
+
+    // Active standard add-on (100 flows) overrides the base limit + one-time packs.
+    const maxFlows =
+      user.flowAddonStatus === "active" && user.flowAddonPlan === "standard_100"
+        ? 100
+        : user.proFlowLimit + user.proAdditionalFlowsPurchased;
 
     if (flowCount >= maxFlows) {
       throw new AppError(
@@ -785,20 +788,321 @@ class ProService {
     return { isPro: true, allowed: true, used: flowCount, max: maxFlows };
   }
 
+  // ── Flow Add-on Subscription ──────────────────────────────────────────────
+
+  async createFlowAddonSubscriptionCheckout(userId, plan) {
+    if (plan !== "standard" && plan !== "unlimited") {
+      throw new AppError(
+        'Invalid plan. Use "standard" or "unlimited"',
+        400,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        hasPro: true,
+        proPurchasedAt: true,
+        email: true,
+        stripeCustomerId: true,
+        flowAddonStatus: true,
+      },
+    });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+    if (!user.hasPro || !user.proPurchasedAt) {
+      throw new AppError(
+        "Pro Base purchase required before adding a flow subscription",
+        400,
+        "PRO_REQUIRED",
+      );
+    }
+    if (user.flowAddonStatus === "active") {
+      throw new AppError(
+        "You already have an active flow add-on subscription",
+        400,
+        "ALREADY_SUBSCRIBED",
+      );
+    }
+
+    const stripe = getStripe();
+    let customerId = user.stripeCustomerId;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+        metadata: { userId },
+      });
+      customerId = customer.id;
+      await prisma.user.update({
+        where: { id: userId },
+        data: { stripeCustomerId: customerId },
+      });
+    }
+
+    const priceId =
+      plan === "unlimited"
+        ? process.env.STRIPE_FLOW_UNLIMITED_PRICE_ID
+        : process.env.STRIPE_FLOW_STANDARD_PRICE_ID;
+    if (!priceId) {
+      throw new AppError(
+        `Stripe price ID for flow_${plan} not configured`,
+        503,
+        "CONFIG_ERROR",
+      );
+    }
+
+    const baseUrl = process.env.APP_URL || "http://localhost:3000";
+    const addonPlan = plan === "unlimited" ? "unlimited" : "standard_100";
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: customerId,
+      line_items: [{ price: priceId, quantity: 1 }],
+      metadata: { purchaseType: "flow_addon", userId, plan: addonPlan },
+      success_url: `${baseUrl}/dashboard/subscription?flow_addon_subscribed=${addonPlan}`,
+      cancel_url: `${baseUrl}/dashboard/subscription`,
+    });
+
+    return { sessionId: session.id, url: session.url };
+  }
+
+  async handleFlowAddonCheckoutWebhook(session) {
+    const { userId, plan: addonPlan } = session.metadata;
+    if (!userId || !addonPlan) {
+      logger.error(
+        "[handleFlowAddonCheckoutWebhook] Missing userId or plan in metadata",
+      );
+      return;
+    }
+
+    // Idempotency
+    const existingTxn = await prisma.transactionLog.findFirst({
+      where: { txnId: session.id },
+    });
+    if (existingTxn) {
+      logger.info(
+        `[handleFlowAddonCheckoutWebhook] Session ${session.id} already processed`,
+      );
+      return;
+    }
+
+    const stripe = getStripe();
+    let periodEnd = null;
+    if (session.subscription) {
+      try {
+        const stripeSub = await stripe.subscriptions.retrieve(
+          session.subscription,
+        );
+        periodEnd = stripeSub.current_period_end
+          ? new Date(stripeSub.current_period_end * 1000)
+          : null;
+      } catch (err) {
+        logger.warn(
+          `[handleFlowAddonCheckoutWebhook] Failed to retrieve sub: ${err.message}`,
+        );
+      }
+    }
+
+    const userUpdateData = {
+      flowAddonStripeSubId: session.subscription,
+      flowAddonPlan: addonPlan,
+      flowAddonStatus: "active",
+      flowAddonCurrentPeriodEnd: periodEnd,
+    };
+    if (addonPlan === "standard_100") {
+      userUpdateData.proFlowLimit = 100;
+      userUpdateData.proUnlimitedFlows = false;
+    } else {
+      // unlimited
+      userUpdateData.proUnlimitedFlows = true;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: userId }, data: userUpdateData });
+      await tx.transactionLog.create({
+        data: {
+          userId,
+          txnId: session.id,
+          chargeId:
+            session.payment_intent || session.subscription || session.id,
+          amountCharged: session.amount_total || 0,
+          currency: session.currency || getStripeCurrency(),
+          status: "success",
+          paymentMethod: session.payment_method_types?.[0] || "card",
+          appType: "individual",
+          appContext: "pro",
+        },
+      });
+    });
+
+    logger.info(
+      `[handleFlowAddonCheckoutWebhook] Activated ${addonPlan} for user ${userId}`,
+    );
+  }
+
+  async handleFlowAddonSubscriptionUpdated(userId, status, currentPeriodEnd) {
+    const addonStatus =
+      status === "active"
+        ? "active"
+        : status === "past_due"
+          ? "past_due"
+          : status === "canceled"
+            ? "cancelled"
+            : status;
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        flowAddonStatus: addonStatus,
+        ...(currentPeriodEnd
+          ? { flowAddonCurrentPeriodEnd: new Date(currentPeriodEnd * 1000) }
+          : {}),
+      },
+    });
+    logger.info(
+      `[handleFlowAddonSubscriptionUpdated] user=${userId} status=${addonStatus}`,
+    );
+  }
+
+  async handleFlowAddonSubscriptionDeleted(userId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, name: true },
+    });
+    if (!user) return;
+
+    await prisma.$transaction(async (tx) => {
+      // Revert flow limits to base Pro
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          flowAddonStatus: "cancelled",
+          flowAddonStripeSubId: null,
+          flowAddonPlan: null,
+          flowAddonCurrentPeriodEnd: null,
+          proFlowLimit: 10,
+          proUnlimitedFlows: false,
+        },
+      });
+
+      // Mark excess flows for downgrade when user has > 10 pro flows
+      const flowCount = await tx.flow.count({
+        where: { ownerId: user.id, deletedAt: null, appContext: "pro" },
+      });
+      if (flowCount > 10) {
+        await tx.user.update({
+          where: { id: user.id },
+          data: { isInFlowPickerPhase: true },
+        });
+        // Mark the flows beyond the 10 most-recently-updated as needing selection
+        const excess = await tx.flow.findMany({
+          where: { ownerId: user.id, deletedAt: null, appContext: "pro" },
+          orderBy: { updatedAt: "desc" },
+          skip: 10,
+          select: { id: true },
+        });
+        if (excess.length > 0) {
+          await tx.flow.updateMany({
+            where: { id: { in: excess.map((f) => f.id) } },
+            data: { markedForDowngrade: true },
+          });
+        }
+      }
+    });
+
+    logger.info(
+      `[handleFlowAddonSubscriptionDeleted] Reverted flow limits for user ${user.id}`,
+    );
+
+    // Best-effort cancellation email
+    try {
+      const { sendEmail } = require("../utils/email");
+      const dashUrl = `${process.env.APP_URL || "http://localhost:3000"}/dashboard/subscription`;
+      if (user.email) {
+        await sendEmail({
+          to: user.email,
+          subject: "Your Flow Add-on subscription has ended — ValueChart Pro",
+          html: `
+            <div style="font-family:Inter,Arial,sans-serif;max-width:520px;margin:auto;padding:24px;color:#1A1A2E">
+              <h2 style="color:#1A1A2E;margin:0 0 12px">Flow Add-on subscription ended</h2>
+              <p>Hi ${user.name || "there"},</p>
+              <p>Your recurring Flow Add-on subscription has been cancelled. Your flow limit has reverted to the base 10 flows included with Pro.</p>
+              <p>You can resubscribe anytime from your subscription page.</p>
+              <p style="margin-top:20px">
+                <a href="${dashUrl}" style="background:#3CB371;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600">Manage Subscription</a>
+              </p>
+            </div>`,
+        });
+      }
+    } catch (err) {
+      logger.warn(
+        `[handleFlowAddonSubscriptionDeleted] Email failed: ${err.message}`,
+      );
+    }
+  }
+
+  async cancelFlowAddon(userId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { flowAddonStripeSubId: true, flowAddonStatus: true },
+    });
+    if (!user?.flowAddonStripeSubId || user.flowAddonStatus !== "active") {
+      throw new AppError(
+        "No active flow add-on subscription to cancel",
+        400,
+        "NO_ACTIVE_ADDON",
+      );
+    }
+
+    const stripe = getStripe();
+    // Cancel at period end — user keeps access until billing cycle ends
+    await stripe.subscriptions.update(user.flowAddonStripeSubId, {
+      cancel_at_period_end: true,
+    });
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { flowAddonStatus: "cancelling" },
+    });
+
+    return {
+      message:
+        "Flow add-on will cancel at the end of the current billing period",
+    };
+  }
+
+  async getFlowAddonStatus(userId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        flowAddonStripeSubId: true,
+        flowAddonPlan: true,
+        flowAddonStatus: true,
+        flowAddonCurrentPeriodEnd: true,
+      },
+    });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+    return {
+      stripeSubId: user.flowAddonStripeSubId,
+      plan: user.flowAddonPlan,
+      status: user.flowAddonStatus,
+      currentPeriodEnd: user.flowAddonCurrentPeriodEnd,
+    };
+  }
+
   getFlowPricing() {
     return [
       {
         package: "50",
-        flowCount: 50,
-        amountCents: 500,
-        amountDisplay: "$5.00",
-        description: "Added to your current balance",
+        flowCount: 100,
+        amountCents: 1000,
+        amountDisplay: "$10.00",
+        description: "100 flows, monthly subscription",
       },
       {
         package: "unlimited",
         flowCount: -1,
-        amountCents: 1000,
-        amountDisplay: "$10.00",
+        amountCents: 2000,
+        amountDisplay: "$20.00",
         description: "Never worry about flow limits again",
       },
     ];
@@ -812,6 +1116,10 @@ class ProService {
         proFlowLimit: true,
         proAdditionalFlowsPurchased: true,
         proUnlimitedFlows: true,
+        flowAddonStripeSubId: true,
+        flowAddonPlan: true,
+        flowAddonStatus: true,
+        flowAddonCurrentPeriodEnd: true,
       },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
@@ -823,10 +1131,15 @@ class ProService {
       where: { ownerId: userId, deletedAt: null, appContext: "pro" },
     });
 
-    const totalFlows = user.proUnlimitedFlows
-      ? -1
-      : user.proFlowLimit + user.proAdditionalFlowsPurchased;
-    const remaining = user.proUnlimitedFlows ? -1 : totalFlows - flowCount;
+    const isAddonUnlimited =
+      user.flowAddonStatus === "active" && user.flowAddonPlan === "unlimited";
+    const effectiveUnlimited = user.proUnlimitedFlows || isAddonUnlimited;
+    const effectiveLimit =
+      user.flowAddonStatus === "active" && user.flowAddonPlan === "standard_100"
+        ? 100
+        : user.proFlowLimit + user.proAdditionalFlowsPurchased;
+    const totalFlows = effectiveUnlimited ? -1 : effectiveLimit;
+    const remaining = effectiveUnlimited ? -1 : totalFlows - flowCount;
 
     const purchases = await prisma.proFlowPurchase.findMany({
       where: { userId },
@@ -835,8 +1148,8 @@ class ProService {
 
     return {
       plan: "Pro",
-      originalPrice: "$1",
-      isUnlimited: user.proUnlimitedFlows,
+      originalPrice: "$5",
+      isUnlimited: effectiveUnlimited,
       flows: {
         free: user.proFlowLimit,
         purchased: user.proAdditionalFlowsPurchased,
@@ -850,6 +1163,11 @@ class ProService {
         amountCents: p.amountCents,
         createdAt: p.createdAt,
       })),
+      flowAddon: {
+        plan: user.flowAddonPlan,
+        status: user.flowAddonStatus,
+        currentPeriodEnd: user.flowAddonCurrentPeriodEnd,
+      },
     };
   }
 }

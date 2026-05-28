@@ -54,6 +54,7 @@ exports.register = asyncHandler(async (req, res) => {
   res.status(201).json({
     success: true,
     data: {
+      userId: user.id,
       message:
         "Registration successful. Please check your email for a 6-digit verification code.",
       email,

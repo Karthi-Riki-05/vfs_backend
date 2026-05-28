@@ -2,7 +2,7 @@ const { z } = require("zod");
 
 const createChatGroupSchema = z.object({
   body: z.object({
-    title: z.string().max(255).trim().optional().default(""),
+    title: z.string().min(1, "Title cannot be empty").max(255).trim().optional(),
     flowId: z.number().int().optional(),
     flowItemId: z.string().optional(),
     appType: z.enum(["enterprise", "individual"]).optional(),

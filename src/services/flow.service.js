@@ -357,72 +357,167 @@ class FlowService {
         "NOT_FOUND",
       );
 
-    // Get valid team member IDs
-    const teamMembers = await prisma.teamMember.findMany({
-      where: { userId },
-      select: { teamId: true },
+    // Fetch sharer info once (used for email/FCM and Pro check).
+    // isProUser is TRUE only for standalone Pro (currentVersion='pro').
+    // Team users (currentVersion='team') share via team membership; they must
+    // not bypass the team-member check via email-based sharing.
+    const sharerUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        name: true,
+        email: true,
+        hasPro: true,
+        proPurchasedAt: true,
+        currentVersion: true,
+      },
     });
-    const teamIds = teamMembers.map((tm) => tm.teamId);
+    const isProUser =
+      sharerUser?.hasPro === true &&
+      sharerUser?.proPurchasedAt !== null &&
+      sharerUser?.currentVersion === "pro";
 
-    const validMembers = await prisma.teamMember.findMany({
-      where: { teamId: { in: teamIds }, userId: { not: userId } },
-      select: { userId: true },
-    });
-    const validIds = new Set(validMembers.map((m) => m.userId));
+    // Non-Pro users: restrict to team members only
+    let validTeamIds = null;
+    if (!isProUser) {
+      const teamMembers = await prisma.teamMember.findMany({
+        where: { userId },
+        select: { teamId: true },
+      });
+      const teamIds = teamMembers.map((tm) => tm.teamId);
+      const validMembers = await prisma.teamMember.findMany({
+        where: { teamId: { in: teamIds }, userId: { not: userId } },
+        select: { userId: true },
+      });
+      validTeamIds = new Set(validMembers.map((m) => m.userId));
+    }
+
+    const APP_URL =
+      process.env.NEXTAUTH_URL ||
+      process.env.APP_URL ||
+      "http://localhost:3002";
 
     const results = [];
     for (const share of shares) {
-      if (!validIds.has(share.userId)) {
-        results.push({
-          userId: share.userId,
-          error: "User is not a team member",
+      let recipientId = share.userId || null;
+      let recipientEmail = null;
+
+      // Resolve email → userId (Pro users can share by email)
+      if (!recipientId && share.email) {
+        const found = await prisma.user.findUnique({
+          where: { email: share.email.toLowerCase().trim() },
+          select: { id: true, email: true },
         });
+        if (!found) {
+          results.push({ email: share.email, error: "USER_NOT_FOUND" });
+          continue;
+        }
+        recipientId = found.id;
+        recipientEmail = found.email;
+      }
+
+      if (!recipientId) {
+        results.push({ error: "userId or email is required" });
         continue;
       }
-      if (share.userId === userId) {
+
+      if (recipientId === userId) {
         results.push({
-          userId: share.userId,
+          userId: recipientId,
           error: "Cannot share with yourself",
         });
         continue;
       }
+
+      // Non-Pro: enforce team membership
+      if (!isProUser && !validTeamIds.has(recipientId)) {
+        results.push({
+          userId: recipientId,
+          error: "User is not a team member",
+        });
+        continue;
+      }
+
+      // Fetch recipient to determine if Pro-gate is needed
+      let recipientUser = null;
+      try {
+        recipientUser = await prisma.user.findUnique({
+          where: { id: recipientId },
+          select: { email: true, hasPro: true },
+        });
+        if (!recipientEmail) recipientEmail = recipientUser?.email || null;
+      } catch (_) {
+        // non-fatal — proceed without Pro check
+      }
+
+      // requiresPro: sharer is standalone Pro AND recipient does not have Pro
+      const requiresPro = isProUser && !recipientUser?.hasPro;
+
       try {
         await prisma.flowShare.upsert({
           where: {
-            flowId_sharedWithId: { flowId, sharedWithId: share.userId },
+            flowId_sharedWithId: { flowId, sharedWithId: recipientId },
           },
           create: {
             flowId,
             sharedById: userId,
-            sharedWithId: share.userId,
+            sharedWithId: recipientId,
             permission: share.permission,
             appContext,
+            requiresPro,
           },
-          update: { permission: share.permission },
+          update: { permission: share.permission, requiresPro },
         });
         results.push({
-          userId: share.userId,
+          userId: recipientId,
           permission: share.permission,
+          requiresPro,
           success: true,
         });
+
+        // Email notification
+        try {
+          if (recipientEmail) {
+            const {
+              sendFlowShareEmail,
+              sendFlowShareProRequiredEmail,
+            } = require("../utils/email");
+            if (requiresPro) {
+              await sendFlowShareProRequiredEmail({
+                to: recipientEmail,
+                sharerName: sharerUser?.name || "Someone",
+                flowName: flow.name,
+                upgradeUrl: `${APP_URL}/dashboard/subscription`,
+              });
+            } else {
+              await sendFlowShareEmail({
+                to: recipientEmail,
+                sharerName: sharerUser?.name || "Someone",
+                flowName: flow.name,
+                flowUrl: `${APP_URL}/dashboard/flows/${flowId}`,
+                permission: share.permission,
+              });
+            }
+          }
+        } catch (emailErr) {
+          console.error("[Email share notify] failed:", emailErr.message);
+        }
+
         // FCM push notification — never break share on failure
         try {
-          const sharer = await prisma.user.findUnique({
-            where: { id: userId },
-            select: { name: true },
-          });
           const fcm = require("./fcm.service");
           await fcm.sendToUser(
-            share.userId,
-            "Flow Shared With You",
-            `${sharer && sharer.name ? sharer.name : "Someone"} shared "${flow.name}" with you`,
-            { type: "flow_share", flowId },
+            recipientId,
+            requiresPro ? "Flow Shared — Pro Required" : "Flow Shared With You",
+            requiresPro
+              ? `${sharerUser?.name || "Someone"} shared "${flow.name}" — upgrade to Pro to access`
+              : `${sharerUser?.name || "Someone"} shared "${flow.name}" with you`,
+            { type: "flow_share", flowId, requiresPro },
           );
         } catch (fcmErr) {
           console.error("[FCM share notify] failed:", fcmErr.message);
         }
       } catch (err) {
-        results.push({ userId: share.userId, error: err.message });
+        results.push({ userId: recipientId, error: err.message });
       }
     }
     return results;
@@ -490,6 +585,19 @@ class FlowService {
   }
 
   async getAvailableShareMembers(userId) {
+    // isProUser is TRUE only for standalone Pro accounts (currentVersion='pro').
+    // Team-plan users (currentVersion='team') also have hasPro=true but they
+    // already share through team membership — they must NOT see the Pro badge
+    // or the free-form email input, which is a Pro-only feature.
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { hasPro: true, proPurchasedAt: true, currentVersion: true },
+    });
+    const isProUser =
+      user?.hasPro === true &&
+      user?.proPurchasedAt !== null &&
+      user?.currentVersion === "pro";
+
     // Get all team members across all user's teams (deduplicated)
     const teamMembers = await prisma.teamMember.findMany({
       where: { userId },
@@ -497,25 +605,27 @@ class FlowService {
     });
     const teamIds = teamMembers.map((tm) => tm.teamId);
 
-    if (teamIds.length === 0) return [];
-
-    const members = await prisma.teamMember.findMany({
-      where: { teamId: { in: teamIds }, userId: { not: userId } },
-      include: {
-        user: { select: { id: true, name: true, email: true, image: true } },
-      },
-    });
-
-    // Deduplicate by user ID
     const seen = new Set();
     const unique = [];
-    for (const m of members) {
-      if (!seen.has(m.userId)) {
-        seen.add(m.userId);
-        unique.push(m.user);
+
+    if (teamIds.length > 0) {
+      const members = await prisma.teamMember.findMany({
+        where: { teamId: { in: teamIds }, userId: { not: userId } },
+        include: {
+          user: {
+            select: { id: true, name: true, email: true, image: true },
+          },
+        },
+      });
+      for (const m of members) {
+        if (!seen.has(m.userId)) {
+          seen.add(m.userId);
+          unique.push(m.user);
+        }
       }
     }
-    return unique;
+
+    return { members: unique, isProUser };
   }
 
   async getSharedFlows(userId, _appContext = "free", activeTeamId = null) {
@@ -579,6 +689,19 @@ class FlowService {
       where: { flowId: id, sharedWithId: userId },
     });
     if (share) {
+      if (share.requiresPro) {
+        const recipient = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { hasPro: true },
+        });
+        if (!recipient?.hasPro) {
+          throw new AppError(
+            "This flow was shared with you by a Pro user. Please upgrade to Pro to access it.",
+            402,
+            "PRO_REQUIRED",
+          );
+        }
+      }
       return { ...flow, permission: share.permission };
     }
 
@@ -617,6 +740,20 @@ class FlowService {
         403,
         "FORBIDDEN",
       );
+
+    if (share.requiresPro) {
+      const recipient = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { hasPro: true },
+      });
+      if (!recipient?.hasPro) {
+        throw new AppError(
+          "This flow was shared with you by a Pro user. Please upgrade to Pro to access it.",
+          402,
+          "PRO_REQUIRED",
+        );
+      }
+    }
 
     const updateData = {};
     if (data.name !== undefined) updateData.name = data.name;

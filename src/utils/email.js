@@ -152,6 +152,236 @@ If you didn't expect this invitation, you can safely ignore this email.`,
   }
 }
 
+async function sendFlowShareEmail({
+  to,
+  sharerName,
+  flowName,
+  flowUrl,
+  permission,
+}) {
+  const appName = "ValueChart";
+  const brandColor = "#3CB371";
+  const permLabel = permission === "edit" ? "Can Edit" : "View Only";
+  const permDesc =
+    permission === "edit"
+      ? "You can view <strong>and edit</strong> this flow."
+      : "You can <strong>view</strong> this flow (read-only).";
+
+  const mailOptions = {
+    from:
+      process.env.SMTP_FROM ||
+      process.env.SMTP_USER ||
+      "noreply@valuecharts.com",
+    to: resolveRecipient(to),
+    subject: `${sharerName || "Someone"} shared a flow with you on ${appName}`,
+    html: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0; padding:0; background-color:#f5f5f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5; padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+          <tr>
+            <td style="background-color:${brandColor}; padding:32px 40px; text-align:center;">
+              <h1 style="color:#ffffff; margin:0; font-size:24px; font-weight:600;">${appName}</h1>
+              <p style="color:rgba(255,255,255,0.9); margin:8px 0 0 0; font-size:14px;">AI-Powered Diagramming</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:40px;">
+              <h2 style="color:#1a1a1a; text-align:center; margin:0 0 16px 0; font-size:22px; font-weight:600;">
+                A flow has been shared with you
+              </h2>
+              <p style="color:#555555; text-align:center; font-size:16px; line-height:1.6; margin:0 0 32px 0;">
+                <strong>${sharerName || "Someone"}</strong> shared a flow with you on ${appName}.
+              </p>
+              <div style="background-color:#f8f9fa; border-radius:8px; padding:20px; margin-bottom:32px; border-left:4px solid ${brandColor};">
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="color:#888888; font-size:13px; padding-bottom:8px;">FLOW</td>
+                  </tr>
+                  <tr>
+                    <td style="color:#1a1a1a; font-size:18px; font-weight:600; padding-bottom:12px;">${flowName || "Untitled Flow"}</td>
+                  </tr>
+                  <tr>
+                    <td style="color:#888888; font-size:13px; padding-bottom:4px;">YOUR ACCESS</td>
+                  </tr>
+                  <tr>
+                    <td style="color:#1a1a1a; font-size:15px;">${permLabel} — ${permDesc}</td>
+                  </tr>
+                </table>
+              </div>
+              <div style="text-align:center; margin-bottom:32px;">
+                <a href="${flowUrl}"
+                   style="display:inline-block; background-color:${brandColor}; color:#ffffff; text-decoration:none; padding:14px 48px; border-radius:8px; font-size:16px; font-weight:600;">
+                  Open Flow
+                </a>
+              </div>
+              <p style="color:#999999; text-align:center; font-size:13px; margin:0;">
+                You need a ValueChart account to access this flow. Sign in or create a free account.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="background-color:#f8f9fa; padding:24px 40px; border-top:1px solid #eeeeee;">
+              <p style="color:#999999; font-size:12px; text-align:center; margin:0 0 8px 0;">
+                If you weren't expecting this, you can safely ignore this email.
+              </p>
+              <p style="color:#bbbbbb; font-size:11px; text-align:center; margin:0;">
+                &copy; ${new Date().getFullYear()} ValueChart. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+        <p style="color:#999999; font-size:12px; text-align:center; margin-top:16px;">
+          Button not working? Copy this link:<br>
+          <a href="${flowUrl}" style="color:#666666; word-break:break-all;">${flowUrl}</a>
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+    `,
+    text: `${sharerName || "Someone"} shared a flow with you on ${appName}!
+
+Flow: "${flowName || "Untitled Flow"}"
+Your access: ${permLabel}
+
+Open the flow here:
+${flowUrl}
+
+You need a ValueChart account to access this flow.
+
+If you weren't expecting this, you can safely ignore this email.`,
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    logger.info(`Flow share email sent to ${to}`);
+    const previewUrl = nodemailer.getTestMessageUrl(info);
+    if (previewUrl) logger.info(`Mail preview URL: ${previewUrl}`);
+  } catch (error) {
+    logger.error(`Failed to send flow share email to ${to}: ${error.message}`);
+    throw error;
+  }
+}
+
+async function sendFlowShareProRequiredEmail({
+  to,
+  sharerName,
+  flowName,
+  upgradeUrl,
+}) {
+  const appName = "ValueChart";
+  const brandColor = "#3CB371";
+
+  const mailOptions = {
+    from:
+      process.env.SMTP_FROM ||
+      process.env.SMTP_USER ||
+      "noreply@valuecharts.com",
+    to: resolveRecipient(to),
+    subject: `${sharerName || "Someone"} shared a flow with you — Pro upgrade required`,
+    html: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0; padding:0; background-color:#f5f5f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5; padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+          <tr>
+            <td style="background-color:${brandColor}; padding:32px 40px; text-align:center;">
+              <h1 style="color:#ffffff; margin:0; font-size:24px; font-weight:600;">${appName}</h1>
+              <p style="color:rgba(255,255,255,0.9); margin:8px 0 0 0; font-size:14px;">AI-Powered Diagramming</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:40px;">
+              <h2 style="color:#1a1a1a; text-align:center; margin:0 0 16px 0; font-size:22px; font-weight:600;">
+                A flow was shared with you
+              </h2>
+              <p style="color:#555555; text-align:center; font-size:16px; line-height:1.6; margin:0 0 24px 0;">
+                <strong>${sharerName || "Someone"}</strong> (a ValueChart Pro user) shared
+                the flow <strong>&ldquo;${flowName || "Untitled Flow"}&rdquo;</strong> with you.
+              </p>
+              <div style="background-color:#fffbe6; border-radius:8px; padding:20px; margin-bottom:32px; border-left:4px solid #faad14;">
+                <p style="color:#614700; font-size:14px; margin:0 0 8px 0; font-weight:600;">
+                  ⚠️ Pro upgrade required
+                </p>
+                <p style="color:#614700; font-size:14px; margin:0; line-height:1.6;">
+                  This flow was shared by a Pro user. To view or edit it, you need a
+                  ValueChart Pro account. Upgrade now for <strong>lifetime access — just $1</strong>.
+                </p>
+              </div>
+              <div style="text-align:center; margin-bottom:32px;">
+                <a href="${upgradeUrl}"
+                   style="display:inline-block; background-color:${brandColor}; color:#ffffff; text-decoration:none; padding:14px 48px; border-radius:8px; font-size:16px; font-weight:600;">
+                  Upgrade to Pro — $1 Lifetime
+                </a>
+              </div>
+              <p style="color:#999999; text-align:center; font-size:13px; margin:0;">
+                After upgrading, the flow will automatically become accessible in your dashboard.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="background-color:#f8f9fa; padding:24px 40px; border-top:1px solid #eeeeee;">
+              <p style="color:#999999; font-size:12px; text-align:center; margin:0 0 8px 0;">
+                If you weren't expecting this, you can safely ignore this email.
+              </p>
+              <p style="color:#bbbbbb; font-size:11px; text-align:center; margin:0;">
+                &copy; ${new Date().getFullYear()} ValueChart. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+        <p style="color:#999999; font-size:12px; text-align:center; margin-top:16px;">
+          Button not working? Copy this link:<br>
+          <a href="${upgradeUrl}" style="color:#666666; word-break:break-all;">${upgradeUrl}</a>
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+    `,
+    text: `${sharerName || "Someone"} shared a flow with you on ${appName}!
+
+Flow: "${flowName || "Untitled Flow"}"
+
+To access this flow, you need a ValueChart Pro account.
+Upgrade for lifetime access — just $1:
+${upgradeUrl}
+
+After upgrading, the flow will automatically become accessible in your dashboard.
+
+If you weren't expecting this, you can safely ignore this email.`,
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    logger.info(`Flow share Pro-required email sent to ${to}`);
+    const previewUrl = nodemailer.getTestMessageUrl(info);
+    if (previewUrl) logger.info(`Mail preview URL: ${previewUrl}`);
+  } catch (error) {
+    logger.error(
+      `Failed to send flow share Pro-required email to ${to}: ${error.message}`,
+    );
+    throw error;
+  }
+}
+
 async function sendPasswordResetEmail({ to, name, resetUrl }) {
   const mailOptions = {
     from:
@@ -510,6 +740,8 @@ const emailTemplates = {
 
 module.exports = {
   sendTeamInviteEmail,
+  sendFlowShareEmail,
+  sendFlowShareProRequiredEmail,
   sendPasswordResetEmail,
   sendVerificationEmail,
   sendEmail,

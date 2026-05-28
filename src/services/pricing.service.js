@@ -20,15 +20,16 @@ const DISPLAY_RATES = {
 };
 
 const BASE_PRICES_USD = {
-  pro_monthly: 100, // $1 one-time lifetime (key kept for backward compat with frontend)
-  pro_yearly: 100, // unused — Pro is one-time lifetime, not yearly
-  // Team plan is per-seat. These are PER-USER amounts that the UI multiplies
-  // by the seat count. Must stay in sync with PRICING in subscription.service.js.
-  team_monthly: 100, // $1.00/user/month → 5 users = $5/month
-  team_yearly: 720, // $7.20/user/year → 5 users = $36/year
-  addon_starter: 199,
-  addon_standard: 399,
-  addon_proppack: 799,
+  pro_monthly: 500, // $5.00 one-time lifetime (key kept for backward compat with frontend)
+  pro_yearly: 500, // unused — Pro is one-time, not yearly
+  // Team plan is per-seat. UI multiplies by seat count.
+  // Must stay in sync with PRICING in subscription.service.js.
+  team_monthly: 200, // $2.00/user/month → 5 users = $10/month
+  team_yearly: 2000, // $20.00/user/year → 5 users = $100/year
+  // AI credit top-up packs (one-time)
+  addon_starter: 500, // $5.00 → 50 credits
+  addon_standard: 800, // $8.00 → 100 credits
+  addon_proppack: 1500, // $15.00 → 200 credits
 };
 
 function formatAmount(amount, currency) {

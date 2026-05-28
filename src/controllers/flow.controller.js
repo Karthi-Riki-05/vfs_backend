@@ -164,8 +164,8 @@ class FlowController {
   });
 
   getAvailableShareMembers = asyncHandler(async (req, res) => {
-    const members = await flowService.getAvailableShareMembers(req.user.id);
-    res.json({ success: true, data: members });
+    const result = await flowService.getAvailableShareMembers(req.user.id);
+    res.json({ success: true, data: result });
   });
 
   getAllFlowsWithShared = asyncHandler(async (req, res) => {

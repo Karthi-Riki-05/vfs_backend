@@ -6,37 +6,11 @@ const { sendEmail, emailTemplates } = require("../utils/email");
 
 // Pricing: per user per period (in smallest currency unit, e.g. cents)
 const PRICING = {
-  monthly: { perUser: 100 }, // $1.00/user/month
-  yearly: { perUser: 720 }, // $7.20/user/year (80% off $36)
+  monthly: { perUser: 200 }, // $2.00/user/month
+  yearly: { perUser: 2000 }, // $20.00/user/year
 };
 
-// Reset paid user back to free tier — called when Stripe sub is deleted/expired.
-async function downgradeUser(userId) {
-  if (!userId) return;
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true, hasPro: true, currentVersion: true },
-  });
-  if (!user) return;
-  if (!user.hasPro && user.currentVersion === "free") return;
-
-  await prisma.user.update({
-    where: { id: userId },
-    data: {
-      hasPro: false,
-      currentVersion: "free",
-      proUnlimitedFlows: false,
-      proFlowLimit: 10,
-    },
-  });
-
-  await prisma.aiCreditBalance.updateMany({
-    where: { userId },
-    data: { planCredits: 20 },
-  });
-
-  logger.info(`[Payment] User ${userId} downgraded to free`);
-}
+const downgradeUser = require("../lib/downgradeUser");
 
 class SubscriptionService {
   /**
@@ -975,6 +949,19 @@ class SubscriptionService {
       return;
     }
 
+    // Idempotency: skip if this checkout session was already processed.
+    // TransactionLog.txnId also has a @@unique constraint as a DB-level
+    // safeguard for simultaneous duplicate deliveries.
+    const existingTxn = await prisma.transactionLog.findFirst({
+      where: { txnId: session.id },
+    });
+    if (existingTxn) {
+      logger.info(
+        `[_handleCheckoutComplete] Session ${session.id} already processed — skipping duplicate`,
+      );
+      return;
+    }
+
     const members = parseInt(teamMembers, 10) || 5;
     const pricing = PRICING[plan];
     const price = (members * pricing.perUser) / 100;
@@ -1202,8 +1189,21 @@ class SubscriptionService {
   }
 
   async _handleInvoicePaid(invoice) {
-    logger.info(`=== INVOICE PAID === subscription: ${invoice.subscription}`);
+    logger.info(
+      `=== INVOICE PAID === subscription: ${invoice.subscription} invoice: ${invoice.id}`,
+    );
     if (!invoice.subscription) return;
+
+    // Idempotency: skip if this invoice renewal has already been processed.
+    const existingTxn = await prisma.transactionLog.findFirst({
+      where: { txnId: invoice.id },
+    });
+    if (existingTxn) {
+      logger.info(
+        `[_handleInvoicePaid] Invoice ${invoice.id} already processed — skipping duplicate`,
+      );
+      return;
+    }
 
     const sub = await prisma.subscription.findFirst({
       where: { paymentId: invoice.subscription },
@@ -1215,27 +1215,68 @@ class SubscriptionService {
       return;
     }
     if (!this._isTeamSub(sub)) {
-      console.log(
-        "[Webhook][subscription.service] invoice.paid skipped — not a team subscription:",
-        sub.productType,
+      logger.info(
+        `[_handleInvoicePaid] Skipping non-team subscription: ${sub.productType}`,
       );
       return;
     }
 
-    const expiresAt = new Date();
-    if (sub.productType === "team_yearly") {
-      expiresAt.setFullYear(expiresAt.getFullYear() + 1);
-    } else {
-      expiresAt.setMonth(expiresAt.getMonth() + 1);
-    }
+    // Prefer Stripe's authoritative period_end; fall back to calculating from productType.
+    const periodEnd = invoice.lines?.data?.[0]?.period?.end;
+    const expiresAt = periodEnd
+      ? new Date(periodEnd * 1000)
+      : (() => {
+          const d = new Date();
+          if (sub.productType === "team_yearly") {
+            d.setFullYear(d.getFullYear() + 1);
+          } else {
+            d.setMonth(d.getMonth() + 1);
+          }
+          return d;
+        })();
 
-    await prisma.subscription.update({
-      where: { id: sub.id },
-      data: { status: "active", expiresAt },
+    const seats = sub.usersCount || 5;
+    const isYearly = sub.productType === "team_yearly";
+    // Monthly: 60 credits/seat. Yearly: full year upfront (60 × 12 per seat).
+    const credits = isYearly ? seats * 60 * 12 : seats * 60;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.subscription.update({
+        where: { id: sub.id },
+        data: { status: "active", expiresAt },
+      });
+
+      await tx.aiCreditBalance.upsert({
+        where: {
+          userId_appContext: { userId: sub.userId, appContext: "team" },
+        },
+        create: {
+          userId: sub.userId,
+          planCredits: credits,
+          addonCredits: 0,
+          planResetsAt: expiresAt,
+          appContext: "team",
+        },
+        update: { planCredits: credits, planResetsAt: expiresAt },
+      });
+
+      await tx.transactionLog.create({
+        data: {
+          userId: sub.userId,
+          txnId: invoice.id,
+          chargeId: invoice.payment_intent || invoice.id,
+          amountCharged: invoice.amount_paid || 0,
+          currency: invoice.currency || "usd",
+          status: "success",
+          paymentMethod: "card",
+          appType: "enterprise",
+          appContext: "team",
+        },
+      });
     });
 
     logger.info(
-      `Subscription renewed for user ${sub.userId}. New expiry: ${expiresAt.toISOString()}`,
+      `[_handleInvoicePaid] Renewed: user=${sub.userId} seats=${seats} credits=${credits} expiresAt=${expiresAt.toISOString()}`,
     );
   }
 
@@ -1377,8 +1418,8 @@ class SubscriptionService {
     });
     logger.info(`Subscription cancelled for user ${sub.userId}`);
 
-    // CRITICAL: revoke paid access
-    await downgradeUser(sub.userId);
+    // CRITICAL: revoke team access (Pro lifetime preserved if proPurchasedAt set)
+    await downgradeUser(sub.userId, { reason: "subscription_deleted" });
 
     if (sub.user?.email) {
       const tpl = emailTemplates.subscriptionCancelled(sub.user, sub.expiresAt);

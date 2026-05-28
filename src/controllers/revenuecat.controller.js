@@ -1,4 +1,7 @@
+"use strict";
+
 const { prisma } = require("../lib/prisma");
+const { grantProCredits } = require("../lib/grantProCredits");
 const asyncHandler = require("../utils/asyncHandler");
 const logger = require("../utils/logger");
 
@@ -14,12 +17,10 @@ class RevenueCatController {
     const expected = "Bearer " + process.env.REVENUECAT_WEBHOOK_SECRET;
 
     if (!authHeader || authHeader !== expected) {
-      return res
-        .status(401)
-        .json({
-          success: false,
-          error: { code: "UNAUTHORIZED", message: "Invalid webhook secret" },
-        });
+      return res.status(401).json({
+        success: false,
+        error: { code: "UNAUTHORIZED", message: "Invalid webhook secret" },
+      });
     }
 
     // Body may be a Buffer (express.raw) or already parsed object
@@ -29,19 +30,18 @@ class RevenueCatController {
         ? JSON.parse(req.body.toString())
         : req.body;
     } catch {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: {
-            code: "INVALID_BODY",
-            message: "Could not parse request body",
-          },
-        });
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: "INVALID_BODY",
+          message: "Could not parse request body",
+        },
+      });
     }
 
     const event = body.event || {};
-    const { type, app_user_id, product_id } = event;
+    const { type, app_user_id, product_id, transaction_id, price, currency } =
+      event;
 
     logger.info(
       `[revenuecat] event type=${type} user=${app_user_id} product=${product_id}`,
@@ -50,27 +50,67 @@ class RevenueCatController {
     try {
       if (type === "INITIAL_PURCHASE" || type === "RENEWAL") {
         const entitlements = PRODUCT_MAP[product_id];
-        if (entitlements && app_user_id) {
-          await prisma.user.update({
+        if (!entitlements || !app_user_id) {
+          logger.warn(
+            `[revenuecat] unknown product or missing user — type=${type} product=${product_id}`,
+          );
+          return res.json({ received: true });
+        }
+
+        if (!entitlements.hasPro) {
+          // valuechart_free — just downgrade, handled by CANCELLATION path
+          return res.json({ received: true });
+        }
+
+        // Grant Pro access + credits atomically
+        await prisma.$transaction(async (tx) => {
+          await tx.user.update({
             where: { id: app_user_id },
             data: { ...entitlements, proPurchasedAt: new Date() },
           });
-          logger.info(
-            `[revenuecat] upgraded user ${app_user_id} to pro (${product_id})`,
+
+          await grantProCredits(
+            app_user_id,
+            {
+              txnId: transaction_id || null,
+              amountCharged: price != null ? Math.round(price * 100) : 500,
+              currency: (currency || "usd").toLowerCase(),
+              paymentMethod: "in_app_purchase",
+            },
+            tx,
           );
-        }
+        });
+
+        logger.info(
+          `[revenuecat] upgraded user ${app_user_id} to pro (${product_id})`,
+        );
       } else if (type === "CANCELLATION" || type === "EXPIRATION") {
-        if (app_user_id) {
-          await prisma.user.update({
-            where: { id: app_user_id },
-            data: { hasPro: false, currentVersion: "free" },
-          });
-          logger.info(`[revenuecat] downgraded user ${app_user_id} to free`);
-        }
+        if (!app_user_id) return res.json({ received: true });
+
+        // Revoke Pro: null proPurchasedAt so userTier.js no longer returns 'pro'
+        await prisma.user.update({
+          where: { id: app_user_id },
+          data: {
+            hasPro: false,
+            proPurchasedAt: null,
+            currentVersion: "free",
+          },
+        });
+
+        // Zero out Pro-context AI credits (targeted — does not touch team credits)
+        await prisma.aiCreditBalance.updateMany({
+          where: { userId: app_user_id, appContext: "pro" },
+          data: { planCredits: 0, addonCredits: 0 },
+        });
+
+        logger.info(
+          `[revenuecat] downgraded user ${app_user_id} to free (${type})`,
+        );
       }
     } catch (err) {
       logger.error(`[revenuecat] DB update failed: ${err.message}`);
-      // Still respond 200 to prevent RevenueCat retries for DB errors
+      // Respond 200 to prevent RevenueCat retry loops for transient DB errors.
+      // RevenueCat will retry on network/5xx errors; we handle dedup via txnId.
     }
 
     res.json({ received: true });

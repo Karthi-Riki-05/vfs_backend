@@ -207,7 +207,13 @@ model User {
   activeFlowPackId            String?     @map("active_flow_pack_id")
   flowPackExpiresAt           DateTime?   @map("flow_pack_expires_at")
   isInFlowPickerPhase         Boolean     @default(false) @map("is_in_flow_picker_phase")
+  // Recurring flow add-on subscription (separate from one-time flow packs)
+  flowAddonStripeSubId        String?     @map("flow_addon_stripe_sub_id")
+  flowAddonPlan               String?     @map("flow_addon_plan")              // 'standard_100' | 'unlimited'
+  flowAddonStatus             String?     @map("flow_addon_status")            // 'active' | 'cancelling' | 'cancelled' | 'past_due'
+  flowAddonCurrentPeriodEnd   DateTime?   @map("flow_addon_current_period_end")
   currentVersion              UserVersion @default(free) @map("current_version")
+  isLegacyPro                 Boolean     @default(false) @map("is_legacy_pro")
   refreshToken                String?     @map("refresh_token") @db.Text
 
   // --- Granular permissions (from legacy) ---
@@ -453,6 +459,8 @@ model Subscription {
 
   @@index([appType])
   @@index([status])
+  @@index([paymentId])
+  @@index([status, productType])
   @@map("subscriptions")
 }
 
@@ -748,6 +756,7 @@ model FlowShare {
   sharedWith   User            @relation("FlowShareSharedWith", fields: [sharedWithId], references: [id], onDelete: Cascade)
   permission   SharePermission @default(view)
   appContext   UserVersion     @default(free) @map("app_context")
+  requiresPro  Boolean         @default(false) @map("requires_pro")
   createdAt    DateTime        @default(now()) @map("created_at")
   updatedAt    DateTime        @updatedAt @map("updated_at")
 
@@ -1059,6 +1068,7 @@ model TransactionLog {
   updatedAt     DateTime?   @map("updated_at")
   deletedAt     DateTime?   @map("deleted_at")
 
+  @@unique([txnId])
   @@index([chargeId])
   @@index([userId])
   @@index([userId, appContext])
