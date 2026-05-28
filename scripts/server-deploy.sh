@@ -26,6 +26,15 @@ log "=== ValueChart backend deploy started (branch=$BRANCH) ==="
 log "Using compose command: $DC"
 
 # ---------------------------------------------------------------
+# 0/5 — Ensure docker-compose.server.yml is in place
+# The file lives in backend/ (versioned) and must be copied to
+# $PROJECT_DIR so relative build paths (./backend, ./frontend) work.
+# ---------------------------------------------------------------
+log "Step 0/5: Syncing docker-compose.server.yml to $PROJECT_DIR..."
+cp "$BACKEND_DIR/docker-compose.server.yml" "$COMPOSE_FILE"
+log "Compose file in place"
+
+# ---------------------------------------------------------------
 # 1/5 — Database backup
 # ---------------------------------------------------------------
 log "Step 1/5: Backing up database to $BACKUP_DIR/vfs-$TS.sql"
