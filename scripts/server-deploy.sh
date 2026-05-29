@@ -13,16 +13,18 @@ BACKEND_DIR="$PROJECT_DIR/backend"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 FRONTEND_REPO="https://github.com/Karthi-Riki-05/vfs_frontend.git"
 BACKUP_DIR="$HOME/backups"
-COMPOSE_FILE="$PROJECT_DIR/docker-compose.server.yml"
+COMPOSE_FILE="$BACKEND_DIR/docker-compose.server.yml"
 TS="$(date +%F-%H%M%S)"
 
 log() { echo "[$(date +'%F %T')] $*"; }
 
-# Support both old docker-compose v1 binary and new docker compose plugin
+# Support both old docker-compose v1 binary and new docker compose plugin.
+# --project-directory tells Docker to resolve relative build paths (./backend,
+# ./frontend) from PROJECT_DIR even though the compose file lives in BACKEND_DIR.
 if command -v docker-compose &>/dev/null; then
-  DC="docker-compose -f $COMPOSE_FILE"
+  DC="docker-compose -f $COMPOSE_FILE --project-directory $PROJECT_DIR"
 else
-  DC="docker compose -f $COMPOSE_FILE"
+  DC="docker compose -f $COMPOSE_FILE --project-directory $PROJECT_DIR"
 fi
 
 log "=== ValueChart full-stack deploy started (branch=$BRANCH) ==="
@@ -43,15 +45,6 @@ if ! swapon --show | grep -q '/swapfile'; then
 else
   log "Step 0: Swap already active ($(free -h | awk '/Swap:/{print $2}'))"
 fi
-
-# ---------------------------------------------------------------
-# 0b — Ensure docker-compose.server.yml is in place
-# Versioned in backend/ repo, copied to PROJECT_DIR so relative
-# build paths (./backend, ./frontend) resolve correctly.
-# ---------------------------------------------------------------
-log "Step 0b: Syncing docker-compose.server.yml to $PROJECT_DIR..."
-cp "$BACKEND_DIR/docker-compose.server.yml" "$COMPOSE_FILE"
-log "Compose file in place"
 
 # ---------------------------------------------------------------
 # 1 — Database backup (db container only, no backend needed)
