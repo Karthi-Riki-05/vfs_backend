@@ -40,6 +40,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      - ~/backups:/app/backups
     networks:
       - vc-network
     mem_limit: 512m
@@ -52,6 +54,7 @@ services:
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       PORT: 5000
       NODE_ENV: production
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://dev.valueflowsoft.com,https://valueflowsoft.com}
       APP_URL: ${APP_URL}
       # Stripe
       STRIPE_MODE: ${STRIPE_MODE:-live}
