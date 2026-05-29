@@ -49,6 +49,9 @@ for (const envVar of requiredEnvVars) {
 
 const app = express();
 
+// Trust X-Forwarded-Proto from CloudFront/Nginx (HTTPS terminated at load balancer)
+app.enable("trust proxy");
+
 // Security middleware (helmet, hpp, x-powered-by)
 securityMiddleware(app);
 
@@ -412,13 +415,13 @@ async function autoSeed() {
 // Only start server if not in test mode
 if (process.env.NODE_ENV !== "test") {
   const PORT = process.env.PORT || 5000;
-  
+
   // Set socket timeout to 130 seconds (longer than request timeout to allow requests to complete)
   // This prevents Node.js from forcibly closing connections during long AI operations
   server.setTimeout(130000);
   server.keepAliveTimeout = 130000;
   server.headersTimeout = 132000;
-  
+
   server.listen(PORT, "0.0.0.0", async () => {
     logger.info(`Server running on port ${PORT}`);
     logger.info(`API Docs available at http://localhost:${PORT}/api-docs`);
