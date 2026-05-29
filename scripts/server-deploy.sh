@@ -13,18 +13,18 @@ BACKEND_DIR="$PROJECT_DIR/backend"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 FRONTEND_REPO="https://github.com/Karthi-Riki-05/vfs_frontend.git"
 BACKUP_DIR="$HOME/backups"
-COMPOSE_FILE="$BACKEND_DIR/docker-compose.server.yml"
+# docker-compose.server.yml is maintained directly at PROJECT_DIR.
+# Edit it via FileZilla or scp — do NOT add it back to the backend repo.
+COMPOSE_FILE="$PROJECT_DIR/docker-compose.server.yml"
 TS="$(date +%F-%H%M%S)"
 
 log() { echo "[$(date +'%F %T')] $*"; }
 
-# Support both old docker-compose v1 binary and new docker compose plugin.
-# --project-directory tells Docker to resolve relative build paths (./backend,
-# ./frontend) from PROJECT_DIR even though the compose file lives in BACKEND_DIR.
+# Support both old docker-compose v1 binary and new docker compose plugin
 if command -v docker-compose &>/dev/null; then
-  DC="docker-compose -f $COMPOSE_FILE --project-directory $PROJECT_DIR"
+  DC="docker-compose -f $COMPOSE_FILE"
 else
-  DC="docker compose -f $COMPOSE_FILE --project-directory $PROJECT_DIR"
+  DC="docker compose -f $COMPOSE_FILE"
 fi
 
 log "=== ValueChart full-stack deploy started (branch=$BRANCH) ==="
