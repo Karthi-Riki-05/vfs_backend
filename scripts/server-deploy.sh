@@ -112,8 +112,10 @@ log "Schema changes applied OK"
 # 3b — One-time data migration (idempotent)
 # ---------------------------------------------------------------
 log "Step 3b: Running migrate-legacy-pro..."
+# Path inside the container is /app/scripts/... (code is baked into the image,
+# not bind-mounted in production). $BACKEND_DIR is a host path — wrong here.
 $DC run --rm --no-deps -e DATABASE_URL \
-  backend node "$BACKEND_DIR/scripts/migrate-legacy-pro.js" \
+  backend node /app/scripts/migrate-legacy-pro.js \
   && log "Legacy Pro migration OK" \
   || log "Legacy Pro migration skipped (already done)"
 
