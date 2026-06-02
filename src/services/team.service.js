@@ -251,6 +251,10 @@ class TeamService {
   }
 
   async createInvite(teamId, userId, emails, appContext = "free") {
+    // The resolved team (owner row or member row). MUST be declared — class
+    // methods run in strict mode, so the bare `inviteTeam = ...` assignments
+    // below otherwise throw ReferenceError and every invite 500s.
+    let inviteTeam;
     // Check team exists and user has permission (owner check first, then role-based)
     const team = await prisma.team.findFirst({
       where: { id: teamId, teamOwnerId: userId },

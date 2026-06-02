@@ -84,10 +84,11 @@ class TeamController {
   invite = asyncHandler(async (req, res) => {
     const { teamId, email, emails } = req.body;
     const appContext = req.user.currentVersion || "free";
-    // Support single email or comma-separated list
+    // Support single email or comma-separated list. Guard email.includes —
+    // `email` is optional when `emails[]` is supplied (would throw otherwise).
     const emailList = emails
       ? emails
-      : email.includes(",")
+      : email && email.includes(",")
         ? email.split(",").map((e) => e.trim())
         : [email];
     const results = await teamService.createInvite(

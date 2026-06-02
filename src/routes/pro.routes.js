@@ -21,6 +21,8 @@ router.put(
 
 // Purchase Pro ($1 one-time)
 router.post("/purchase", authenticate, proController.purchasePro);
+// Alias: tests and older clients may use /checkout
+router.post("/checkout", authenticate, proController.purchasePro);
 
 // Buy extra flows (Pro only)
 router.post(
@@ -42,6 +44,8 @@ router.get(
 
 // Verify purchase (safety net — activates Pro if webhook was slow)
 router.get("/verify-purchase", authenticate, proController.verifyPurchase);
+// Alias: tests and older clients may use /verify
+router.get("/verify", authenticate, proController.verifyPurchase);
 
 // Verify flow-pack purchase (safety net for extra-flows pack)
 router.get(

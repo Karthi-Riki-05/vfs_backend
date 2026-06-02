@@ -309,6 +309,14 @@ class FlowService {
     return result;
   }
 
+  async emptyTrash(userId, appContext = "free") {
+    // Hard-delete every soft-deleted flow in the caller's workspace. Scoped
+    // by ownerId + appContext to mirror getTrash() — never a WHERE-less wipe.
+    return await prisma.flow.deleteMany({
+      where: { ownerId: userId, deletedAt: { not: null }, appContext },
+    });
+  }
+
   async purgeOldTrash(daysOld = 30) {
     const cutoff = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
     return await prisma.flow.deleteMany({

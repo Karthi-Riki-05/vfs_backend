@@ -248,7 +248,7 @@ async function generateWithClaude(userMessage) {
 
   const response = await anthropic.messages.create({
     model: "claude-sonnet-4-6",
-    max_tokens: 2000,
+    max_tokens: 8192,
     system: DIAGRAM_SYSTEM_PROMPT,
     messages: [{ role: "user", content: userMessage }],
   });

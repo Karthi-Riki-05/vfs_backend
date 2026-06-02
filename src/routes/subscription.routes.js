@@ -64,21 +64,9 @@ router.get("/info", authenticate, async (req, res) => {
       /* table may not exist */
     }
 
-    // Storage estimate from flows
-    let storageUsedMb = 0;
-    try {
-      const flows = await prisma.flow.findMany({
-        where: { ownerId: userId, deletedAt: null },
-        select: { diagramData: true },
-      });
-      const totalBytes = flows.reduce(
-        (sum, f) => sum + (f.diagramData?.length || 0),
-        0,
-      );
-      storageUsedMb = Math.round((totalBytes / 1024 / 1024) * 100) / 100;
-    } catch {
-      /* ignore */
-    }
+    // Plan tier drives the team/pro/free distinction used below.
+    const tier = sub?.plan?.tier ?? 0;
+    const isTeamPlan = tier >= 2;
 
     // Build response
     if (!sub) {
@@ -88,12 +76,12 @@ router.get("/info", authenticate, async (req, res) => {
           plan: "Free",
           is_active: true,
           is_pro: !!user?.hasPro,
+          tier: 0,
+          app_context: user?.hasPro ? "pro" : "free",
           expires_at: null,
           billing_period_days: 30,
           messages_used: messagesUsed,
           messages_limit: 50,
-          storage_used_mb: storageUsedMb,
-          storage_limit_mb: 100,
         },
       });
     }
@@ -106,13 +94,16 @@ router.get("/info", authenticate, async (req, res) => {
       data: {
         plan: sub.plan?.name || "Free",
         is_active: isActive,
+        // is_pro reflects the Pro lifetime entitlement only. The widget uses
+        // app_context/tier (below) to decide whether to render the PRO badge,
+        // so a Team plan no longer shows a stray "PRO" tag.
         is_pro: !!user?.hasPro,
+        tier,
+        app_context: isTeamPlan ? "team" : tier >= 1 ? "pro" : "free",
         expires_at: expiresAt,
         billing_period_days: sub.plan?.duration === "yearly" ? 365 : 30,
         messages_used: messagesUsed,
-        messages_limit: sub.plan?.tier >= 1 ? 500 : 50,
-        storage_used_mb: storageUsedMb,
-        storage_limit_mb: sub.plan?.tier >= 1 ? 1000 : 100,
+        messages_limit: tier >= 1 ? 500 : 50,
       },
     });
   } catch (err) {
@@ -123,6 +114,8 @@ router.get("/info", authenticate, async (req, res) => {
         plan: "Free",
         is_active: true,
         is_pro: false,
+        tier: 0,
+        app_context: "free",
         expires_at: null,
         messages_used: 0,
         messages_limit: 50,

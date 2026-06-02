@@ -68,6 +68,10 @@ router.get("/", validate(getFlowsQuerySchema), flowController.getAllFlows);
 
 router.get("/favorites", flowController.getFavorites);
 router.get("/trash", flowController.getTrash);
+// Empty trash — must be declared BEFORE the `/:id` matchers below, otherwise
+// `DELETE /flows/trash` is swallowed by `DELETE /:id` (id="trash") and fails
+// idParam validation. (Fixes "Failed to empty trash".)
+router.delete("/trash", flowController.emptyTrash);
 router.get("/share/members", flowController.getAvailableShareMembers);
 
 // Flow-pack lifecycle

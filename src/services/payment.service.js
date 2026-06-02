@@ -74,27 +74,37 @@ class PaymentService {
     });
     console.log("[Webhook][payment.service]", event.type, "received");
 
-    switch (event.type) {
-      case "checkout.session.completed":
-        await this._handleCheckoutComplete(event.data.object);
-        break;
-      case "invoice.paid":
-        await this._handleInvoicePaid(event.data.object);
-        break;
-      case "invoice.payment_failed":
-        await this._handlePaymentFailed(event.data.object);
-        break;
-      case "customer.subscription.updated":
-        await this._handleSubscriptionUpdated(event.data.object);
-        break;
-      case "customer.subscription.deleted":
-        await this._handleSubscriptionDeleted(event.data.object);
-        break;
-      case "charge.refunded":
-        await this._handleChargeRefunded(event.data.object);
-        break;
-      default:
-        logger.info(`Unhandled webhook event: ${event.type}`);
+    // Webhook processors MUST always return 200 to Stripe to prevent infinite
+    // retries. Catch any internal error, log it, and acknowledge receipt.
+    try {
+      switch (event.type) {
+        case "checkout.session.completed":
+          await this._handleCheckoutComplete(event.data.object);
+          break;
+        case "invoice.paid":
+          await this._handleInvoicePaid(event.data.object);
+          break;
+        case "invoice.payment_failed":
+          await this._handlePaymentFailed(event.data.object);
+          break;
+        case "customer.subscription.updated":
+          await this._handleSubscriptionUpdated(event.data.object);
+          break;
+        case "customer.subscription.deleted":
+          await this._handleSubscriptionDeleted(event.data.object);
+          break;
+        case "charge.refunded":
+          await this._handleChargeRefunded(event.data.object);
+          break;
+        default:
+          logger.info(`Unhandled webhook event: ${event.type}`);
+      }
+    } catch (err) {
+      logger.error(`[Webhook] event processing failed: ${event.type}`, {
+        eventId: event.id,
+        error: err.message,
+      });
+      // Return 200 anyway — Stripe must not retry on application-level errors
     }
 
     return { received: true };

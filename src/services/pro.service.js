@@ -47,7 +47,7 @@ class ProService {
     const maxFlows =
       user.flowAddonStatus === "active" && user.flowAddonPlan === "standard_100"
         ? 100
-        : user.proFlowLimit + user.proAdditionalFlowsPurchased;
+        : (user.proFlowLimit ?? 0) + (user.proAdditionalFlowsPurchased ?? 0);
 
     return {
       currentApp: user.currentVersion || "free",
@@ -57,8 +57,8 @@ class ProService {
       proFlows: {
         used: proFlowsUsed,
         max: isUnlimited ? -1 : maxFlows,
-        baseLimit: user.proFlowLimit,
-        extraPurchased: user.proAdditionalFlowsPurchased,
+        baseLimit: user.proFlowLimit ?? 0,
+        extraPurchased: user.proAdditionalFlowsPurchased ?? 0,
       },
     };
   }

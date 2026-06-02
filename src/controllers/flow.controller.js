@@ -125,6 +125,15 @@ class FlowController {
     res.json({ success: true, data: { message: "Flow permanently deleted" } });
   });
 
+  emptyTrash = asyncHandler(async (req, res) => {
+    const appContext = req.user.currentVersion || "free";
+    const result = await flowService.emptyTrash(req.user.id, appContext);
+    res.json({
+      success: true,
+      data: { message: "Trash emptied", deleted: result.count },
+    });
+  });
+
   // ==================== SHARING ====================
 
   shareFlow = asyncHandler(async (req, res) => {

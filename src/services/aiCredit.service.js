@@ -14,7 +14,26 @@ const PLAN_CREDITS = {
 // owner of the team; otherwise we silently fall back to the caller's own
 // balance so we never leak a team's credits to a non-member.
 async function resolveBillingUser(userId, activeTeamId) {
-  if (!activeTeamId) return { userId, appContext: null };
+  if (!activeTeamId) {
+    // No explicit team context was supplied (e.g. the mobile forced-team
+    // WebView, the diagram editor opened before a workspace switch, or a
+    // Team owner who simply never switched). If the caller OWNS an active
+    // Team subscription, bill their own team pool. Centralizing this here
+    // means display (getBalance), gating (hasCredits) AND spend
+    // (deductCredit) all agree — otherwise the editor would SHOW 300 but
+    // DEDUCT from the personal 20.
+    const ownsTeamPlan = await prisma.subscription.findFirst({
+      where: {
+        userId,
+        status: { in: ["active", "trialing"] },
+        plan: { tier: { gte: 2 } },
+      },
+      select: { id: true },
+    });
+    return ownsTeamPlan
+      ? { userId, appContext: "team" }
+      : { userId, appContext: null };
+  }
   const team = await prisma.team.findFirst({
     where: { id: activeTeamId, deletedAt: null },
     select: { teamOwnerId: true },
@@ -171,6 +190,8 @@ async function addAddonCredits(
 }
 
 async function getBalance(userId, appContext = "free", activeTeamId = null) {
+  // resolveBillingUser now centralizes the team-owner fallback, so display,
+  // gating and deduction all resolve to the same (team) pool. See C8.
   const billing = await resolveBillingUser(userId, activeTeamId);
   const ctx = billing.appContext || appContext;
   const balance = await getOrCreateBalance(billing.userId, ctx);
