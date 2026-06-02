@@ -1609,6 +1609,75 @@ class SubscriptionService {
       },
     });
   }
+
+  /**
+   * Daily sweep: flip every subscription whose paid period has ended to
+   * status='expired' and downgrade the owning user.
+   *
+   * WHY: a subscription row keeps status='active' after it lapses — the status
+   * only changes via a Stripe webhook or an admin action, and there was no job
+   * to expire it on time. As a result every query that filters on
+   * `status:'active'` (team context, AI credits, team membership, stats…) kept
+   * treating an expired subscriber as fully paid. This sweep is the single
+   * source of truth that closes that gap app-wide.
+   *
+   * SAFETY:
+   *  - Only rows with a real past `expiresAt` are touched (lifetime / null
+   *    expiry rows are ignored).
+   *  - A 1-day grace buffer avoids racing a legitimate Stripe renewal whose
+   *    `invoice.paid` webhook (which pushes `expiresAt` forward) is briefly
+   *    delayed. A healthy renewing sub already has a future `expiresAt`, so it
+   *    is never swept.
+   *  - `cancelling` (cancel-at-period-end) is included so a cancelled plan
+   *    also expires once its period ends.
+   *  - `downgradeUser` preserves a separately-purchased lifetime Pro.
+   *
+   * @returns {Promise<{ scanned:number, expired:number, downgraded:number }>}
+   */
+  async expireLapsedSubscriptions() {
+    const GRACE_MS = 24 * 60 * 60 * 1000; // 1-day buffer for renewal/webhook lag
+    const cutoff = new Date(Date.now() - GRACE_MS);
+
+    const lapsed = await prisma.subscription.findMany({
+      where: {
+        deletedAt: null,
+        status: { in: ["active", "cancelling"] },
+        expiresAt: { not: null, lt: cutoff },
+      },
+      select: { id: true, userId: true, expiresAt: true },
+    });
+
+    let expired = 0;
+    let downgraded = 0;
+    for (const sub of lapsed) {
+      try {
+        await prisma.subscription.update({
+          where: { id: sub.id },
+          data: { status: "expired" },
+        });
+        expired += 1;
+        try {
+          await downgradeUser(sub.userId, { reason: "subscription_expiry" });
+          downgraded += 1;
+        } catch (err) {
+          logger.error(
+            `[expireLapsedSubscriptions] downgrade failed for user ${sub.userId}: ${err.message}`,
+          );
+        }
+      } catch (err) {
+        logger.error(
+          `[expireLapsedSubscriptions] failed to expire sub ${sub.id}: ${err.message}`,
+        );
+      }
+    }
+
+    if (lapsed.length) {
+      logger.info(
+        `[expireLapsedSubscriptions] scanned=${lapsed.length} expired=${expired} downgraded=${downgraded}`,
+      );
+    }
+    return { scanned: lapsed.length, expired, downgraded };
+  }
 }
 
 module.exports = new SubscriptionService();

@@ -269,6 +269,24 @@ if (process.env.NODE_ENV !== "test") {
       { timezone: "UTC" },
     );
     logger.info("[Cron] Flow-pack expiry scheduled (0 9 * * * UTC)");
+
+    // Daily subscription-expiry sweep at 08:00 UTC. Flips lapsed
+    // subscriptions (past expiresAt) to status='expired' and downgrades the
+    // user, so an expired plan stops granting entitlements app-wide.
+    const subscriptionService = require("./src/services/subscription.service");
+    cron.schedule(
+      "0 8 * * *",
+      async () => {
+        try {
+          const summary = await subscriptionService.expireLapsedSubscriptions();
+          logger.info(`[Cron] Subscription expiry: ${JSON.stringify(summary)}`);
+        } catch (err) {
+          logger.error("[Cron] Subscription expiry failed:", err);
+        }
+      },
+      { timezone: "UTC" },
+    );
+    logger.info("[Cron] Subscription expiry scheduled (0 8 * * * UTC)");
   } catch (err) {
     logger.warn(`[Cron] Failed to schedule AI credit reset: ${err.message}`);
   }

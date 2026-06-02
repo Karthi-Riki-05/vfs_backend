@@ -37,14 +37,24 @@ class UserController {
       }),
     ]);
 
+    // A subscription row keeps status='active' even after it lapses — there is
+    // NO cron that flips it to 'expired' (status only changes via a Stripe
+    // webhook or admin action). So `status:'active'` alone is NOT proof of a
+    // live plan: we must also check that the paid period hasn't ended. Without
+    // this guard an expired Team/Pro subscriber kept full team entitlements
+    // (chat, team switcher) while the dashboard already showed "Expired".
+    const subIsLive =
+      !!activeSub &&
+      (!activeSub.expiresAt || new Date(activeSub.expiresAt) > new Date());
+
     // Resolve the plan label in priority order:
-    // 1. Active subscription product_type → most authoritative
+    // 1. LIVE subscription product_type → most authoritative
     // 2. User owns any team             → must be on team plan
     // 3. DB users.current_version       → fallback
     // 4. DB users.has_pro                → free/pro fallback
     let resolvedPlan = "free";
     let resolvedHasPro = false;
-    if (activeSub?.productType) {
+    if (subIsLive && activeSub?.productType) {
       const pt = String(activeSub.productType).toLowerCase();
       if (pt.startsWith("team")) {
         resolvedPlan = "team";

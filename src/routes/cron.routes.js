@@ -76,4 +76,22 @@ router.post(
   }),
 );
 
+/**
+ * POST /api/v1/cron/expire-subscriptions
+ * Daily: flips any subscription whose paid period has ended (past `expiresAt`,
+ * status still 'active'/'cancelling') to status='expired' and downgrades the
+ * user — so an expired subscriber stops being treated as paid app-wide.
+ */
+router.post(
+  "/expire-subscriptions",
+  asyncHandler(async (req, res) => {
+    if (!requireCronSecret(req, res)) return;
+    const result = await subscriptionService.expireLapsedSubscriptions();
+    logger.info(
+      `Cron expire-subscriptions: scanned=${result.scanned} expired=${result.expired} downgraded=${result.downgraded}`,
+    );
+    res.json({ success: true, data: result });
+  }),
+);
+
 module.exports = router;
