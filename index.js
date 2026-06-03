@@ -94,8 +94,8 @@ app.use("/api/v1/subscription/webhook", webhookRawBody, captureRawBody);
 app.use("/api/subscription/webhook", webhookRawBody, captureRawBody);
 
 // Body parser with size limits (AFTER webhook raw body routes)
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: false, limit: "1mb" }));
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: false, limit: "25mb" }));
 
 // Request ID tracking
 app.use((req, res, next) => {

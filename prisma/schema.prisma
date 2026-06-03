@@ -214,6 +214,11 @@ model User {
   flowAddonCurrentPeriodEnd   DateTime?   @map("flow_addon_current_period_end")
   currentVersion              UserVersion @default(free) @map("current_version")
   isLegacyPro                 Boolean     @default(false) @map("is_legacy_pro")
+  // WebView-safe AI-billing context: the team whose AI-credit pool the user
+  // last chose to bill (null = personal). Persisted server-side so a killed/
+  // relaunched Flutter WebView restores the selection without sessionStorage.
+  // Billing-only — NOT a data scope (flows/dashboard stay owner-private).
+  lastActiveTeamId            String?     @map("last_active_team_id")
   refreshToken                String?     @map("refresh_token") @db.Text
 
   // --- Granular permissions (from legacy) ---
@@ -540,6 +545,9 @@ model Team {
   flows       Flow[]
   projects    Project[]
   chatGroups  ChatGroup[]
+  shapes      Shape[]
+  shapeGroups ShapeGroup[]
+  issueItems  IssueItem[]
   createdAt   DateTime     @default(now()) @map("created_at")
   updatedAt   DateTime?    @map("updated_at")
   deletedAt   DateTime?    @map("deleted_at")
@@ -781,7 +789,10 @@ model ShapeGroup {
   userId         String          @map("user_id")
   user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   isPredefined   Boolean         @default(false) @map("is_predefined")
-  teamId         Int             @default(0) @map("team_id")
+  legacyTeamId   Int             @default(0) @map("team_id") // legacy MySQL int, unused for routing
+  // Workspace scoping (private team buckets): null = personal, non-null = team.
+  teamId         String?         @map("workspace_team_id")
+  team           Team?           @relation(fields: [teamId], references: [id], onDelete: SetNull)
   appType        AppType?        @map("app_type")
   appContext     UserVersion     @default(free) @map("app_context")
   shapes         Shape[]
@@ -791,6 +802,7 @@ model ShapeGroup {
   deletedAt      DateTime?       @map("deleted_at")
 
   @@index([appContext])
+  @@index([teamId])
   @@map("shape_groups")
 }
 
@@ -814,6 +826,9 @@ model Shape {
   group         ShapeGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
   ownerId       String      @map("owner_id")
   owner         User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  // Workspace scoping (private team buckets): null = personal, non-null = team.
+  teamId        String?     @map("team_id")
+  team          Team?       @relation(fields: [teamId], references: [id], onDelete: SetNull)
   appType       AppType?    @map("app_type")
   appContext    UserVersion @default(free) @map("app_context")
   category      String?
@@ -826,6 +841,7 @@ model Shape {
 
   @@index([groupId])
   @@index([appContext])
+  @@index([teamId])
   @@map("shapes")
 }
 
@@ -1037,10 +1053,14 @@ model IssueItem {
   isChecked    Boolean  @default(false) @map("is_checked")
   createdById  String?  @map("created_by")
   createdBy    User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  // Workspace scoping (private team buckets): null = personal, non-null = team.
+  teamId       String?  @map("team_id")
+  team         Team?    @relation(fields: [teamId], references: [id], onDelete: SetNull)
   appType      AppType? @map("app_type")
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([flowId])
+  @@index([teamId])
   @@map("issue_list")
 }
 

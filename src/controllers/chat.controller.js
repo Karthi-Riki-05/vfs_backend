@@ -20,7 +20,12 @@ class ChatController {
 
   getChatGroups = asyncHandler(async (req, res) => {
     const appContext = req.user.currentVersion || "free";
-    const groups = await chatService.getChatGroups(req.user.id, appContext);
+    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const groups = await chatService.getChatGroups(
+      req.user.id,
+      appContext,
+      teamId,
+    );
     res.json({ success: true, data: groups });
   });
 

@@ -100,6 +100,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_plan          TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_status        TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_current_period_end TIMESTAMPTZ;
 ALTER TABLE flow_shares ADD COLUMN IF NOT EXISTS requires_pro BOOLEAN NOT NULL DEFAULT false;
+-- Team-context / private-buckets feature: new workspace columns + indexes (idempotent).
+-- prisma db push is skipped on prod, so these must be applied here.
+ALTER TABLE users        ADD COLUMN IF NOT EXISTS last_active_team_id TEXT;
+ALTER TABLE shapes       ADD COLUMN IF NOT EXISTS team_id             TEXT;
+ALTER TABLE issue_list   ADD COLUMN IF NOT EXISTS team_id             TEXT;
+ALTER TABLE shape_groups ADD COLUMN IF NOT EXISTS workspace_team_id   TEXT;
+CREATE INDEX IF NOT EXISTS shapes_team_id_idx                 ON shapes (team_id);
+CREATE INDEX IF NOT EXISTS issue_list_team_id_idx             ON issue_list (team_id);
+CREATE INDEX IF NOT EXISTS shape_groups_workspace_team_id_idx ON shape_groups (workspace_team_id);
 DELETE FROM transaction_logs a USING transaction_logs b
   WHERE a.id > b.id AND a.txn_id = b.txn_id AND a.txn_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS transaction_logs_txn_id_key ON transaction_logs (txn_id);

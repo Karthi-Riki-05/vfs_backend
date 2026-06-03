@@ -8,38 +8,15 @@ class FlowService {
     const take = Math.min(Number(limit) || 10, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // Workspace semantics (Slack-style):
-    //   • Personal context (teamId omitted) → show ONLY flows where
-    //     ownerId = user AND teamId IS NULL.
-    //   • Team context (teamId set) → caller must be a verified member
-    //     (or owner) of that team. Show ALL flows with teamId = that team,
-    //     regardless of which member created them — that's the "team
-    //     workspace" view. If the user has no access to the team, we
-    //     return an empty page rather than 403 to keep the UX soft.
-    let where;
-    if (teamId) {
-      const [membership, ownedTeam] = await Promise.all([
-        prisma.teamMember.findFirst({
-          where: { teamId, userId },
-          select: { id: true },
-        }),
-        prisma.team.findFirst({
-          where: { id: teamId, teamOwnerId: userId },
-          select: { id: true },
-        }),
-      ]);
-      if (!membership && !ownedTeam) {
-        return {
-          flows: [],
-          total: 0,
-          page: Number(page) || 1,
-          totalPages: 0,
-        };
-      }
-      where = { teamId, deletedAt: null };
-    } else {
-      where = { ownerId: userId, teamId: null, deletedAt: null, appContext };
-    }
+    // Own account vs joined team:
+    //   • No teamId (own account, free OR team plan — SAME account) → the user
+    //     sees EVERY flow they own. Upgrading a plan never hides data, and a
+    //     flow tagged with the user's OWN team still shows here.
+    //   • A joined team (someone else's) → only the flows the user created in
+    //     that team: { ownerId, teamId }. Never teamId alone — that would
+    //     expose other members' rows (DATA-LOSS-001).
+    const where = { ownerId: userId, deletedAt: null };
+    if (teamId) where.teamId = teamId;
 
     if (search) {
       where.OR = [
@@ -161,12 +138,13 @@ class FlowService {
       });
       if (user && !user.proUnlimitedFlows) {
         const limit = user.proFlowLimit || 10;
+        // Count ALL personal flows against the limit, not just the current
+        // tier's — the cap is per-user, not per-appContext (see DATA-LOSS-001).
         const count = await prisma.flow.count({
           where: {
             ownerId: userId,
             teamId: null,
             deletedAt: null,
-            appContext,
           },
         });
         if (count >= limit) {
@@ -271,7 +249,8 @@ class FlowService {
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    const where = { ownerId: userId, deletedAt: { not: null }, appContext };
+    // Trash is per-user, not per-tier — show everything the user soft-deleted.
+    const where = { ownerId: userId, deletedAt: { not: null } };
     const [flows, total] = await Promise.all([
       prisma.flow.findMany({
         where,
@@ -309,11 +288,11 @@ class FlowService {
     return result;
   }
 
-  async emptyTrash(userId, appContext = "free") {
-    // Hard-delete every soft-deleted flow in the caller's workspace. Scoped
-    // by ownerId + appContext to mirror getTrash() — never a WHERE-less wipe.
+  async emptyTrash(userId) {
+    // Hard-delete every soft-deleted flow the user owns. Scoped by ownerId to
+    // mirror getTrash() — never a WHERE-less wipe.
     return await prisma.flow.deleteMany({
-      where: { ownerId: userId, deletedAt: { not: null }, appContext },
+      where: { ownerId: userId, deletedAt: { not: null } },
     });
   }
 
@@ -324,9 +303,9 @@ class FlowService {
     });
   }
 
-  async getFavorites(userId, appContext = "free") {
+  async getFavorites(userId) {
     return await prisma.flow.findMany({
-      where: { ownerId: userId, isFavorite: true, deletedAt: null, appContext },
+      where: { ownerId: userId, isFavorite: true, deletedAt: null },
       orderBy: { updatedAt: "desc" },
       select: { id: true, name: true, thumbnail: true },
     });
@@ -356,7 +335,7 @@ class FlowService {
   async shareFlow(flowId, userId, shares, appContext = "free") {
     // Verify flow belongs to current user
     const flow = await prisma.flow.findFirst({
-      where: { id: flowId, ownerId: userId, deletedAt: null, appContext },
+      where: { id: flowId, ownerId: userId, deletedAt: null },
     });
     if (!flow)
       throw new AppError(

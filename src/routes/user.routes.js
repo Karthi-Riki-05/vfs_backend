@@ -44,6 +44,29 @@ router.get("/team-context", authenticate, userController.getTeamContext);
 
 /**
  * @swagger
+ * /api/v1/users/active-context:
+ *   get:
+ *     summary: Get the user's persisted AI-billing team context (WebView-safe)
+ *     tags: [Users]
+ *     security: [{ BearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: "{ teamId: string | null } — null means personal pool"
+ *   post:
+ *     summary: Persist the user's AI-billing team context (billing only, not a data scope)
+ *     tags: [Users]
+ *     security: [{ BearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Saved
+ *       403:
+ *         description: Caller is not a member/owner of the team
+ */
+router.get("/active-context", authenticate, userController.getActiveContext);
+router.post("/active-context", authenticate, userController.setActiveContext);
+
+/**
+ * @swagger
  * /api/v1/users/forgot-password:
  *   post:
  *     summary: Request password reset email

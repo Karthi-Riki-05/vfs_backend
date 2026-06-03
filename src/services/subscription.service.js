@@ -1038,6 +1038,56 @@ class SubscriptionService {
         ]
       : [];
 
+    // ── Team workspace get-or-create ─────────────────────────────────────
+    // The team-context flow/project queries filter by `teamId`
+    // (flow.service.getAllFlows: where = { teamId, deletedAt: null }), so a
+    // real Team row MUST exist and migrated flows MUST carry its id — otherwise
+    // they "disappear" (appContext='team' but teamId=null = visible nowhere).
+    // Idempotent: re-uses the user's existing team on plan changes / retries.
+    const teamOwner = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true },
+    });
+    let team = await prisma.team.findFirst({
+      where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
+    });
+    if (!team) {
+      team = await prisma.team.create({
+        data: {
+          name: teamOwner?.name ? `${teamOwner.name}'s Team` : "My Team",
+          teamOwnerId: userId,
+          appType: "enterprise",
+          appContext: "team",
+          status: "active",
+          teamMem: members,
+          countMem: 1,
+        },
+      });
+      // Add the owner as the first team member (mirrors team.service.createTeam).
+      const existingMember = await prisma.teamMember.findFirst({
+        where: { teamId: team.id, userId },
+      });
+      if (!existingMember) {
+        await prisma.teamMember.create({
+          data: {
+            teamId: team.id,
+            userId,
+            role: "OWNER",
+            appType: "enterprise",
+          },
+        });
+      }
+      logger.info(`[Team Upgrade] Created team ${team.id} for user ${userId}`);
+    }
+
+    // (Removed the pre-migration snapshot counts — DATA-LOSS-001. They existed
+    // only to log how much personal data the migration moved into the team.
+    // We no longer migrate personal data, so there is nothing to snapshot.)
+    logger.info(
+      `[Team Upgrade] Setting up team ${team.id} for user ${userId} — ` +
+        `personal data left untouched.`,
+    );
+
     await prisma.$transaction([
       ...archiveOps,
       prisma.subscription.upsert({
@@ -1095,13 +1145,18 @@ class SubscriptionService {
           planResetsAt: expiresAt,
         },
       }),
-      // Migrate the user's existing flows into the new team workspace so
-      // they don't "disappear" after upgrade. Only migrates their own
-      // non-deleted flows that are still in the previous free context.
-      prisma.flow.updateMany({
-        where: { ownerId: userId, appContext: "free", deletedAt: null },
-        data: { appContext: "team" },
-      }),
+      // DATA-LOSS-001 fix: we intentionally DO NOT migrate/retag the user's
+      // existing personal data on upgrade. Previously this block moved every
+      // personal flow/project into the new team (teamId = team.id) and retagged
+      // shapes/groups to appContext:"team". That had two serious effects:
+      //   1. The flows vanished from the user's PERSONAL view (which loads by
+      //      default after checkout) → the "No flows yet" data-loss report.
+      //   2. Private personal flows were silently exposed to every team member.
+      // Personal data now stays personal (teamId = null) and remains visible in
+      // the personal workspace across all plan tiers; the new team starts empty
+      // and the owner moves flows into it deliberately. Personal listing queries
+      // no longer filter by appContext, so the legacy 'free' tag is harmless.
+      // (AI conversation history likewise stays in its original context.)
       prisma.transactionLog.create({
         data: {
           userId,
@@ -1143,6 +1198,11 @@ class SubscriptionService {
         },
       }),
     ]);
+
+    logger.info(
+      `[Team Upgrade] Complete for user ${userId} → team ${team.id}. ` +
+        `Personal flows/projects/shapes preserved in the user's personal workspace (NOT moved into the team).`,
+    );
 
     logger.info(
       `Subscription activated for user ${userId}: ${plan}, ${members} members`,

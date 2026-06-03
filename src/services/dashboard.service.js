@@ -23,21 +23,20 @@ class DashboardService {
       }),
     ]);
     if (!membership && !ownedTeam) return { scope: "personal", userId };
-    return { scope: "team", teamId };
+    return { scope: "team", teamId, userId };
   }
 
   // Build the Flow `where` clause for stats/activity/recent queries.
-  // Personal scope keeps the appContext filter (Pro app vs Team app
-  // separation). Team scope is keyed purely on team_id — every flow
-  // tagged to that team is visible regardless of who created it.
+  // Own account (personal scope, no teamId) counts ALL the caller's flows
+  // (free-era included) — same account, plan upgrade never hides data. A
+  // joined team counts only the caller's flows in it: { ownerId, teamId } —
+  // never teamId alone (other members' flows: DATA-LOSS-001).
   _flowWhere(scopeInfo, appContext, extra = {}) {
     if (scopeInfo.scope === "team") {
-      return { teamId: scopeInfo.teamId, ...extra };
+      return { ownerId: scopeInfo.userId, teamId: scopeInfo.teamId, ...extra };
     }
     return {
       ownerId: scopeInfo.userId,
-      teamId: null,
-      appContext,
       ...extra,
     };
   }
@@ -60,14 +59,16 @@ class DashboardService {
             updatedAt: { gte: startOfMonth },
           }),
         }),
-        // Shared flows: scoped to the active workspace. In team context
-        // count shares created within that team's flows; in personal
-        // context, the caller's own shares.
+        // Shared flows: the CALLER'S own shares. Own account counts all of
+        // them; a joined team counts only shares of that team's flows.
         prisma.flowShare.count({
           where:
             scopeInfo.scope === "team"
-              ? { flow: { teamId: scopeInfo.teamId, deletedAt: null } }
-              : { sharedById: userId, appContext },
+              ? {
+                  sharedById: userId,
+                  flow: { teamId: scopeInfo.teamId, deletedAt: null },
+                }
+              : { sharedById: userId },
         }),
         this._getTeamMemberCount(userId),
       ]);
@@ -133,9 +134,10 @@ class DashboardService {
   }
 
   async getTeamActivity(userId, limit = 10, teamId = null) {
-    // App-isolation: when a teamId is provided, scope strictly to that
-    // single team (and verify membership). Personal context returns [] —
-    // the caller already hides the section in that case.
+    // Private team buckets: members never see each other's data, so this is
+    // the CALLER'S own recent activity inside the active team bucket (owner
+    // AND team — never other members' rows: DATA-LOSS-001). Personal context
+    // returns [] — the caller hides the section there.
     let teamIds;
     if (teamId) {
       const membership = await prisma.teamMember.findFirst({
@@ -158,16 +160,10 @@ class DashboardService {
 
     if (teamIds.length === 0) return [];
 
-    const allMembers = await prisma.teamMember.findMany({
-      where: { teamId: { in: teamIds } },
-      select: { userId: true },
-    });
-    const memberIds = [...new Set(allMembers.map((m) => m.userId))];
-
     const recentFlows = await prisma.flow.findMany({
       where: {
-        ownerId: { in: memberIds.filter((id) => id !== userId) },
-        teamId: { in: teamIds }, // strictly scope flows to the same teams
+        ownerId: userId,
+        teamId: { in: teamIds }, // caller's own flows in these team buckets
         deletedAt: null,
       },
       orderBy: { updatedAt: "desc" },

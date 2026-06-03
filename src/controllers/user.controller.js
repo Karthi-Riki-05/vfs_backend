@@ -85,77 +85,90 @@ class UserController {
       "free";
     const isProApp = requestedApp === "pro";
 
-    // Switcher only makes sense for teams the user was INVITED into —
-    // not teams they own. A team owner already has the team plan as
-    // their primary account; no switching needed.
-    const memberTeams = await prisma.teamMember.findMany({
-      where: {
-        userId,
-        role: { not: "OWNER" }, // exclude OWNER membership rows
-        team: isProApp
-          ? { appContext: "pro", deletedAt: null }
-          : { appContext: { not: "pro" }, deletedAt: null },
-      },
-      include: {
-        team: {
-          include: {
-            owner: {
-              select: {
-                id: true,
-                name: true,
-                image: true,
-                hasPro: true,
-                currentVersion: true,
-                proUnlimitedFlows: true,
-                proFlowLimit: true,
-              },
-            },
-          },
-        },
-      },
-    });
+    // App-isolation filter shared by both the member and owner queries so
+    // a Team-app team never shows up in the Pro app and vice-versa.
+    const appCtxTeamFilter = isProApp
+      ? { appContext: "pro", deletedAt: null }
+      : { appContext: { not: "pro" }, deletedAt: null };
 
-    const availableTeams = memberTeams
-      // Defensive: also drop any team where this user is actually the
-      // owner via the Team.teamOwnerId column (in case role was mis-set).
+    const ownerSelect = {
+      id: true,
+      name: true,
+      image: true,
+      hasPro: true,
+      currentVersion: true,
+      proUnlimitedFlows: true,
+      proFlowLimit: true,
+    };
+
+    // Two sources of switchable workspaces:
+    //   1. Teams the user was INVITED into (TeamMember row, role != OWNER).
+    //   2. Teams the user OWNS — owners need a workspace entry too so they
+    //      can reach their team's shared flows/projects/chat, not just their
+    //      personal (teamId IS NULL) workspace. Previously owned teams were
+    //      excluded, leaving owners unable to see member-contributed data.
+    const [memberTeams, ownedTeams] = await Promise.all([
+      prisma.teamMember.findMany({
+        where: {
+          userId,
+          role: { not: "OWNER" }, // exclude OWNER membership rows
+          team: appCtxTeamFilter,
+        },
+        include: { team: { include: { owner: { select: ownerSelect } } } },
+      }),
+      prisma.team.findMany({
+        where: { teamOwnerId: userId, ...appCtxTeamFilter },
+        include: { owner: { select: ownerSelect } },
+      }),
+    ]);
+
+    // Shared mapper → the exact TeamContextOption shape the frontend
+    // AppContext consumes (teamId/teamName/owner/plan/hasPro/…). `isOwner`
+    // is additive metadata the FE can use to label the entry.
+    const toOption = (team, role) => {
+      // Derive the effective plan the team grants. appContext='team' always
+      // means 'team'; otherwise fall back to the owner's hasPro flag, then
+      // their currentVersion (guards against a stale paid-owner 'free' flag).
+      const owner = team.owner;
+      let plan = team.appContext;
+      if (plan !== "team") {
+        plan = owner.hasPro ? "pro" : owner.currentVersion || "free";
+      }
+      if (team.appContext === "team") plan = "team";
+
+      return {
+        teamId: team.id,
+        teamName: team.name,
+        role,
+        isOwner: role === "OWNER",
+        owner: { id: owner.id, name: owner.name, image: owner.image },
+        plan,
+        hasPro: plan === "pro" || plan === "team" || owner.hasPro,
+        proUnlimitedFlows: owner.proUnlimitedFlows,
+        proFlowLimit: owner.proFlowLimit,
+      };
+    };
+
+    const memberOptions = memberTeams
+      // Defensive: drop any team where this user is actually the owner via
+      // the Team.teamOwnerId column (in case a role was mis-set).
       .filter(
         (mt) =>
           mt.team &&
           mt.team.deletedAt === null &&
           mt.team.teamOwnerId !== userId,
       )
-      .map((mt) => {
-        // Derive the effective plan that the team grants its members.
-        // If the team's appContext is 'team', or the team has any members
-        // (which means the owner is paying for team seats), report 'team'.
-        // Otherwise fall back to the owner's hasPro flag, then their
-        // currentVersion. This protects against stale currentVersion
-        // values where a paid team owner is still flagged 'free'.
-        const owner = mt.team.owner;
-        let plan = mt.team.appContext;
-        if (plan !== "team") {
-          if (owner.hasPro) plan = "pro";
-          else plan = owner.currentVersion || "free";
-        }
-        // Owning/being part of a team always unlocks team-collab features
-        // for the invited member, regardless of the owner's plan field.
-        if (mt.team.appContext === "team") plan = "team";
+      .map((mt) => toOption(mt.team, mt.role));
 
-        return {
-          teamId: mt.team.id,
-          teamName: mt.team.name,
-          role: mt.role,
-          owner: {
-            id: owner.id,
-            name: owner.name,
-            image: owner.image,
-          },
-          plan,
-          hasPro: plan === "pro" || plan === "team" || owner.hasPro,
-          proUnlimitedFlows: owner.proUnlimitedFlows,
-          proFlowLimit: owner.proFlowLimit,
-        };
-      });
+    // Dedup: never list an owned team twice if a stray membership row exists.
+    const memberTeamIds = new Set(memberOptions.map((o) => o.teamId));
+    const ownedOptions = ownedTeams
+      .filter((t) => !memberTeamIds.has(t.id))
+      .map((t) => toOption(t, "OWNER"));
+
+    // Owned teams lead the switcher (the owner's primary team workspace),
+    // followed by teams they were invited into.
+    const availableTeams = [...ownedOptions, ...memberOptions];
 
     res.json({
       success: true,
@@ -256,6 +269,60 @@ class UserController {
     res.json({
       success: true,
       data: { message: "User deactivated successfully" },
+    });
+  });
+
+  // ── AI-billing context persistence (WebView-safe) ──
+  // Stores which team's AI-credit pool the user last chose to bill. This is a
+  // BILLING context only — it never scopes flows/dashboard/chat data, which
+  // stay owner-private (DATA-LOSS-001). The frontend mirrors it in
+  // localStorage; this server copy survives a WebView kill where
+  // session/localStorage may not.
+
+  setActiveContext = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const { teamId } = req.body || {};
+
+    // Validate: when selecting a team, the caller must be a member OR the
+    // owner of it — otherwise we'd let someone bill a team they can't access.
+    if (teamId) {
+      const [membership, ownedTeam] = await Promise.all([
+        prisma.teamMember.findFirst({
+          where: { teamId, userId },
+          select: { id: true },
+        }),
+        prisma.team.findFirst({
+          where: { id: teamId, teamOwnerId: userId, deletedAt: null },
+          select: { id: true },
+        }),
+      ]);
+      if (!membership && !ownedTeam) {
+        return res.status(403).json({
+          success: false,
+          error: {
+            code: "NOT_TEAM_MEMBER",
+            message: "You are not a member of this team.",
+          },
+        });
+      }
+    }
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { lastActiveTeamId: teamId || null },
+    });
+
+    res.json({ success: true, data: { teamId: teamId || null } });
+  });
+
+  getActiveContext = asyncHandler(async (req, res) => {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { lastActiveTeamId: true },
+    });
+    res.json({
+      success: true,
+      data: { teamId: user?.lastActiveTeamId || null },
     });
   });
 }

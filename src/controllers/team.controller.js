@@ -1,6 +1,8 @@
 const teamService = require("../services/team.service");
 const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
+const { prisma } = require("../lib/prisma");
+const aiCreditService = require("../services/aiCredit.service");
 
 class TeamController {
   getTeams = asyncHandler(async (req, res) => {
@@ -121,6 +123,101 @@ class TeamController {
     if (!teamId) throw new AppError("teamId required", 400, "BAD_REQUEST");
     const invites = await teamService.listPendingInvites(teamId, req.user.id);
     res.json({ success: true, data: invites });
+  });
+
+  // List the AI-billing contexts the user can switch between: their personal
+  // pool plus every team they belong to (or own). Each entry carries its live
+  // AI-credit balance, resolved through the SAME billing logic the deduction
+  // path uses (aiCreditService.getBalance → resolveBillingUser), so the
+  // numbers shown match what will actually be spent. Billing only — this does
+  // NOT expose or scope any flow/chat data (DATA-LOSS-001).
+  getMyContexts = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const personalCtx = req.user.currentVersion || "free";
+
+    // Teams the user is a MEMBER of, the team(s) they OWN (used for the
+    // own-context label only), and their own AI-credit balance.
+    const [user, memberships, ownedTeams, personalBalance] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { name: true, email: true },
+      }),
+      prisma.teamMember.findMany({
+        where: { userId, team: { deletedAt: null } },
+        select: {
+          role: true,
+          team: {
+            select: {
+              id: true,
+              name: true,
+              teamOwnerId: true,
+              owner: { select: { id: true, name: true, email: true } },
+            },
+          },
+        },
+      }),
+      prisma.team.findMany({
+        where: { teamOwnerId: userId, deletedAt: null },
+        select: { id: true, name: true },
+      }),
+      aiCreditService.getBalance(userId, personalCtx, null),
+    ]);
+
+    // A team owner bills the SAME pool whether the X-Team-Context header is
+    // absent or carries their own teamId — resolveBillingUser folds both to
+    // { userId, "team" }. So an owned team listed as its own switcher row is a
+    // redundant duplicate of the own/personal context. Exclude owned teams
+    // from the switchable list and instead surface the owned team's NAME as
+    // the own-context label (e.g. "newtest's Team"). This means a team owner
+    // with no invites sees no switcher at all (own-only).
+    const ownedTeamIds = new Set(ownedTeams.map((t) => t.id));
+    const ownTeamName = ownedTeams[0]?.name || null;
+
+    // Only teams the user was INVITED to (member, not owner).
+    const joined = memberships.filter(
+      (m) => m.team.teamOwnerId !== userId && !ownedTeamIds.has(m.team.id),
+    );
+
+    const teams = await Promise.all(
+      joined.map(async ({ team, role }) => {
+        const bal = await aiCreditService.getBalance(userId, "team", team.id);
+        return {
+          teamId: team.id,
+          label: team.name || `${team.owner?.name || "Team"}'s Team`,
+          ownerName: team.owner?.name || null,
+          ownerEmail: team.owner?.email || null,
+          role,
+          aiCredits: {
+            planCredits: bal.planCredits,
+            addonCredits: bal.addonCredits,
+            total: bal.totalCredits,
+          },
+        };
+      }),
+    );
+
+    const ownLabel =
+      ownTeamName || user?.name || user?.email?.split("@")[0] || "Personal";
+
+    res.json({
+      success: true,
+      data: {
+        personal: {
+          teamId: null,
+          label: ownLabel,
+          ownerName: user?.name || null,
+          ownerEmail: user?.email || null,
+          avatar: ownLabel?.[0]?.toUpperCase() || null,
+          plan: personalCtx,
+          aiCredits: {
+            planCredits: personalBalance.planCredits,
+            addonCredits: personalBalance.addonCredits,
+            total: personalBalance.totalCredits,
+          },
+        },
+        teams,
+      },
+    });
   });
 }
 

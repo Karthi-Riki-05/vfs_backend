@@ -45,6 +45,20 @@ router.get("/", validate(getTeamsQuerySchema), teamController.getTeams);
 
 /**
  * @swagger
+ * /api/v1/teams/my-contexts:
+ *   get:
+ *     summary: AI-billing contexts (personal + teams) with live credit balances
+ *     tags: [Teams]
+ *     security: [{ BearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: "{ personal, teams[] } — billing pools only, no data"
+ */
+// NOTE: must precede "/:id" so it is not captured as an id param.
+router.get("/my-contexts", teamController.getMyContexts);
+
+/**
+ * @swagger
  * /api/v1/teams:
  *   post:
  *     summary: Create a new team

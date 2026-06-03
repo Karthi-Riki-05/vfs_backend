@@ -7,10 +7,14 @@ const linkPreviewCache = new Map();
 const CACHE_TTL = 60 * 60 * 1000;
 
 class ChatService {
-  async getChatGroups(userId, appContext = "free") {
+  async getChatGroups(userId, appContext = "free", teamId = null) {
     const groups = await prisma.chatGroup.findMany({
       where: {
         appContext,
+        // Own account (no teamId) shows ALL the user's groups; a joined team
+        // shows only groups in that team. Access still requires creator/
+        // membership (the OR below).
+        ...(teamId ? { teamId } : {}),
         deletedAt: null,
         OR: [{ userId }, { members: { some: { userId } } }],
       },

@@ -3,14 +3,16 @@ const AppError = require("../utils/AppError");
 
 class ProjectService {
   async getAllProjects(userId, options = {}, appContext = "free") {
-    const { search, teamId = null } = options;
+    const { search, teamId } = options;
 
-    // Personal context: user's own projects with teamId=null.
-    // Team context: every project belonging to that team (any creator) so
-    // members see the same workspace.
-    const where = teamId
-      ? { teamId, deletedAt: null, appContext: "team" }
-      : { createdBy: userId, teamId: null, deletedAt: null, appContext };
+    // Own account (no teamId) shows ALL the user's projects (free-era
+    // included); a joined team shows only the projects they created in it.
+    // Never teamId alone (DATA-LOSS-001).
+    const where = {
+      createdBy: userId,
+      deletedAt: null,
+    };
+    if (teamId) where.teamId = teamId;
 
     if (search) {
       where.name = { contains: search, mode: "insensitive" };
@@ -50,7 +52,9 @@ class ProjectService {
       where: {
         id,
         deletedAt: null,
-        ...(appContext ? { appContext } : {}),
+        // No appContext gate — access is by creator/team membership only.
+        // Filtering by the live plan tier hid personal projects post-upgrade
+        // (DATA-LOSS-001).
         OR: [
           { createdBy: userId },
           {
@@ -207,14 +211,11 @@ class ProjectService {
     });
     if (!flow) throw new AppError("Flow not found", 404, "NOT_FOUND");
 
-    // Reject cross-context / cross-team assignment.
-    if (flow.appContext !== project.appContext) {
-      throw new AppError(
-        "Flow and project belong to different workspaces",
-        400,
-        "CONTEXT_MISMATCH",
-      );
-    }
+    // Reject cross-team assignment. The teamId boundary (personal vs a
+    // specific team) is the real workspace boundary — we intentionally do NOT
+    // compare appContext, since a personal free-era flow and a personal
+    // project created after upgrade legitimately differ in that legacy tag
+    // (DATA-LOSS-001) yet both belong to the same personal workspace.
     if ((flow.teamId || null) !== (project.teamId || null)) {
       throw new AppError(
         "Flow and project belong to different teams",
