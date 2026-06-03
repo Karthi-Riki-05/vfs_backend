@@ -8,15 +8,32 @@ class FlowService {
     const take = Math.min(Number(limit) || 10, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // Own account vs joined team:
-    //   • No teamId (own account, free OR team plan — SAME account) → the user
-    //     sees EVERY flow they own. Upgrading a plan never hides data, and a
-    //     flow tagged with the user's OWN team still shows here.
-    //   • A joined team (someone else's) → only the flows the user created in
-    //     that team: { ownerId, teamId }. Never teamId alone — that would
-    //     expose other members' rows (DATA-LOSS-001).
+    // Strict workspace scoping (DATA-LOSS-001). ownerId always bounds the
+    // query — never teamId alone, which would expose other members' rows.
+    //   • Joined team context (teamId set) → only that team's flows.
+    //   • Personal/own context (no teamId) → flows with NO team OR in a team
+    //     the user OWNS. Owned teams have no switcher row (they fold into the
+    //     personal context, see getMyContexts), so their flows must surface
+    //     here — but flows created inside a JOINED team stay out of personal.
     const where = { ownerId: userId, deletedAt: null };
-    if (teamId) where.teamId = teamId;
+    if (teamId) {
+      where.teamId = teamId;
+    } else {
+      const ownedTeams = await prisma.team.findMany({
+        where: { teamOwnerId: userId, deletedAt: null },
+        select: { id: true },
+      });
+      const ownedTeamIds = ownedTeams.map((t) => t.id);
+      // Use AND (not OR) so we don't clobber the search OR added below.
+      where.AND = [
+        {
+          OR: [
+            { teamId: null },
+            ...(ownedTeamIds.length ? [{ teamId: { in: ownedTeamIds } }] : []),
+          ],
+        },
+      ];
+    }
 
     if (search) {
       where.OR = [

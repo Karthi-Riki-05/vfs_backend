@@ -3,16 +3,29 @@ const AppError = require("../utils/AppError");
 
 class ShapeService {
   async getAllShapes(userId, appContext = "free", teamId = null) {
-    // Public shapes are global. Private shapes: own account (no teamId) shows
-    // ALL the user's shapes (free-era included — DATA-LOSS-001); a joined team
-    // shows only shapes the user created in it ({ ownerId, teamId }).
-    return await prisma.shape.findMany({
-      where: {
+    // Public shapes are global. Private shapes follow strict workspace scoping
+    // (DATA-LOSS-001): a joined team shows only shapes the user created in it;
+    // personal shows shapes with NO team OR in a team the user OWNS (owned
+    // teams fold into the personal context — see getMyContexts).
+    let ownedClause;
+    if (teamId) {
+      ownedClause = { ownerId: userId, teamId };
+    } else {
+      const ownedTeams = await prisma.team.findMany({
+        where: { teamOwnerId: userId, deletedAt: null },
+        select: { id: true },
+      });
+      const ownedTeamIds = ownedTeams.map((t) => t.id);
+      ownedClause = {
+        ownerId: userId,
         OR: [
-          { isPublic: true },
-          { ownerId: userId, ...(teamId ? { teamId } : {}) },
+          { teamId: null },
+          ...(ownedTeamIds.length ? [{ teamId: { in: ownedTeamIds } }] : []),
         ],
-      },
+      };
+    }
+    return await prisma.shape.findMany({
+      where: { OR: [{ isPublic: true }, ownedClause] },
       orderBy: { createdAt: "desc" },
       include: { group: true },
     });
