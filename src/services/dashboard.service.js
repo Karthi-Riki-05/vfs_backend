@@ -42,35 +42,29 @@ class DashboardService {
   }
 
   async getStats(userId, appContext = "free", teamId = null) {
+    // Dashboard stats are a PERSONAL rollup — they always reflect ALL of the
+    // caller's own data regardless of the active workspace context. `teamId`
+    // is accepted for signature parity but intentionally IGNORED here: the
+    // per-team scoping still governs the flows LIST / activity / recent
+    // sections, just not this top-of-dashboard summary.
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const scopeInfo = await this._resolveScope(userId, teamId);
 
     const [totalFlows, editedThisMonth, sharedFlows, teamMembers] =
       await Promise.all([
+        // All flows owned by the user, every context combined.
+        prisma.flow.count({ where: { ownerId: userId, deletedAt: null } }),
         prisma.flow.count({
-          where: this._flowWhere(scopeInfo, appContext, {
-            deletedAt: null,
-          }),
-        }),
-        prisma.flow.count({
-          where: this._flowWhere(scopeInfo, appContext, {
+          where: {
+            ownerId: userId,
             deletedAt: null,
             updatedAt: { gte: startOfMonth },
-          }),
+          },
         }),
-        // Shared flows: the CALLER'S own shares. Own account counts all of
-        // them; a joined team counts only shares of that team's flows.
-        prisma.flowShare.count({
-          where:
-            scopeInfo.scope === "team"
-              ? {
-                  sharedById: userId,
-                  flow: { teamId: scopeInfo.teamId, deletedAt: null },
-                }
-              : { sharedById: userId },
-        }),
-        this._getTeamMemberCount(userId),
+        // Shared flows: all of the caller's own shares.
+        prisma.flowShare.count({ where: { sharedById: userId } }),
+        // Members of the team this user OWNS (joined teams don't count).
+        this._getOwnedTeamMemberCount(userId),
       ]);
 
     return { totalFlows, editedThisMonth, sharedFlows, teamMembers };
@@ -188,17 +182,17 @@ class DashboardService {
     }));
   }
 
-  async _getTeamMemberCount(userId) {
-    const teamMembers = await prisma.teamMember.findMany({
-      where: { userId },
-      select: { teamId: true },
+  // "Team Members" stat = distinct members of the team this user OWNS
+  // (excludes self). A user who has only JOINED teams owns none → 0.
+  async _getOwnedTeamMemberCount(userId) {
+    const ownTeam = await prisma.team.findFirst({
+      where: { teamOwnerId: userId, deletedAt: null },
+      select: { id: true },
     });
-    const teamIds = teamMembers.map((tm) => tm.teamId);
-
-    if (teamIds.length === 0) return 0;
+    if (!ownTeam) return 0;
 
     const members = await prisma.teamMember.findMany({
-      where: { teamId: { in: teamIds }, userId: { not: userId } },
+      where: { teamId: ownTeam.id, userId: { not: userId } },
       select: { userId: true },
     });
 

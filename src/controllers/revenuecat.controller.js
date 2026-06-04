@@ -97,11 +97,9 @@ class RevenueCatController {
           },
         });
 
-        // Zero out Pro-context AI credits (targeted — does not touch team credits)
-        await prisma.aiCreditBalance.updateMany({
-          where: { userId: app_user_id, appContext: "pro" },
-          data: { planCredits: 0, addonCredits: 0 },
-        });
+        // Pro = one-time LIFETIME purchase. Cancellation/expiry of the
+        // RevenueCat entitlement must NOT zero any credits — both plan and
+        // addon Pro credits stay forever. (Intentionally no credit update.)
 
         logger.info(
           `[revenuecat] downgraded user ${app_user_id} to free (${type})`,

@@ -11,6 +11,7 @@ const PRICING = {
 };
 
 const downgradeUser = require("../lib/downgradeUser");
+const notificationService = require("./notification.service");
 
 class SubscriptionService {
   /**
@@ -277,6 +278,7 @@ class SubscriptionService {
 
     const subscription = await prisma.subscription.findUnique({
       where: { userId },
+      include: { plan: { select: { name: true } } },
     });
     if (!subscription)
       throw new AppError("No active subscription found", 404, "NOT_FOUND");
@@ -297,6 +299,25 @@ class SubscriptionService {
     });
 
     logger.info(`Subscription cancel scheduled for user ${userId}`);
+
+    // In-app notification (non-blocking) — plan stays active until period end.
+    try {
+      const planName = subscription.plan?.name || "Team";
+      const expiryLabel = subscription.expiresAt
+        ? new Date(subscription.expiresAt).toLocaleDateString()
+        : "the end of the billing period";
+      await notificationService.createNotification(
+        userId,
+        "subscription_cancelled",
+        "Subscription Cancelled",
+        `Your ${planName} plan has been cancelled. It remains active until ${expiryLabel}.`,
+        "/dashboard/subscription",
+        { planName, expiresAt: subscription.expiresAt },
+      );
+    } catch (err) {
+      logger.warn(`[notify] subscription_cancelled skipped: ${err.message}`);
+    }
+
     return {
       message: "Subscription will be cancelled at end of billing period",
     };
@@ -1238,6 +1259,21 @@ class SubscriptionService {
     } catch (err) {
       logger.warn(`[push] paymentSuccess notify skipped: ${err.message}`);
     }
+
+    // In-app notification (non-blocking). Team checkout grants 300 AI credits.
+    try {
+      const planName = dbPlan?.name || "Team";
+      await notificationService.createNotification(
+        userId,
+        "subscription_activated",
+        "Subscription Activated!",
+        `Your ${planName} plan is now active. You have 300 AI credits.`,
+        "/dashboard/subscription",
+        { planName, creditAmount: 300, expiresAt },
+      );
+    } catch (err) {
+      logger.warn(`[notify] subscription_activated skipped: ${err.message}`);
+    }
   }
 
   _isTeamSub(sub) {
@@ -1704,7 +1740,7 @@ class SubscriptionService {
         status: { in: ["active", "cancelling"] },
         expiresAt: { not: null, lt: cutoff },
       },
-      select: { id: true, userId: true, expiresAt: true },
+      select: { id: true, userId: true, expiresAt: true, productType: true },
     });
 
     let expired = 0;
@@ -1722,6 +1758,27 @@ class SubscriptionService {
         } catch (err) {
           logger.error(
             `[expireLapsedSubscriptions] downgrade failed for user ${sub.userId}: ${err.message}`,
+          );
+        }
+        // In-app notification (non-blocking).
+        try {
+          const planName =
+            sub.productType === "team_yearly"
+              ? "Team Yearly"
+              : sub.productType === "team_monthly"
+                ? "Team Monthly"
+                : "Team";
+          await notificationService.createNotification(
+            sub.userId,
+            "subscription_expired",
+            "Subscription Expired",
+            `Your ${planName} plan has expired. Upgrade to continue using team features.`,
+            "/dashboard/subscription",
+            { planName, expiredAt: new Date() },
+          );
+        } catch (err) {
+          logger.warn(
+            `[notify] subscription_expired skipped for ${sub.userId}: ${err.message}`,
           );
         }
       } catch (err) {

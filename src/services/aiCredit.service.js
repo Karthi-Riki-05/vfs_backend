@@ -77,14 +77,22 @@ async function getOrCreateBalance(userId, appContext = "free") {
         userId,
         planCredits: planCreditsFor(appContext),
         addonCredits: 0,
-        planResetsAt: getNextResetDate(),
+        // Only Team plans expire/refill. Free = one-time grant (never
+        // refills); Pro = lifetime purchase (never expires). Both keep
+        // planResetsAt = null so no refill is ever scheduled.
+        planResetsAt: appContext === "team" ? getNextResetDate() : null,
         appContext,
       },
     });
   }
 
-  // Refill plan credits if the reset date has passed
-  if (balance.planResetsAt && new Date() > balance.planResetsAt) {
+  // Refill plan credits if the reset date has passed — TEAM only.
+  // Free (one-time) and Pro (lifetime) never refill.
+  if (
+    balance.appContext === "team" &&
+    balance.planResetsAt &&
+    new Date() > balance.planResetsAt
+  ) {
     balance = await prisma.aiCreditBalance.update({
       where: { userId_appContext: { userId, appContext } },
       data: {
@@ -249,46 +257,35 @@ async function resetAllPlanCredits() {
   for (const user of users) {
     const appContext = user.currentVersion || "free";
 
-    if (appContext === "team") {
-      const sub = user.subscription;
-      // Skip users without an active team subscription
-      if (!sub || sub.status !== "active") continue;
-      // Yearly teams are refreshed via invoice.paid webhook — skip in monthly cron
-      if (sub.productType === "team_yearly") {
-        skippedYearly++;
-        continue;
-      }
-      const seats = sub.usersCount || 5;
-      const credits = seats * TEAM_CREDITS_PER_SEAT_MONTHLY;
-      // planResetsAt: next billing date (subscription expiry) so the balance
-      // aligns with the actual renewal cycle, not a generic calendar month.
-      const planResetsAt = sub.expiresAt || getNextResetDate();
-      await prisma.aiCreditBalance.upsert({
-        where: { userId_appContext: { userId: user.id, appContext: "team" } },
-        update: { planCredits: credits, planResetsAt },
-        create: {
-          userId: user.id,
-          planCredits: credits,
-          addonCredits: 0,
-          planResetsAt,
-          appContext: "team",
-        },
-      });
-    } else {
-      const credits = planCreditsFor(appContext, user.isLegacyPro);
-      const planResetsAt = getNextResetDate();
-      await prisma.aiCreditBalance.upsert({
-        where: { userId_appContext: { userId: user.id, appContext } },
-        update: { planCredits: credits, planResetsAt },
-        create: {
-          userId: user.id,
-          planCredits: credits,
-          addonCredits: 0,
-          planResetsAt,
-          appContext,
-        },
-      });
+    // ONLY Team plans reset on the monthly cron. Free = one-time grant that
+    // never refills; Pro = lifetime purchase that never expires. Both have
+    // planResetsAt = null and must be skipped entirely here.
+    if (appContext !== "team") continue;
+
+    const sub = user.subscription;
+    // Skip users without an active team subscription
+    if (!sub || sub.status !== "active") continue;
+    // Yearly teams are refreshed via invoice.paid webhook — skip in monthly cron
+    if (sub.productType === "team_yearly") {
+      skippedYearly++;
+      continue;
     }
+    const seats = sub.usersCount || 5;
+    const credits = seats * TEAM_CREDITS_PER_SEAT_MONTHLY;
+    // planResetsAt: next billing date (subscription expiry) so the balance
+    // aligns with the actual renewal cycle, not a generic calendar month.
+    const planResetsAt = sub.expiresAt || getNextResetDate();
+    await prisma.aiCreditBalance.upsert({
+      where: { userId_appContext: { userId: user.id, appContext: "team" } },
+      update: { planCredits: credits, planResetsAt },
+      create: {
+        userId: user.id,
+        planCredits: credits,
+        addonCredits: 0,
+        planResetsAt,
+        appContext: "team",
+      },
+    });
 
     resetCount++;
   }

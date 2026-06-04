@@ -303,6 +303,7 @@ class AiCreditController {
           currency: "usd",
           status: "success",
           paymentMethod: source === "admin" ? "admin" : "manual",
+          purchaseType: "ai_addon_credits",
           appType: appContext === "team" ? "enterprise" : "individual",
           appContext,
         },

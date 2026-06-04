@@ -258,6 +258,7 @@ class PaymentService {
             currency,
             status: "success",
             paymentMethod: session.payment_method_types?.[0] || "card",
+            purchaseType: "ai_addon_credits",
             appType: appContext === "team" ? "enterprise" : "individual",
             appContext,
           },

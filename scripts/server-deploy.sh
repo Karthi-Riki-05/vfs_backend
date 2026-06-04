@@ -100,6 +100,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_plan          TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_status        TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_current_period_end TIMESTAMPTZ;
 ALTER TABLE flow_shares ADD COLUMN IF NOT EXISTS requires_pro BOOLEAN NOT NULL DEFAULT false;
+-- Billing: label transactions by what was purchased (ai_addon_credits, etc.).
+ALTER TABLE transaction_logs ADD COLUMN IF NOT EXISTS purchase_type TEXT;
 -- Team-context / private-buckets feature: new workspace columns + indexes (idempotent).
 -- prisma db push is skipped on prod, so these must be applied here.
 ALTER TABLE users        ADD COLUMN IF NOT EXISTS last_active_team_id TEXT;

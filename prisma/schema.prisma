@@ -1082,6 +1082,10 @@ model TransactionLog {
   holderName    String?     @map("holder_name")
   currency      String?
   status        String?
+  // What was purchased: ai_addon_credits | pro_upgrade | pro_extra_flows |
+  // team_subscription | flow_addon. Lets the billing UI label each row
+  // correctly (frontend reads `purchaseType` and falls back to appType).
+  purchaseType  String?     @map("purchase_type")
   appType       AppType?    @map("app_type")
   appContext    UserVersion @default(free) @map("app_context")
   createdAt     DateTime    @default(now()) @map("created_at")

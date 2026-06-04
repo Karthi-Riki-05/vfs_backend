@@ -2,6 +2,7 @@ const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 const crypto = require("crypto");
 const { sendTeamInviteEmail } = require("../utils/email");
+const notificationService = require("./notification.service");
 
 class TeamService {
   async getTeams(userId, options = {}, appContext = "free") {
@@ -386,6 +387,30 @@ class TeamService {
       } catch {
         // never block invite on FCM failure
       }
+
+      // In-app notification — only possible when the invitee already has an
+      // account (no userId to attach one to otherwise; they still get email).
+      if (existingUser) {
+        try {
+          await notificationService.createNotification(
+            existingUser.id,
+            "team_invite",
+            "Team Invitation",
+            `${inviter?.name || "A team member"} invited you to join "${
+              inviteTeam.name || "a team"
+            }"`,
+            `/invite/accept?token=${token}`,
+            {
+              teamId,
+              teamName: inviteTeam.name || null,
+              inviterName: inviter?.name || null,
+              inviteToken: token,
+            },
+          );
+        } catch {
+          // never block invite on notification failure
+        }
+      }
     }
 
     return results;
@@ -468,7 +493,7 @@ class TeamService {
     // Verify the accepting user's email matches the invitation
     const acceptingUser = await prisma.user.findUnique({
       where: { id: userId },
-      select: { email: true, hasPro: true, proPurchasedAt: true },
+      select: { name: true, email: true, hasPro: true, proPurchasedAt: true },
     });
     if (!acceptingUser) throw new AppError("User not found", 404, "NOT_FOUND");
 
@@ -542,6 +567,31 @@ class TeamService {
         },
       }),
     ]);
+
+    // Notify the team owner that a new member joined (skip if the owner
+    // somehow accepted their own invite). Non-blocking.
+    if (team.teamOwnerId && team.teamOwnerId !== userId) {
+      try {
+        await notificationService.createNotification(
+          team.teamOwnerId,
+          "team_member_joined",
+          "New Team Member",
+          `${acceptingUser.name || acceptingUser.email} joined "${
+            team.name || "your team"
+          }"`,
+          `/dashboard/teams/${team.id}`,
+          {
+            teamId: team.id,
+            teamName: team.name || null,
+            memberId: userId,
+            memberName: acceptingUser.name || null,
+            memberEmail: acceptingUser.email,
+          },
+        );
+      } catch {
+        // never block invite acceptance on notification failure
+      }
+    }
 
     return { teamId: invite.teamId, appContext: memberAppContext };
   }
