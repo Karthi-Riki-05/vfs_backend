@@ -36,7 +36,7 @@ async function resolveBillingUser(userId, activeTeamId) {
   }
   const team = await prisma.team.findFirst({
     where: { id: activeTeamId, deletedAt: null },
-    select: { teamOwnerId: true },
+    select: { teamOwnerId: true, appContext: true },
   });
   if (!team) return { userId, appContext: null };
   const [isMember, isOwner] = await Promise.all([
@@ -47,7 +47,12 @@ async function resolveBillingUser(userId, activeTeamId) {
     Promise.resolve(team.teamOwnerId === userId),
   ]);
   if (!isMember && !isOwner) return { userId, appContext: null };
-  return { userId: team.teamOwnerId, appContext: "team" };
+  // Bill the workspace's own pool. A Pro team (appContext='pro') draws from the
+  // owner's lifetime Pro balance (200); every other team draws from the Team
+  // pool (300). Previously this was hardcoded to 'team', which mis-billed Pro
+  // teams against the team pool — see Pro-app audit AUDIT 5.
+  const billingContext = team.appContext === "pro" ? "pro" : "team";
+  return { userId: team.teamOwnerId, appContext: billingContext };
 }
 
 function getNextResetDate() {

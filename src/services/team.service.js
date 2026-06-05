@@ -22,6 +22,8 @@ class TeamService {
     };
     if (appContext === "pro") {
       where.appContext = "pro";
+    } else {
+      where.appContext = { not: "pro" };
     }
 
     const [teams, total] = await Promise.all([

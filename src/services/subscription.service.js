@@ -13,6 +13,16 @@ const PRICING = {
 const downgradeUser = require("../lib/downgradeUser");
 const notificationService = require("./notification.service");
 
+// True only when the subscription row represents a currently-active paid period.
+// `status='active'` alone is insufficient: the cron/webhook may not have flipped
+// it yet after expiry. Always pair with the expiresAt wall-clock check.
+function isSubscriptionLive(sub) {
+  if (!sub) return false;
+  if (sub.status === "expired" || sub.status === "cancelled") return false;
+  if (sub.expiresAt && new Date(sub.expiresAt) <= new Date()) return false;
+  return sub.status === "active" || sub.status === "cancelling";
+}
+
 class SubscriptionService {
   /**
    * Returns the Stripe Price ID for the given plan type.

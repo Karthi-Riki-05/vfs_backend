@@ -6,7 +6,7 @@ const aiCreditService = require("../services/aiCredit.service");
 
 class TeamController {
   getTeams = asyncHandler(async (req, res) => {
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const result = await teamService.getTeams(
       req.user.id,
       req.query,
@@ -16,7 +16,7 @@ class TeamController {
   });
 
   getTeamById = asyncHandler(async (req, res) => {
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const team = await teamService.getTeamById(
       req.params.id,
       req.user.id,
@@ -26,7 +26,7 @@ class TeamController {
   });
 
   createTeam = asyncHandler(async (req, res) => {
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const team = await teamService.createTeam(
       req.user.id,
       req.body,
@@ -85,7 +85,7 @@ class TeamController {
 
   invite = asyncHandler(async (req, res) => {
     const { teamId, email, emails } = req.body;
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     // Support single email or comma-separated list. Guard email.includes —
     // `email` is optional when `emails[]` is supplied (would throw otherwise).
     const emailList = emails
@@ -133,7 +133,22 @@ class TeamController {
   // NOT expose or scope any flow/chat data (DATA-LOSS-001).
   getMyContexts = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const personalCtx = req.user.currentVersion || "free";
+    const personalCtx = req.headers["x-app-context"] || req.user.currentVersion || "team";
+
+    // Determine which app is calling via X-Team-Context. When the header
+    // carries a proTeamId, we're in pro app context; otherwise (no header or
+    // a team-app teamId) we're in team/personal context. We do NOT fall back
+    // to currentVersion because it can be stale (e.g. a user with
+    // currentVersion='pro' opening the team app with no active team context).
+    const activeTeamId = req.headers["x-team-context"] || null;
+    let callingIsPro = false;
+    if (activeTeamId) {
+      const activeTeam = await prisma.team.findFirst({
+        where: { id: activeTeamId },
+        select: { appContext: true },
+      });
+      callingIsPro = activeTeam?.appContext === "pro";
+    }
 
     // Teams the user is a MEMBER of, the team(s) they OWN (used for the
     // own-context label only), and their own AI-credit balance.
@@ -151,6 +166,7 @@ class TeamController {
               id: true,
               name: true,
               teamOwnerId: true,
+              appContext: true,
               owner: { select: { id: true, name: true, email: true } },
             },
           },
@@ -173,9 +189,17 @@ class TeamController {
     const ownedTeamIds = new Set(ownedTeams.map((t) => t.id));
     const ownTeamName = ownedTeams[0]?.name || null;
 
-    // Only teams the user was INVITED to (member, not owner).
+    // Only teams the user was INVITED to (member, not owner), scoped to the
+    // calling app — pro teams are only returned when requesting from pro app
+    // context, preventing a user's pro-team membership from appearing in the
+    // team app switcher (cross-app isolation).
     const joined = memberships.filter(
-      (m) => m.team.teamOwnerId !== userId && !ownedTeamIds.has(m.team.id),
+      (m) =>
+        m.team.teamOwnerId !== userId &&
+        !ownedTeamIds.has(m.team.id) &&
+        (callingIsPro
+          ? m.team.appContext === "pro"
+          : m.team.appContext !== "pro"),
     );
 
     const teams = await Promise.all(

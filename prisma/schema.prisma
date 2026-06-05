@@ -458,14 +458,16 @@ model Subscription {
   deletedAt    DateTime?    @map("deleted_at")
 
   // Scheduled plan change (monthly → yearly)
-  scheduledPlanType       String?   @map("scheduled_plan_type")
-  scheduledTeamMembers    Int?      @map("scheduled_team_members")
-  scheduledActivationDate DateTime? @map("scheduled_activation_date")
+  scheduledPlanType       String?     @map("scheduled_plan_type")
+  scheduledTeamMembers    Int?        @map("scheduled_team_members")
+  scheduledActivationDate DateTime?   @map("scheduled_activation_date")
+  appContext              UserVersion @default(free) @map("app_context")
 
   @@index([appType])
   @@index([status])
   @@index([paymentId])
   @@index([status, productType])
+  @@index([appContext])
   @@map("subscriptions")
 }
 
@@ -1054,13 +1056,15 @@ model IssueItem {
   createdById  String?  @map("created_by")
   createdBy    User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
   // Workspace scoping (private team buckets): null = personal, non-null = team.
-  teamId       String?  @map("team_id")
-  team         Team?    @relation(fields: [teamId], references: [id], onDelete: SetNull)
-  appType      AppType? @map("app_type")
-  createdAt    DateTime @default(now()) @map("created_at")
+  teamId       String?     @map("team_id")
+  team         Team?       @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  appType      AppType?    @map("app_type")
+  appContext   UserVersion @default(free) @map("app_context")
+  createdAt    DateTime    @default(now()) @map("created_at")
 
   @@index([flowId])
   @@index([teamId])
+  @@index([appContext])
   @@map("issue_list")
 }
 
@@ -1188,14 +1192,15 @@ model PromoCode {
 // ============================================================
 
 model UserAction {
-  id          String    @id @default(cuid())
+  id          String      @id @default(cuid())
   action      String
-  actionModel String?   @map("action_model")
-  actionId    Int?      @map("action_id")
-  userId      String?   @map("user_id")
-  user        User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt   DateTime? @map("created_at")
-  updatedAt   DateTime? @map("updated_at")
+  actionModel String?     @map("action_model")
+  actionId    Int?        @map("action_id")
+  userId      String?     @map("user_id")
+  user        User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appContext  UserVersion @default(free) @map("app_context")
+  createdAt   DateTime?   @map("created_at")
+  updatedAt   DateTime?   @map("updated_at")
 
   @@index([userId])
   @@map("user_actions")
@@ -1238,15 +1243,16 @@ model SubscriptionHistory {
 // ============================================================
 
 model AdminLog {
-  id           String   @id @default(cuid())
-  adminId      String   @map("admin_id")
-  admin        User     @relation("AdminLogAdmin", fields: [adminId], references: [id], onDelete: Cascade)
-  targetUserId String?  @map("target_user_id")
-  targetUser   User?    @relation("AdminLogTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+  id           String      @id @default(cuid())
+  adminId      String      @map("admin_id")
+  admin        User        @relation("AdminLogAdmin", fields: [adminId], references: [id], onDelete: Cascade)
+  targetUserId String?     @map("target_user_id")
+  targetUser   User?       @relation("AdminLogTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
   action       String
   details      Json?
-  ipAddress    String?  @map("ip_address")
-  createdAt    DateTime @default(now()) @map("created_at")
+  ipAddress    String?     @map("ip_address")
+  appContext   UserVersion @default(free) @map("app_context")
+  createdAt    DateTime    @default(now()) @map("created_at")
 
   @@index([adminId])
   @@index([targetUserId])
@@ -1294,15 +1300,16 @@ model UserFreeTrial {
 // ============================================================
 
 model FeedbackQuery {
-  id        String       @id @default(cuid())
-  message   String?      @db.Text
-  userId    String       @map("user_id")
-  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  msgType   FeedbackType @default(feedback) @map("msg_type")
-  appType   AppType      @default(enterprise) @map("app_type")
-  appDevice ClientType   @default(android) @map("app_device")
-  createdAt DateTime     @default(now()) @map("created_at")
-  updatedAt DateTime?    @map("updated_at")
+  id         String       @id @default(cuid())
+  message    String?      @db.Text
+  userId     String       @map("user_id")
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  msgType    FeedbackType @default(feedback) @map("msg_type")
+  appType    AppType      @default(enterprise) @map("app_type")
+  appDevice  ClientType   @default(android) @map("app_device")
+  appContext UserVersion  @default(free) @map("app_context")
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime?    @map("updated_at")
 
   @@map("feedback_queries")
 }
@@ -1382,12 +1389,13 @@ model Notification {
   //           flows_restored.
   type      String
   title     String
-  message   String    @db.Text
-  isRead    Boolean   @default(false) @map("is_read")
-  actionUrl String?   @map("action_url")
+  message   String      @db.Text
+  isRead    Boolean     @default(false) @map("is_read")
+  actionUrl String?     @map("action_url")
   metadata  Json?
-  createdAt DateTime  @default(now()) @map("created_at")
-  expiresAt DateTime? @map("expires_at")
+  appContext UserVersion @default(free) @map("app_context")
+  createdAt DateTime    @default(now()) @map("created_at")
+  expiresAt DateTime?   @map("expires_at")
 
   @@index([userId, isRead])
   @@index([createdAt])
@@ -1419,13 +1427,13 @@ model AiConsent {
 // ============================================================
 
 model AiConversation {
-  id         String      @id @default(cuid())
-  userId     String      @map("user_id")
-  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id         String       @id @default(cuid())
+  userId     String       @map("user_id")
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   title      String?
-  appContext String?     @map("app_context")
-  createdAt  DateTime    @default(now()) @map("created_at")
-  updatedAt  DateTime    @updatedAt @map("updated_at")
+  appContext  UserVersion? @map("app_context")
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
   messages   AiMessage[]
 
   @@index([userId])

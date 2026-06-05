@@ -2,15 +2,16 @@ const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 
 class IssueService {
-  async getIssues(userId, options = {}) {
+  async getIssues(userId, options = {}, appContext = "free") {
     const { flowId, page = 1, limit = 20, teamId } = options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // Own account (no teamId) shows ALL the user's issues; a joined team shows
-    // only the issues the user created in it. Never teamId alone.
+    // Own account (no teamId) shows issues in the active appContext only; a
+    // joined team shows only the issues the user created in it. Never teamId alone.
     const where = { createdById: userId };
     if (teamId) where.teamId = teamId;
+    else where.appContext = appContext;
     if (flowId) where.flowId = flowId;
 
     const [issues, total] = await Promise.all([
@@ -39,7 +40,7 @@ class IssueService {
     return issue;
   }
 
-  async createIssue(userId, data) {
+  async createIssue(userId, data, appContext = "free") {
     return await prisma.issueItem.create({
       data: {
         title: data.title,
@@ -48,6 +49,7 @@ class IssueService {
         createdById: userId,
         teamId: data.teamId || null,
         appType: data.appType || null,
+        appContext: data.teamId ? "team" : appContext,
       },
     });
   }

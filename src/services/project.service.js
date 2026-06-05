@@ -2,17 +2,18 @@ const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 
 class ProjectService {
-  async getAllProjects(userId, options = {}, appContext = "free") {
+  async getAllProjects(userId, options = {}, appContext = "team") {
     const { search, teamId } = options;
 
-    // Own account (no teamId) shows ALL the user's projects (free-era
-    // included); a joined team shows only the projects they created in it.
+    // Own account (no teamId) shows projects in the active appContext only;
+    // a joined team shows only the projects they created in it.
     // Never teamId alone (DATA-LOSS-001).
     const where = {
       createdBy: userId,
       deletedAt: null,
     };
     if (teamId) where.teamId = teamId;
+    else where.appContext = appContext;
 
     if (search) {
       where.name = { contains: search, mode: "insensitive" };
@@ -121,7 +122,7 @@ class ProjectService {
     };
   }
 
-  async createProject(userId, data, appContext = "free") {
+  async createProject(userId, data, appContext) {
     const teamId = data.teamId || null;
 
     // Team-scoped: caller must be a member or the owner of that team.

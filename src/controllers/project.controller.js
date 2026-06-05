@@ -7,7 +7,7 @@ class ProjectController {
     // Active workspace: team header takes precedence over the user's
     // billing-tier currentVersion. Personal projects scope to teamId=null.
     const teamId = req.query.teamId || req.headers["x-team-context"] || null;
-    const appContext = teamId ? "team" : req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const { search } = req.query;
     const projects = await projectService.getAllProjects(
       userId,
@@ -30,7 +30,7 @@ class ProjectController {
   createProject = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
-    const appContext = teamId ? "team" : req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const project = await projectService.createProject(
       userId,
       { ...req.body, teamId },

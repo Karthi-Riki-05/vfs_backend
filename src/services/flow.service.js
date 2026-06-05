@@ -1,9 +1,10 @@
 const { prisma } = require("../lib/prisma");
 const produce = require("immer").produce;
 const AppError = require("../utils/AppError");
+const { personalFlowTeamOr } = require("../lib/personalFlowScope");
 
 class FlowService {
-  async getAllFlows(userId, options = {}, appContext = "free") {
+  async getAllFlows(userId, options = {}, appContext = "team") {
     const { search, page = 1, limit = 10, nonEmpty, teamId } = options;
     const take = Math.min(Number(limit) || 10, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
@@ -17,10 +18,46 @@ class FlowService {
     //     here — but flows created inside a JOINED team stay out of personal.
     const where = { ownerId: userId, deletedAt: null };
     if (teamId) {
-      where.teamId = teamId;
+      // If the header refers to the user's OWN team-app team, treat it as
+      // personal context: show free flows (NULL) + that team's flows together.
+      // Joined teams and pro-app teams get strict isolation (teamId only).
+      const isOwnTeamAppTeam = await prisma.team.findFirst({
+        where: {
+          id: teamId,
+          teamOwnerId: userId,
+          appContext: "team",
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (isOwnTeamAppTeam) {
+        // Personal context via own-team header: free + team flows.
+        where.AND = [{ OR: [{ teamId: null }, { teamId }] }];
+      } else {
+        where.teamId = teamId;
+      }
+    } else if (appContext === "pro") {
+      // Pro user calling without X-Team-Context header. This is a race-condition
+      // window: the frontend hasn't pinned vc_ai_billing_team yet (cleared
+      // localStorage, first render before ProGuard runs, iOS WebView restart).
+      // Defense-in-depth: never include teamId=null (free flows) for a Pro user.
+      // Find their pro team and use strict isolation just like the header path.
+      const proTeam = await prisma.team.findFirst({
+        where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
+        select: { id: true },
+      });
+      if (proTeam) {
+        where.teamId = proTeam.id;
+      } else {
+        // Pro grant still in flight — return empty rather than leak free flows.
+        where.teamId = "__no_pro_team__";
+      }
     } else {
+      // Team/free user personal context = NULL-team flows + team-app owned teams.
+      // Exclude pro-app owned teams (appContext='pro') so pro flows never
+      // leak into the team-app personal view (cross-app isolation).
       const ownedTeams = await prisma.team.findMany({
-        where: { teamOwnerId: userId, deletedAt: null },
+        where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
         select: { id: true },
       });
       const ownedTeamIds = ownedTeams.map((t) => t.id);
@@ -93,8 +130,26 @@ class FlowService {
     });
   }
 
-  async createFlow(userId, data, appContext = "free") {
-    const teamId = data.teamId || null;
+  async createFlow(userId, data, appContext) {
+    let teamId = data.teamId || null;
+
+    // Pro users have a personal Pro workspace backed by their own Pro team.
+    // When no explicit team context is supplied, route the flow into that Pro
+    // team so Pro flows carry a teamId (isolated from free flows) and an
+    // appContext of 'pro'. Falls back to a NULL-team personal flow if the Pro
+    // team is missing (e.g. grant not yet completed).
+    if (!teamId && appContext === "pro") {
+      const proTeam = await prisma.team.findFirst({
+        where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
+        select: { id: true },
+      });
+      if (proTeam) teamId = proTeam.id;
+    }
+
+    // The flow's appContext is defined by the workspace it lives in (captured
+    // from the team below). A Pro team tags flows 'pro'; any other team tags
+    // 'team'; a personal flow keeps the caller's currentVersion.
+    let workspaceAppContext = null;
 
     // Workspace-scoped flow-limit enforcement:
     //   • Team context → count team flows, limit comes from TEAM OWNER's
@@ -117,6 +172,7 @@ class FlowService {
       if (!team || team.deletedAt) {
         throw new AppError("Team not found", 404, "NOT_FOUND");
       }
+      workspaceAppContext = team.appContext;
       const [membership, isOwner] = await Promise.all([
         prisma.teamMember.findFirst({
           where: { teamId, userId },
@@ -184,10 +240,14 @@ class FlowService {
         ownerId: userId,
         projectId: data.projectId || null,
         teamId,
-        // Flows created in a team context use appContext='team' so the
-        // workspace UI can filter consistently; personal flows keep the
-        // user's currentVersion.
-        appContext: teamId ? "team" : appContext,
+        // Workspace-derived appContext: a Pro team tags flows 'pro' (so the Pro
+        // app can isolate them); any other team tags 'team'; personal flows
+        // keep the caller's currentVersion.
+        appContext: teamId
+          ? workspaceAppContext === "pro"
+            ? "pro"
+            : "team"
+          : appContext,
       },
     });
   }
@@ -261,7 +321,7 @@ class FlowService {
     });
   }
 
-  async getTrash(userId, options = {}, appContext = "free") {
+  async getTrash(userId, options = {}, appContext = "team") {
     const { page = 1, limit = 20 } = options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
@@ -328,7 +388,7 @@ class FlowService {
     });
   }
 
-  async duplicateFlow(id, userId, appContext = "free") {
+  async duplicateFlow(id, userId, appContext = "team") {
     const original = await this.getFlowById(id, userId);
     if (!original) throw new AppError("Flow not found", 404, "NOT_FOUND");
 
@@ -349,7 +409,7 @@ class FlowService {
 
   // ==================== SHARING ====================
 
-  async shareFlow(flowId, userId, shares, appContext = "free") {
+  async shareFlow(flowId, userId, shares, appContext = "team") {
     // Verify flow belongs to current user
     const flow = await prisma.flow.findFirst({
       where: { id: flowId, ownerId: userId, deletedAt: null },
@@ -632,7 +692,7 @@ class FlowService {
     return { members: unique, isProUser };
   }
 
-  async getSharedFlows(userId, _appContext = "free", activeTeamId = null) {
+  async getSharedFlows(userId, appContext = "team", activeTeamId = null) {
     // "Shared with me" is a TEAM-context feature. Personal accounts don't
     // see any incoming shares — sharing is strictly for team workspaces.
     if (!activeTeamId) return [];
@@ -651,6 +711,7 @@ class FlowService {
       where: {
         sharedWithId: userId,
         sharedById: team.teamOwnerId,
+        appContext,
         flow: { deletedAt: null },
       },
       include: {
@@ -810,7 +871,7 @@ class FlowService {
     return updated;
   }
 
-  async duplicateSharedFlow(id, userId, appContext = "free") {
+  async duplicateSharedFlow(id, userId, appContext = "team") {
     // Get the flow if user has access
     const flowData = await this.getFlowByIdWithAccess(id, userId);
     if (!flowData) throw new AppError("Flow not found", 404, "NOT_FOUND");
@@ -875,10 +936,15 @@ class FlowService {
     const flows = await prisma.flow.findMany({
       where: {
         ownerId: userId,
-        teamId: null,
-        // Include both active and currently-marked-for-downgrade flows
-        // so the user can see what's at risk and pick from everything.
-        OR: [{ deletedAt: null }, { markedForDowngrade: true }],
+        // Personal workspace = teamId null OR a team the user owns (their Pro
+        // team folds into personal). Nest both OR-clauses under AND so they
+        // don't collide.
+        AND: [
+          { OR: await personalFlowTeamOr(userId) },
+          // Include both active and currently-marked-for-downgrade flows so
+          // the user can see what's at risk and pick from everything.
+          { OR: [{ deletedAt: null }, { markedForDowngrade: true }] },
+        ],
       },
       select: {
         id: true,
@@ -945,7 +1011,7 @@ class FlowService {
     }
 
     const allPersonal = await prisma.flow.findMany({
-      where: { ownerId: userId, teamId: null },
+      where: { ownerId: userId, OR: await personalFlowTeamOr(userId) },
       select: { id: true, deletedAt: true },
     });
     const selectedSet = new Set(selectedIds);
@@ -1003,7 +1069,11 @@ class FlowService {
       : null;
 
     const flowCount = await prisma.flow.count({
-      where: { ownerId: userId, teamId: null, deletedAt: null },
+      where: {
+        ownerId: userId,
+        deletedAt: null,
+        OR: await personalFlowTeamOr(userId),
+      },
     });
 
     const limit = user.proUnlimitedFlows

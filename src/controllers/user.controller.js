@@ -33,7 +33,7 @@ class UserController {
       }),
       prisma.team.findFirst({
         where: { teamOwnerId: userId, deletedAt: null },
-        select: { id: true },
+        select: { id: true, appContext: true },
       }),
     ]);
 
@@ -64,7 +64,7 @@ class UserController {
         resolvedHasPro = true;
       }
     } else if (ownsAnyTeam) {
-      resolvedPlan = "team";
+      resolvedPlan = ownsAnyTeam.appContext === "pro" ? "pro" : "team";
       resolvedHasPro = true;
     } else if (dbUser?.currentVersion === "team") {
       resolvedPlan = "team";

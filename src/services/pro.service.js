@@ -9,6 +9,136 @@ const FLOW_PRICING = {
 };
 
 class ProService {
+  /**
+   * Grant Pro from the mobile app (Flutter WebView), with NO Stripe charge.
+   * The purchase already happened in the App Store / Play Store, so this is
+   * called automatically by ProGuard once a `?app=pro` user is authenticated.
+   *
+   * Provisions three things atomically and idempotently:
+   *   1. 200 lifetime Pro AI credits (appContext='pro', planResetsAt=NULL —
+   *      Pro never refills; see aiCredit.service getOrCreateBalance).
+   *   2. User promotion: hasPro=true, currentVersion='pro', proPurchasedAt set.
+   *   3. The user's own Pro team (appContext='pro') so Pro flows get a stable
+   *      teamId workspace instead of NULL.
+   *
+   * Safe to call on every app launch: when everything already exists it returns
+   * `{ alreadyGranted: true }` without writing. Existing credit balances are
+   * never reset or doubled (upsert update is a no-op); the original
+   * proPurchasedAt is preserved.
+   *
+   * @param {string} userId
+   */
+  async grantFromMobile(userId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        hasPro: true,
+        proPurchasedAt: true,
+        currentVersion: true,
+      },
+    });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    const [existingProTeam, existingBalance] = await Promise.all([
+      prisma.team.findFirst({
+        where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
+        select: { id: true, name: true },
+      }),
+      prisma.aiCreditBalance.findUnique({
+        where: { userId_appContext: { userId, appContext: "pro" } },
+        select: { planCredits: true, planResetsAt: true },
+      }),
+    ]);
+
+    // Fully provisioned already → idempotent no-op (WebView calls this on every
+    // launch). No DB writes so the response returns in <10ms.
+    if (
+      user.hasPro &&
+      user.proPurchasedAt &&
+      existingProTeam &&
+      existingBalance
+    ) {
+      return {
+        alreadyGranted: true,
+        currentVersion: user.currentVersion,
+        hasPro: user.hasPro,
+        proPurchasedAt: user.proPurchasedAt,
+        planCredits: existingBalance.planCredits,
+        planResetsAt: existingBalance.planResetsAt,
+        proTeamId: existingProTeam.id,
+        proTeamName: existingProTeam.name,
+        message: "Pro already active",
+      };
+    }
+
+    // Preserve the original purchase date if Pro was partially provisioned.
+    const purchasedAt = user.proPurchasedAt || new Date();
+    const proTeamName = `${user.name || "My"}'s Pro Team`;
+
+    const proTeam = await prisma.$transaction(async (tx) => {
+      // 1. Pro AI credits — 200 lifetime, never resets. `update: {}` keeps any
+      //    existing balance/addons intact so a re-grant can never double them.
+      await tx.aiCreditBalance.upsert({
+        where: { userId_appContext: { userId, appContext: "pro" } },
+        create: {
+          userId,
+          appContext: "pro",
+          planCredits: 200,
+          addonCredits: 0,
+          planResetsAt: null,
+        },
+        update: {},
+      });
+
+      // 2. Promote the user to Pro.
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          hasPro: true,
+          currentVersion: "pro",
+          proPurchasedAt: purchasedAt,
+        },
+      });
+
+      // 3. Auto-create the user's personal Pro team (idempotent).
+      if (existingProTeam) return existingProTeam;
+
+      const team = await tx.team.create({
+        data: {
+          name: proTeamName,
+          teamOwnerId: userId,
+          appContext: "pro",
+          status: "active",
+          countMem: 1,
+        },
+        select: { id: true, name: true },
+      });
+      await tx.teamMember.create({
+        data: { teamId: team.id, userId, role: "OWNER" },
+      });
+      return team;
+    });
+
+    logger.info(
+      `[ProService.grantFromMobile] Pro granted to user ${userId} (team ${proTeam.id})`,
+    );
+
+    return {
+      alreadyGranted: false,
+      currentVersion: "pro",
+      hasPro: true,
+      proPurchasedAt: purchasedAt,
+      planCredits: 200,
+      planResetsAt: null,
+      proTeamId: proTeam.id,
+      proTeamName: proTeam.name,
+      message: "Pro granted successfully",
+    };
+  }
+
   async getAppStatus(userId) {
     console.log("[ProService.getAppStatus] userId:", userId);
     const user = await prisma.user.findUnique({

@@ -7,7 +7,7 @@ const linkPreviewCache = new Map();
 const CACHE_TTL = 60 * 60 * 1000;
 
 class ChatService {
-  async getChatGroups(userId, appContext = "free", teamId = null) {
+  async getChatGroups(userId, appContext = "team", teamId = null) {
     const groups = await prisma.chatGroup.findMany({
       where: {
         appContext,
@@ -68,7 +68,7 @@ class ChatService {
     return groupsWithUnread;
   }
 
-  async createChatGroup(userId, data, appContext = "free") {
+  async createChatGroup(userId, data, appContext) {
     // Build the unique member set up-front (creator + recipients, deduped)
     const memberIds = Array.from(
       new Set([
@@ -549,7 +549,7 @@ class ChatService {
     return { totalUnread, perGroup };
   }
 
-  async getSidebarData(userId, appContext = "free", activeTeamId = null) {
+  async getSidebarData(userId, appContext = "team", activeTeamId = null) {
     // App-isolation: in Pro workspace, only Pro-context teams are visible.
     const appCtxFilter = appContext === "pro" ? { appContext: "pro" } : {};
 
@@ -886,7 +886,7 @@ class ChatService {
     });
   }
 
-  async getAvailableMembers(groupId, userId, appContext = "free") {
+  async getAvailableMembers(groupId, userId, appContext = "team") {
     // Verify membership
     const isMember = await prisma.chatGroupUser.findFirst({
       where: { groupId, userId },
@@ -943,7 +943,7 @@ class ChatService {
     return teamGroups;
   }
 
-  async addMembers(groupId, userId, userIds, appContext = "free") {
+  async addMembers(groupId, userId, userIds, appContext = "team") {
     // Verify group exists
     const group = await prisma.chatGroup.findUnique({ where: { id: groupId } });
     if (!group) throw new AppError("Group not found", 404, "NOT_FOUND");

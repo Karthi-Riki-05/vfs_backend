@@ -8,7 +8,7 @@ const { sanitizeSvg, isSvgDangerous } = require("../utils/sanitizeSvg");
 
 class ChatController {
   getSidebar = asyncHandler(async (req, res) => {
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const data = await chatService.getSidebarData(
       req.user.id,
@@ -19,7 +19,7 @@ class ChatController {
   });
 
   getChatGroups = asyncHandler(async (req, res) => {
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const groups = await chatService.getChatGroups(
       req.user.id,
@@ -30,7 +30,7 @@ class ChatController {
   });
 
   createChatGroup = asyncHandler(async (req, res) => {
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     // Workspace scoping: a group always belongs to the active team.
     // teamId can come from body or the X-Team-Context header.
     const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
@@ -205,7 +205,7 @@ class ChatController {
   });
 
   getAvailableMembers = asyncHandler(async (req, res) => {
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const members = await chatService.getAvailableMembers(
       req.params.id,
       req.user.id,
@@ -215,7 +215,7 @@ class ChatController {
   });
 
   addMembers = asyncHandler(async (req, res) => {
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const result = await chatService.addMembers(
       req.params.id,
       req.user.id,

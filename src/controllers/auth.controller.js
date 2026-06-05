@@ -250,6 +250,18 @@ exports.validateUser = asyncHandler(async (req, res) => {
     { expiresIn: process.env.JWT_EXPIRES_IN || "7d" },
   );
 
+  const teamSub = await prisma.subscription.findFirst({
+    where: {
+      userId: user.id,
+      productType: { in: ["team_monthly", "team_yearly"] },
+      status: "active",
+    },
+    select: { id: true, expiresAt: true },
+  });
+  const hasTeamAccess =
+    !!teamSub &&
+    (!teamSub.expiresAt || new Date(teamSub.expiresAt) > new Date());
+
   res.json({
     success: true,
     data: {
@@ -259,6 +271,7 @@ exports.validateUser = asyncHandler(async (req, res) => {
       role: user.role,
       hasPro: user.hasPro,
       currentVersion: user.currentVersion,
+      hasTeamAccess,
       token,
     },
   });

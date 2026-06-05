@@ -37,33 +37,34 @@ class DashboardService {
     }
     return {
       ownerId: scopeInfo.userId,
+      appContext: appContext || "free",
       ...extra,
     };
   }
 
   async getStats(userId, appContext = "free", teamId = null) {
-    // Dashboard stats are a PERSONAL rollup — they always reflect ALL of the
-    // caller's own data regardless of the active workspace context. `teamId`
-    // is accepted for signature parity but intentionally IGNORED here: the
-    // per-team scoping still governs the flows LIST / activity / recent
-    // sections, just not this top-of-dashboard summary.
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
+    // Scope the flow counts to the active workspace:
+    //   - team context  → caller's own flows in that team
+    //   - personal      → caller's own flows in the active appContext
+    const flowWhere = teamId
+      ? { ownerId: userId, teamId, deletedAt: null }
+      : { ownerId: userId, appContext, deletedAt: null };
+
     const [totalFlows, editedThisMonth, sharedFlows, teamMembers] =
       await Promise.all([
-        // All flows owned by the user, every context combined.
-        prisma.flow.count({ where: { ownerId: userId, deletedAt: null } }),
+        prisma.flow.count({ where: flowWhere }),
         prisma.flow.count({
-          where: {
-            ownerId: userId,
-            deletedAt: null,
-            updatedAt: { gte: startOfMonth },
-          },
+          where: { ...flowWhere, updatedAt: { gte: startOfMonth } },
         }),
-        // Shared flows: all of the caller's own shares.
-        prisma.flowShare.count({ where: { sharedById: userId } }),
-        // Members of the team this user OWNS (joined teams don't count).
+        // Shared flows scoped to the same appContext (team context uses teamId implicitly).
+        teamId
+          ? prisma.flowShare.count({ where: { sharedById: userId } })
+          : prisma.flowShare.count({
+              where: { sharedById: userId, appContext },
+            }),
         this._getOwnedTeamMemberCount(userId),
       ]);
 

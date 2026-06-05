@@ -9,6 +9,7 @@ const logger = require("../utils/logger");
 const { sendEmail, emailTemplates } = require("../utils/email");
 const notificationService = require("./notification.service");
 const push = require("./push.service");
+const { personalFlowTeamOr } = require("../lib/personalFlowScope");
 
 function pushSafe(userId, notification) {
   // Fire-and-forget: never let a missing FCM token break the cron.
@@ -212,7 +213,11 @@ async function downgradeUser(pack, summary) {
 
   // 2) Decide whether the user needs the picker.
   const flows = await prisma.flow.findMany({
-    where: { ownerId: userId, teamId: null, deletedAt: null },
+    where: {
+      ownerId: userId,
+      deletedAt: null,
+      OR: await personalFlowTeamOr(userId),
+    },
     select: {
       id: true,
       updatedAt: true,

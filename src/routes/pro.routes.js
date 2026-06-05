@@ -11,6 +11,14 @@ const {
 // App status (current app, pro status, flow usage)
 router.get("/app-status", authenticate, proController.getAppStatus);
 
+// Grant Pro from the Pro app (App Store / Play Store purchase). Called
+// automatically by ProGuard when the user is in ?app=pro context — no Stripe
+// charge. The ?app=pro URL is trusted as proof of purchase (product decision),
+// so no WebView/mobile guard here; the grant is idempotent (one 200-credit
+// grant per account, re-grant is a no-op). `authenticate` is still required.
+// NOTE: mobileAppOnly.js is kept in the codebase for potential future use.
+router.post("/grant-from-mobile", authenticate, proController.grantFromMobile);
+
 // Switch between free and pro apps
 router.put(
   "/switch-app",

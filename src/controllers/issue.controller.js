@@ -4,10 +4,16 @@ const asyncHandler = require("../utils/asyncHandler");
 class IssueController {
   getIssues = asyncHandler(async (req, res) => {
     const teamId = req.query.teamId || req.headers["x-team-context"] || null;
-    const result = await issueService.getIssues(req.user.id, {
-      ...req.query,
-      teamId,
-    });
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const result = await issueService.getIssues(
+      req.user.id,
+      {
+        ...req.query,
+        teamId,
+      },
+      appContext,
+    );
     res.json({ success: true, data: result });
   });
 
@@ -18,10 +24,16 @@ class IssueController {
 
   createIssue = asyncHandler(async (req, res) => {
     const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
-    const issue = await issueService.createIssue(req.user.id, {
-      ...req.body,
-      teamId,
-    });
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const issue = await issueService.createIssue(
+      req.user.id,
+      {
+        ...req.body,
+        teamId,
+      },
+      appContext,
+    );
     res.status(201).json({ success: true, data: issue });
   });
 

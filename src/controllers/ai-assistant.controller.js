@@ -7,7 +7,7 @@ exports.chat = asyncHandler(async (req, res) => {
     req.user.id,
     message,
     conversationId,
-    req.user.currentVersion || "free",
+    req.headers["x-app-context"] || req.user.currentVersion || "team",
     userContext,
   );
   res.json({ success: true, data: result });
@@ -16,7 +16,7 @@ exports.chat = asyncHandler(async (req, res) => {
 exports.getContext = asyncHandler(async (req, res) => {
   const result = await aiAssistantService.getUserContext(
     req.user.id,
-    req.user.currentVersion || "free",
+    req.headers["x-app-context"] || req.user.currentVersion || "team",
   );
   res.json({ success: true, data: result });
 });
@@ -61,7 +61,7 @@ exports.generateDiagram = asyncHandler(async (req, res) => {
     message,
     existingXml || null,
     conversationId || null,
-    req.user.currentVersion || "free",
+    req.headers["x-app-context"] || req.user.currentVersion || "team",
   );
   res.json({ success: true, data: result });
 });
@@ -76,7 +76,7 @@ exports.listConversations = asyncHandler(async (req, res) => {
 exports.createConversation = asyncHandler(async (req, res) => {
   const result = await aiAssistantService.createConversation(
     req.user.id,
-    req.user.currentVersion || "free",
+    req.headers["x-app-context"] || req.user.currentVersion || "team",
   );
   res.json({ success: true, data: result });
 });
@@ -168,7 +168,7 @@ exports.analyzeDocument = asyncHandler(async (req, res) => {
     fileName,
     userMessage,
     conversationId,
-    req.user.currentVersion || "free",
+    req.headers["x-app-context"] || req.user.currentVersion || "team",
   );
   res.json({ success: true, data: result });
 });

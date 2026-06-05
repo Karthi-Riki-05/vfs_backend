@@ -30,7 +30,7 @@ class AiCreditController {
     // (used by tests / admin tools). Default to the user's current
     // workspace.
     const appContext =
-      req.query?.appContext || req.user.currentVersion || "free";
+      req.query?.appContext || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const balance = await aiCreditService.getBalance(
       userId,
@@ -47,7 +47,7 @@ class AiCreditController {
     }
 
     const userId = req.user.id;
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const [isDiagram, balance] = await Promise.all([
       aiDetectService.isDiagramRequest(message),
@@ -67,7 +67,7 @@ class AiCreditController {
   generateDiagram = asyncHandler(async (req, res) => {
     const { message, confirmed, conversationId, messageId } = req.body || {};
     const userId = req.user.id;
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
 
     if (!message || typeof message !== "string" || !message.trim()) {
@@ -180,7 +180,7 @@ class AiCreditController {
 
   generateFromDoc = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const confirmed =
       req.body?.confirmed === true ||
@@ -278,7 +278,7 @@ class AiCreditController {
     // Allow caller to override appContext (admin / test). Default to the
     // user's current workspace.
     const appContext =
-      req.body?.appContext || req.user.currentVersion || "free";
+      req.body?.appContext || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const amount = parseInt(credits, 10);
 
@@ -344,7 +344,7 @@ class AiCreditController {
   createAddonCheckout = asyncHandler(async (req, res) => {
     const { packType } = req.body || {};
     const userId = req.user.id;
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
 
     const pack = ADDON_PACK_MAP[packType];

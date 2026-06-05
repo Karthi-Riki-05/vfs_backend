@@ -2,7 +2,7 @@ const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 
 class ShapeService {
-  async getAllShapes(userId, appContext = "free", teamId = null) {
+  async getAllShapes(userId, appContext = "team", teamId = null) {
     // Public shapes are global. Private shapes follow strict workspace scoping
     // (DATA-LOSS-001): a joined team shows only shapes the user created in it;
     // personal shows shapes with NO team OR in a team the user OWNS (owned
@@ -10,9 +10,23 @@ class ShapeService {
     let ownedClause;
     if (teamId) {
       ownedClause = { ownerId: userId, teamId };
+    } else if (appContext === "pro") {
+      // Pro user without header — same defense-in-depth as flow.service: never
+      // include teamId=null shapes. Use the user's pro team for strict isolation.
+      const proTeam = await prisma.team.findFirst({
+        where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
+        select: { id: true },
+      });
+      ownedClause = {
+        ownerId: userId,
+        teamId: proTeam?.id ?? "__no_pro_team__",
+      };
     } else {
+      // Personal context = NULL team + team-app owned teams only.
+      // Pro-app owned teams (appContext='pro') are excluded so pro shapes
+      // don't leak into the team-app personal view (cross-app isolation).
       const ownedTeams = await prisma.team.findMany({
-        where: { teamOwnerId: userId, deletedAt: null },
+        where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
         select: { id: true },
       });
       const ownedTeamIds = ownedTeams.map((t) => t.id);
@@ -37,7 +51,19 @@ class ShapeService {
     });
   }
 
-  async createShape(userId, data, appContext = "free") {
+  async createShape(userId, data, appContext) {
+    let teamId = data.teamId || null;
+
+    // Auto-assign the pro team so pro shapes land in the correct bucket
+    // even when the caller doesn't pass an explicit teamId.
+    if (appContext === "pro" && !teamId) {
+      const proTeam = await prisma.team.findFirst({
+        where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
+        select: { id: true },
+      });
+      if (proTeam) teamId = proTeam.id;
+    }
+
     return await prisma.shape.create({
       data: {
         name: data.name,
@@ -50,8 +76,7 @@ class ShapeService {
         thumbnail: data.thumbnail,
         isPublic: data.isPublic || false,
         ownerId: userId,
-        // Tag the active workspace so the shape lands in the right bucket.
-        teamId: data.teamId || null,
+        teamId,
         appContext,
       },
     });

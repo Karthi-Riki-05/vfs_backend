@@ -4,7 +4,7 @@ const asyncHandler = require("../utils/asyncHandler");
 class ShapeController {
   getAllShapes = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const shapes = await shapeService.getAllShapes(userId, appContext, teamId);
     res.json({ success: true, data: shapes });
@@ -23,7 +23,7 @@ class ShapeController {
 
   createShape = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.user.currentVersion || "free";
+    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
     const shape = await shapeService.createShape(
       userId,
