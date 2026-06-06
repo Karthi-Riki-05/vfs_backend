@@ -2,11 +2,11 @@ const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 
 class ShapeGroupService {
-  async getAllGroups(userId, appContext = "free", teamId = null) {
-    // Own account (no teamId) shows ALL the user's groups (free-era included —
-    // DATA-LOSS-001); a joined team shows only the groups created in it.
+  async getAllGroups(userId, appContext = "team", teamId = null) {
+    // teamId scopes to a specific workspace; otherwise filter by appContext
+    // so Team-app groups stay invisible in Pro app and vice versa.
     return await prisma.shapeGroup.findMany({
-      where: { userId, ...(teamId ? { teamId } : {}) },
+      where: { userId, ...(teamId ? { teamId } : { appContext }) },
       orderBy: { createdAt: "desc" },
       include: { _count: { select: { shapes: true } } },
     });
@@ -21,7 +21,7 @@ class ShapeGroupService {
     return group;
   }
 
-  async createGroup(userId, data, appContext = "free") {
+  async createGroup(userId, data, appContext = "team") {
     return await prisma.shapeGroup.create({
       data: {
         name: data.name,

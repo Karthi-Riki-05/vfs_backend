@@ -2,22 +2,52 @@ const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const aiCreditService = require("../services/aiCredit.service");
 const aiDetectService = require("../services/aiDetect.service");
-const { getStripe } = require("../lib/stripe");
+const { getStripe, getStripePrice, isLiveMode } = require("../lib/stripe");
 const { prisma } = require("../lib/prisma");
+
+// When the Team-app header is sent without a specific team selection, verify the
+// user actually owns an active team subscription before billing the team pool.
+// Without this guard, a free user in the Team app silently drains the
+// auto-created 300-credit team bucket instead of their 20-credit personal pool.
+async function resolveAppContextForBilling(
+  userId,
+  headerCtx,
+  teamId,
+  currentVersion,
+) {
+  if (headerCtx === "team" && !teamId) {
+    const ownsTeamPlan = await prisma.subscription.findFirst({
+      where: {
+        userId,
+        status: { in: ["active", "trialing"] },
+        plan: { tier: { gte: 2 } },
+      },
+      select: { id: true },
+    });
+    if (!ownsTeamPlan) return currentVersion || "free";
+  }
+  return headerCtx || currentVersion || "free";
+}
 
 const ADDON_PACK_MAP = {
   starter: {
-    priceIdEnv: "STRIPE_AI_ADDON_STARTER_PRICE",
+    testPriceEnv: "STRIPE_TEST_AI_ADDON_STARTER_PRICE",
+    livePriceEnv: "STRIPE_LIVE_AI_ADDON_STARTER_PRICE",
+    legacyPriceEnv: "STRIPE_AI_ADDON_STARTER_PRICE",
     credits: 25,
     label: "AI Addon - Starter (25 credits)",
   },
   standard: {
-    priceIdEnv: "STRIPE_AI_ADDON_STANDARD_PRICE",
+    testPriceEnv: "STRIPE_TEST_AI_ADDON_STANDARD_PRICE",
+    livePriceEnv: "STRIPE_LIVE_AI_ADDON_STANDARD_PRICE",
+    legacyPriceEnv: "STRIPE_AI_ADDON_STANDARD_PRICE",
     credits: 60,
     label: "AI Addon - Standard (60 credits)",
   },
   proppack: {
-    priceIdEnv: "STRIPE_AI_ADDON_PROPPACK_PRICE",
+    testPriceEnv: "STRIPE_TEST_AI_ADDON_PROPPACK_PRICE",
+    livePriceEnv: "STRIPE_LIVE_AI_ADDON_PROPPACK_PRICE",
+    legacyPriceEnv: "STRIPE_AI_ADDON_PROPPACK_PRICE",
     credits: 150,
     label: "AI Addon - Pro Pack (150 credits)",
   },
@@ -27,11 +57,17 @@ class AiCreditController {
   getBalance = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     // Allow callers to read a specific workspace's balance via query
-    // (used by tests / admin tools). Default to the user's current
-    // workspace.
-    const appContext =
-      req.query?.appContext || req.user.currentVersion || "team";
+    // (used by tests / admin tools). Otherwise resolve from the header,
+    // guarding against free users claiming the team pool.
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const appContext = req.query?.appContext
+      ? req.query.appContext
+      : await resolveAppContextForBilling(
+          userId,
+          req.headers["x-app-context"],
+          teamId,
+          req.user.currentVersion,
+        );
     const balance = await aiCreditService.getBalance(
       userId,
       appContext,
@@ -47,8 +83,13 @@ class AiCreditController {
     }
 
     const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const appContext = await resolveAppContextForBilling(
+      userId,
+      req.headers["x-app-context"],
+      teamId,
+      req.user.currentVersion,
+    );
     const [isDiagram, balance] = await Promise.all([
       aiDetectService.isDiagramRequest(message),
       aiCreditService.getBalance(userId, appContext, teamId),
@@ -67,8 +108,13 @@ class AiCreditController {
   generateDiagram = asyncHandler(async (req, res) => {
     const { message, confirmed, conversationId, messageId } = req.body || {};
     const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const appContext = await resolveAppContextForBilling(
+      userId,
+      req.headers["x-app-context"],
+      teamId,
+      req.user.currentVersion,
+    );
 
     if (!message || typeof message !== "string" || !message.trim()) {
       throw new AppError("Message is required", 400, "VALIDATION_ERROR");
@@ -180,8 +226,13 @@ class AiCreditController {
 
   generateFromDoc = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const appContext = await resolveAppContextForBilling(
+      userId,
+      req.headers["x-app-context"],
+      teamId,
+      req.user.currentVersion,
+    );
     const confirmed =
       req.body?.confirmed === true ||
       req.body?.confirmed === "true" ||
@@ -344,7 +395,8 @@ class AiCreditController {
   createAddonCheckout = asyncHandler(async (req, res) => {
     const { packType } = req.body || {};
     const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
 
     const pack = ADDON_PACK_MAP[packType];
@@ -356,10 +408,15 @@ class AiCreditController {
       );
     }
 
-    const priceId = process.env[pack.priceIdEnv];
-    if (!priceId || priceId === "placeholder") {
+    const priceId = getStripePrice(
+      pack.testPriceEnv,
+      pack.livePriceEnv,
+      pack.legacyPriceEnv,
+    );
+    if (!priceId) {
+      const modeVar = isLiveMode() ? pack.livePriceEnv : pack.testPriceEnv;
       throw new AppError(
-        `Stripe price not configured for ${packType}. Run setup-stripe-products-inr.js and populate ${pack.priceIdEnv}.`,
+        `Stripe price not configured for ${packType}. Set ${modeVar} or ${pack.legacyPriceEnv} in your .env file.`,
         503,
         "PRICE_NOT_CONFIGURED",
       );

@@ -1,5 +1,9 @@
 const { prisma } = require("../lib/prisma");
-const { getStripe, getStripeCurrency } = require("../lib/stripe");
+const {
+  getStripe,
+  getStripeCurrency,
+  getStripeWebhookSecret,
+} = require("../lib/stripe");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const proService = require("./pro.service");
@@ -55,7 +59,7 @@ class PaymentService {
 
   async handleWebhook(rawBody, signature) {
     const stripe = getStripe();
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    const webhookSecret = getStripeWebhookSecret();
     if (!webhookSecret)
       throw new AppError("Webhook secret not configured", 503, "CONFIG_ERROR");
 

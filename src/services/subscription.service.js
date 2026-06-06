@@ -1,5 +1,10 @@
 const { prisma } = require("../lib/prisma");
-const { getStripe, getStripeCurrency } = require("../lib/stripe");
+const {
+  getStripe,
+  getStripeCurrency,
+  getStripePrice,
+  getStripeWebhookSecret,
+} = require("../lib/stripe");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const { sendEmail, emailTemplates } = require("../utils/email");
@@ -28,21 +33,39 @@ class SubscriptionService {
    * Returns the Stripe Price ID for the given plan type.
    * Falls back to price_data if env vars are not set.
    */
+  _getProductId() {
+    return getStripePrice(
+      "STRIPE_TEST_PRODUCT_ID",
+      "STRIPE_LIVE_PRODUCT_ID",
+      "STRIPE_PRODUCT_ID",
+    );
+  }
+
   _getPriceId(plan) {
-    const val = (envVar) => {
-      const v = process.env[envVar];
-      return v && v !== "placeholder" ? v : null;
-    };
     if (plan === "monthly") {
       return (
-        val("STRIPE_TEAM_MONTHLY_PRICE") ||
-        val("STRIPE_MONTHLY_PRICE_ID") ||
-        null
+        getStripePrice(
+          "STRIPE_TEST_TEAM_MONTHLY_PRICE",
+          "STRIPE_LIVE_TEAM_MONTHLY_PRICE",
+          "STRIPE_TEAM_MONTHLY_PRICE",
+        ) ||
+        (process.env.STRIPE_MONTHLY_PRICE_ID &&
+        process.env.STRIPE_MONTHLY_PRICE_ID !== "placeholder"
+          ? process.env.STRIPE_MONTHLY_PRICE_ID
+          : null)
       );
     }
     if (plan === "yearly") {
       return (
-        val("STRIPE_TEAM_YEARLY_PRICE") || val("STRIPE_YEARLY_PRICE_ID") || null
+        getStripePrice(
+          "STRIPE_TEST_TEAM_YEARLY_PRICE",
+          "STRIPE_LIVE_TEAM_YEARLY_PRICE",
+          "STRIPE_TEAM_YEARLY_PRICE",
+        ) ||
+        (process.env.STRIPE_YEARLY_PRICE_ID &&
+        process.env.STRIPE_YEARLY_PRICE_ID !== "placeholder"
+          ? process.env.STRIPE_YEARLY_PRICE_ID
+          : null)
       );
     }
     return null;
@@ -83,7 +106,7 @@ class SubscriptionService {
     }
 
     // 2. Resolve a Product to attach the Price to.
-    let productId = process.env.STRIPE_PRODUCT_ID || null;
+    let productId = this._getProductId();
     if (!productId) {
       const product = await stripe.products.create({
         name: `Value Charts Team Plan (${plan})`,
@@ -125,8 +148,8 @@ class SubscriptionService {
       id: itemId,
       price_data: {
         currency: getStripeCurrency(),
-        product: process.env.STRIPE_PRODUCT_ID || undefined,
-        product_data: process.env.STRIPE_PRODUCT_ID
+        product: this._getProductId() || undefined,
+        product_data: this._getProductId()
           ? undefined
           : {
               name: `Value Charts ${plan === "yearly" ? "Yearly" : "Monthly"} Plan`,
@@ -203,8 +226,8 @@ class SubscriptionService {
       : {
           price_data: {
             currency: getStripeCurrency(),
-            product: process.env.STRIPE_PRODUCT_ID || undefined,
-            product_data: process.env.STRIPE_PRODUCT_ID
+            product: this._getProductId() || undefined,
+            product_data: this._getProductId()
               ? undefined
               : {
                   name: `Value Charts ${plan === "yearly" ? "Yearly" : "Monthly"} Plan`,
@@ -673,8 +696,8 @@ class SubscriptionService {
           : {
               price_data: {
                 currency: getStripeCurrency(),
-                product: process.env.STRIPE_PRODUCT_ID || undefined,
-                product_data: process.env.STRIPE_PRODUCT_ID
+                product: this._getProductId() || undefined,
+                product_data: this._getProductId()
                   ? undefined
                   : {
                       name: `Value Charts ${plan === "yearly" ? "Yearly" : "Monthly"} Plan`,
@@ -898,7 +921,7 @@ class SubscriptionService {
 
   async handleWebhook(rawBody, signature) {
     const stripe = getStripe();
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    const webhookSecret = getStripeWebhookSecret();
     if (!webhookSecret)
       throw new AppError("Webhook secret not configured", 503, "CONFIG_ERROR");
 

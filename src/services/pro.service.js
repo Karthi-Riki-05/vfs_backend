@@ -1,5 +1,9 @@
 const { prisma } = require("../lib/prisma");
-const { getStripe, getStripeCurrency } = require("../lib/stripe");
+const {
+  getStripe,
+  getStripeCurrency,
+  getStripePrice,
+} = require("../lib/stripe");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 
@@ -971,8 +975,16 @@ class ProService {
 
     const priceId =
       plan === "unlimited"
-        ? process.env.STRIPE_FLOW_UNLIMITED_PRICE_ID
-        : process.env.STRIPE_FLOW_STANDARD_PRICE_ID;
+        ? getStripePrice(
+            "STRIPE_TEST_FLOW_UNLIMITED_PRICE_ID",
+            "STRIPE_LIVE_FLOW_UNLIMITED_PRICE_ID",
+            "STRIPE_FLOW_UNLIMITED_PRICE_ID",
+          )
+        : getStripePrice(
+            "STRIPE_TEST_FLOW_STANDARD_PRICE_ID",
+            "STRIPE_LIVE_FLOW_STANDARD_PRICE_ID",
+            "STRIPE_FLOW_STANDARD_PRICE_ID",
+          );
     if (!priceId) {
       throw new AppError(
         `Stripe price ID for flow_${plan} not configured`,

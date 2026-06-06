@@ -107,7 +107,7 @@ class SubscriptionController {
     const appContext =
       req.query?.appContext === "all"
         ? null
-        : req.query?.appContext || req.user.currentVersion || "team";
+        : req.headers["x-app-context"] || req.user.currentVersion || "team";
     const result = await subscriptionService.getHistory(req.user.id, {
       ...req.query,
       appContext,

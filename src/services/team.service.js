@@ -5,7 +5,7 @@ const { sendTeamInviteEmail } = require("../utils/email");
 const notificationService = require("./notification.service");
 
 class TeamService {
-  async getTeams(userId, options = {}, appContext = "free") {
+  async getTeams(userId, options = {}, appContext = "team") {
     const { page = 1, limit = 20 } = options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
@@ -54,7 +54,7 @@ class TeamService {
     };
   }
 
-  async getTeamById(teamId, userId, appContext = "free") {
+  async getTeamById(teamId, userId, appContext = "team") {
     const where = {
       id: teamId,
       OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
@@ -80,7 +80,7 @@ class TeamService {
     return team;
   }
 
-  async createTeam(userId, data = {}, appContext = "free") {
+  async createTeam(userId, data = {}, appContext = "team") {
     return await prisma.$transaction(async (tx) => {
       const team = await tx.team.create({
         data: {
@@ -253,7 +253,7 @@ class TeamService {
     });
   }
 
-  async createInvite(teamId, userId, emails, appContext = "free") {
+  async createInvite(teamId, userId, emails, appContext = "team") {
     // The resolved team (owner row or member row). MUST be declared — class
     // methods run in strict mode, so the bare `inviteTeam = ...` assignments
     // below otherwise throw ReferenceError and every invite 500s.

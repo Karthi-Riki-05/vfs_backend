@@ -68,7 +68,7 @@ function planCreditsFor(appContext, isLegacyPro = false) {
   return PLAN_CREDITS[appContext] || PLAN_CREDITS.free;
 }
 
-async function getOrCreateBalance(userId, appContext = "free") {
+async function getOrCreateBalance(userId, appContext = "team") {
   // Composite (userId, appContext) key — separate balance per workspace.
   // A user can hold a Free balance AND a Team balance independently;
   // credits never leak between apps.
@@ -110,7 +110,7 @@ async function getOrCreateBalance(userId, appContext = "free") {
   return balance;
 }
 
-async function hasCredits(userId, appContext = "free", activeTeamId = null) {
+async function hasCredits(userId, appContext = "team", activeTeamId = null) {
   const billing = await resolveBillingUser(userId, activeTeamId);
   const ctx = billing.appContext || appContext;
   const balance = await getOrCreateBalance(billing.userId, ctx);
@@ -121,7 +121,7 @@ async function deductCredit(
   userId,
   feature,
   model,
-  appContext = "free",
+  appContext = "team",
   activeTeamId = null,
 ) {
   // Deductions hit the billing user (team owner in team context, self in
@@ -190,7 +190,7 @@ async function deductCredit(
 async function addAddonCredits(
   userId,
   credits,
-  appContext = "free",
+  appContext = "team",
   activeTeamId = null,
 ) {
   const billing = await resolveBillingUser(userId, activeTeamId);
@@ -202,7 +202,7 @@ async function addAddonCredits(
   });
 }
 
-async function getBalance(userId, appContext = "free", activeTeamId = null) {
+async function getBalance(userId, appContext = "team", activeTeamId = null) {
   // resolveBillingUser now centralizes the team-owner fallback, so display,
   // gating and deduction all resolve to the same (team) pool. See C8.
   const billing = await resolveBillingUser(userId, activeTeamId);

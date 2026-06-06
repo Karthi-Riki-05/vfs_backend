@@ -21,11 +21,15 @@ require("dotenv").config({
   path: require("path").resolve(__dirname, "../../.env"),
 });
 
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const { getStripe, isLiveMode } = require("../src/lib/stripe");
 
 async function setup() {
+  const live = isLiveMode();
+  const prefix = live ? "STRIPE_LIVE" : "STRIPE_TEST";
+  const stripe = getStripe();
+
   console.log("Setting up Stripe products — v3 pricing (USD base)...");
-  console.log("Mode:", process.env.STRIPE_MODE || "test");
+  console.log("Mode:", live ? "live" : "test", `(prefix: ${prefix}_*)`);
 
   // ── Team subscription (per-seat) ─────────────────────────────────────────
   const teamProduct = await stripe.products.create({
@@ -116,14 +120,15 @@ async function setup() {
   });
 
   console.log("\n✅ Products and prices created. Add to your .env:\n");
-  console.log(`STRIPE_TEAM_MONTHLY_PRICE=${teamMonthlyPrice.id}`);
-  console.log(`STRIPE_TEAM_YEARLY_PRICE=${teamYearlyPrice.id}`);
-  console.log(`STRIPE_PRO_BASE_PRICE=${proBasePrice.id}`);
-  console.log(`STRIPE_FLOW_STANDARD_PRICE=${flowStandardPrice.id}`);
-  console.log(`STRIPE_FLOW_UNLIMITED_PRICE=${flowUnlimitedPrice.id}`);
-  console.log(`STRIPE_AI_ADDON_STARTER_PRICE=${aiTopup50.id}`);
-  console.log(`STRIPE_AI_ADDON_STANDARD_PRICE=${aiTopup100.id}`);
-  console.log(`STRIPE_AI_ADDON_PROPPACK_PRICE=${aiTopup200.id}`);
+  console.log(`${prefix}_PRODUCT_ID=${teamProduct.id}`);
+  console.log(`${prefix}_TEAM_MONTHLY_PRICE=${teamMonthlyPrice.id}`);
+  console.log(`${prefix}_TEAM_YEARLY_PRICE=${teamYearlyPrice.id}`);
+  console.log(`${prefix}_PRO_BASE_PRICE=${proBasePrice.id}`);
+  console.log(`${prefix}_FLOW_STANDARD_PRICE_ID=${flowStandardPrice.id}`);
+  console.log(`${prefix}_FLOW_UNLIMITED_PRICE_ID=${flowUnlimitedPrice.id}`);
+  console.log(`${prefix}_AI_ADDON_STARTER_PRICE=${aiTopup50.id}`);
+  console.log(`${prefix}_AI_ADDON_STANDARD_PRICE=${aiTopup100.id}`);
+  console.log(`${prefix}_AI_ADDON_PROPPACK_PRICE=${aiTopup200.id}`);
   console.log("\nThen restart the backend: docker compose restart backend\n");
 }
 

@@ -7,17 +7,19 @@ async function createNotification(
   message,
   actionUrl = null,
   metadata = null,
+  appContext = "team",
 ) {
   return prisma.notification.create({
-    data: { userId, type, title, message, actionUrl, metadata },
+    data: { userId, type, title, message, actionUrl, metadata, appContext },
   });
 }
 
 async function getUserNotifications(
   userId,
-  { unreadOnly = false, limit = 20 } = {},
+  { unreadOnly = false, limit = 20, appContext = null } = {},
 ) {
   const where = { userId };
+  if (appContext) where.appContext = appContext;
   if (unreadOnly) where.isRead = false;
   return prisma.notification.findMany({
     where,
@@ -43,8 +45,10 @@ async function markAllAsRead(userId) {
   return { count: updated.count };
 }
 
-async function getUnreadCount(userId) {
-  return prisma.notification.count({ where: { userId, isRead: false } });
+async function getUnreadCount(userId, appContext = null) {
+  const where = { userId, isRead: false };
+  if (appContext) where.appContext = appContext;
+  return prisma.notification.count({ where });
 }
 
 module.exports = {
