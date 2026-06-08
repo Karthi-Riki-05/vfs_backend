@@ -50,7 +50,8 @@ class FlowController {
 
   createFlow = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     // teamId may also come from a header (axios interceptor) so both are
     // accepted.
     const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
@@ -76,7 +77,8 @@ class FlowController {
 
   duplicateFlow = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const flow = await flowService.duplicateFlow(
       req.params.id,
       userId,
@@ -98,17 +100,21 @@ class FlowController {
   });
 
   getFavorites = asyncHandler(async (req, res) => {
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const flows = await flowService.getFavorites(req.user.id, appContext);
     res.json({ success: true, data: flows });
   });
 
   getTrash = asyncHandler(async (req, res) => {
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const result = await flowService.getTrash(
       req.user.id,
       req.query,
       appContext,
+      teamId,
     );
     res.json({ success: true, data: result });
   });
@@ -127,7 +133,8 @@ class FlowController {
   });
 
   emptyTrash = asyncHandler(async (req, res) => {
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const result = await flowService.emptyTrash(req.user.id, appContext);
     res.json({
       success: true,
@@ -139,7 +146,8 @@ class FlowController {
 
   shareFlow = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const results = await flowService.shareFlow(
       req.params.id,
       userId,
@@ -180,7 +188,8 @@ class FlowController {
 
   getAllFlowsWithShared = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const { search, page, limit, nonEmpty } = req.query;
     const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const own = await flowService.getAllFlows(
@@ -220,7 +229,8 @@ class FlowController {
   });
 
   duplicateSharedFlow = asyncHandler(async (req, res) => {
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const flow = await flowService.duplicateSharedFlow(
       req.params.id,
       req.user.id,

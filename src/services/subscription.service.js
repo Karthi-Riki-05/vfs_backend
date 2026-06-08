@@ -1115,6 +1115,7 @@ class SubscriptionService {
           status: "active",
           teamMem: members,
           countMem: 1,
+          verifyTeam: "system",
         },
       });
       // Add the owner as the first team member (mirrors team.service.createTeam).

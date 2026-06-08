@@ -116,6 +116,13 @@ DELETE FROM transaction_logs a USING transaction_logs b
 CREATE UNIQUE INDEX IF NOT EXISTS transaction_logs_txn_id_key ON transaction_logs (txn_id);
 CREATE INDEX IF NOT EXISTS subscriptions_payment_id_idx ON subscriptions (payment_id);
 CREATE INDEX IF NOT EXISTS subscriptions_status_product_type_idx ON subscriptions (status, product_type);
+-- bcrypt → argon2 migration: flag for legacy bcrypt users (2026-06-08).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_legacy_bcrypt BOOLEAN NOT NULL DEFAULT false;
+-- Mark existing system/workspace teams so they are hidden from the Teams UI.
+UPDATE teams SET verify_team = 'system'
+  WHERE app_context = 'pro' AND (verify_team IS NULL OR verify_team != 'system');
+UPDATE teams SET verify_team = 'system'
+  WHERE app_context = 'team' AND (name IS NULL OR name = '') AND (verify_team IS NULL OR verify_team != 'system');
 ENDSQL
 log "Schema changes applied OK"
 

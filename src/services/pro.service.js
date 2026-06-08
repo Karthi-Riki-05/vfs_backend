@@ -117,6 +117,7 @@ class ProService {
           appContext: "pro",
           status: "active",
           countMem: 1,
+          verifyTeam: "system",
         },
         select: { id: true, name: true },
       });

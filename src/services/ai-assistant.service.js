@@ -1043,12 +1043,14 @@ class AiAssistantService {
     return block;
   }
 
-  async getHistory(userId, page = 1, limit = 20) {
+  async getHistory(userId, page = 1, limit = 20, appContext = null) {
     const skip = (page - 1) * limit;
+    const where = { userId };
+    if (appContext) where.appContext = appContext;
 
     const [conversations, total] = await Promise.all([
       prisma.aiConversation.findMany({
-        where: { userId },
+        where,
         orderBy: { updatedAt: "desc" },
         skip,
         take: limit,
@@ -1061,7 +1063,7 @@ class AiAssistantService {
           _count: { select: { messages: true } },
         },
       }),
-      prisma.aiConversation.count({ where: { userId } }),
+      prisma.aiConversation.count({ where }),
     ]);
 
     return {

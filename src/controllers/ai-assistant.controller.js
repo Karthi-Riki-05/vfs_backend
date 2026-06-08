@@ -69,7 +69,14 @@ exports.generateDiagram = asyncHandler(async (req, res) => {
 exports.listConversations = asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 50);
-  const result = await aiAssistantService.getHistory(req.user.id, page, limit);
+  const appContext =
+    req.headers["x-app-context"] || req.user.currentVersion || null;
+  const result = await aiAssistantService.getHistory(
+    req.user.id,
+    page,
+    limit,
+    appContext,
+  );
   res.json({ success: true, data: result });
 });
 

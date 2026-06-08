@@ -214,6 +214,7 @@ model User {
   flowAddonCurrentPeriodEnd   DateTime?   @map("flow_addon_current_period_end")
   currentVersion              UserVersion @default(free) @map("current_version")
   isLegacyPro                 Boolean     @default(false) @map("is_legacy_pro")
+  isLegacyBcrypt              Boolean     @default(false) @map("is_legacy_bcrypt")
   // WebView-safe AI-billing context: the team whose AI-credit pool the user
   // last chose to bill (null = personal). Persisted server-side so a killed/
   // relaunched Flutter WebView restores the selection without sessionStorage.

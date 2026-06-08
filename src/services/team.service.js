@@ -25,6 +25,12 @@ class TeamService {
     } else {
       where.appContext = { not: "pro" };
     }
+    // Hide system/workspace teams auto-created during subscription.
+    // Include teams where verifyTeam is NULL (user-created before this field existed)
+    // or any value other than "system".
+    where.AND = [
+      { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
+    ];
 
     const [teams, total] = await Promise.all([
       prisma.team.findMany({

@@ -1,5 +1,6 @@
 const { prisma } = require("../lib/prisma");
 const argon2 = require("argon2");
+const bcryptjs = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const asyncHandler = require("../utils/asyncHandler");
@@ -218,7 +219,21 @@ exports.validateUser = asyncHandler(async (req, res) => {
     throw new AppError("Invalid credentials", 401, "INVALID_CREDENTIALS");
   }
 
-  const isValid = await argon2.verify(user.password, password);
+  let isValid;
+  if (user.isLegacyBcrypt) {
+    // $2y$ (PHP/Laravel bcrypt) — bcryptjs handles it natively
+    isValid = await bcryptjs.compare(password, user.password);
+    if (isValid) {
+      // Rehash with argon2 so next login is native
+      const newHash = await argon2.hash(password);
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { password: newHash, isLegacyBcrypt: false },
+      });
+    }
+  } else {
+    isValid = await argon2.verify(user.password, password);
+  }
 
   if (!isValid) {
     logger.warn(`Failed login attempt for: ${email}`);

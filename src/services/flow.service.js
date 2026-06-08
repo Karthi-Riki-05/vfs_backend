@@ -321,13 +321,51 @@ class FlowService {
     });
   }
 
-  async getTrash(userId, options = {}, appContext = "team") {
+  async getTrash(userId, options = {}, appContext = "team", teamId = null) {
     const { page = 1, limit = 20 } = options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // Trash is per-user, not per-tier — show everything the user soft-deleted.
     const where = { ownerId: userId, deletedAt: { not: null } };
+
+    // Scope trash to the active workspace — same logic as getAllFlows.
+    if (teamId) {
+      const isOwnTeamAppTeam = await prisma.team.findFirst({
+        where: {
+          id: teamId,
+          teamOwnerId: userId,
+          appContext: "team",
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (isOwnTeamAppTeam) {
+        where.AND = [{ OR: [{ teamId: null }, { teamId }] }];
+      } else {
+        where.teamId = teamId;
+      }
+    } else if (appContext === "pro") {
+      const proTeam = await prisma.team.findFirst({
+        where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
+        select: { id: true },
+      });
+      where.teamId = proTeam ? proTeam.id : "__no_pro_team__";
+    } else {
+      const ownedTeams = await prisma.team.findMany({
+        where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
+        select: { id: true },
+      });
+      const ownedTeamIds = ownedTeams.map((t) => t.id);
+      where.AND = [
+        {
+          OR: [
+            { teamId: null },
+            ...(ownedTeamIds.length ? [{ teamId: { in: ownedTeamIds } }] : []),
+          ],
+        },
+      ];
+    }
+
     const [flows, total] = await Promise.all([
       prisma.flow.findMany({
         where,
