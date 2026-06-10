@@ -11,6 +11,13 @@ router.use(authenticate);
 router.get("/credits", aiCreditController.getBalance);
 router.post("/detect", aiCreditController.detectIntent);
 router.post("/generate-diagram", aiLimiter, aiCreditController.generateDiagram);
+// Async background-job variant — returns a jobId immediately (no 504), client polls.
+router.post(
+  "/generate-diagram-job",
+  aiLimiter,
+  aiCreditController.startDiagramJob,
+);
+router.get("/generate-diagram-job/:jobId", aiCreditController.getDiagramJob);
 router.post(
   "/generate-from-doc",
   aiLimiter,

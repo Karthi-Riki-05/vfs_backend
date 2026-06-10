@@ -282,6 +282,17 @@ class UserController {
   setActiveContext = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const { teamId } = req.body || {};
+    // App mode decides WHICH context field to write. Prefer the explicit body
+    // value (ProGuard posts via raw fetch with appMode:'pro'); fall back to the
+    // X-App-Context header (axios attaches it on every request). The Pro app
+    // writes lastActiveProTeamId so it never overwrites the Team app's context.
+    const appMode = (
+      req.body?.appMode ||
+      req.headers["x-app-context"] ||
+      "team"
+    )
+      .toString()
+      .toLowerCase();
 
     // Validate: when selecting a team, the caller must be a member OR the
     // owner of it — otherwise we'd let someone bill a team they can't access.
@@ -309,20 +320,33 @@ class UserController {
 
     await prisma.user.update({
       where: { id: userId },
-      data: { lastActiveTeamId: teamId || null },
+      data:
+        appMode === "pro"
+          ? { lastActiveProTeamId: teamId || null }
+          : { lastActiveTeamId: teamId || null },
     });
 
     res.json({ success: true, data: { teamId: teamId || null } });
   });
 
   getActiveContext = asyncHandler(async (req, res) => {
+    // Read the context for the calling app only. The Pro app gets its own
+    // lastActiveProTeamId; everything else (Team app, web) gets lastActiveTeamId
+    // — so a proTeamId can never be served to the Team app (cross-app isolation).
+    const appMode = (req.headers["x-app-context"] || "team")
+      .toString()
+      .toLowerCase();
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
-      select: { lastActiveTeamId: true },
+      select: { lastActiveTeamId: true, lastActiveProTeamId: true },
     });
+    const teamId =
+      appMode === "pro"
+        ? user?.lastActiveProTeamId || null
+        : user?.lastActiveTeamId || null;
     res.json({
       success: true,
-      data: { teamId: user?.lastActiveTeamId || null },
+      data: { teamId },
     });
   });
 }

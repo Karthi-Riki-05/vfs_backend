@@ -220,6 +220,10 @@ model User {
   // relaunched Flutter WebView restores the selection without sessionStorage.
   // Billing-only — NOT a data scope (flows/dashboard stay owner-private).
   lastActiveTeamId            String?     @map("last_active_team_id")
+  // Separate active-context for the Pro app (?app=pro). The Pro app stores its
+  // proTeamId here so it never bleeds into the Team app's lastActiveTeamId —
+  // each app reads back its own context (cross-app isolation). Billing-only.
+  lastActiveProTeamId         String?     @map("last_active_pro_team_id")
   refreshToken                String?     @map("refresh_token") @db.Text
 
   // --- Granular permissions (from legacy) ---
@@ -285,6 +289,7 @@ model User {
   flowSharesReceived   FlowShare[]           @relation("FlowShareSharedWith")
   aiConsent            AiConsent?
   aiConversations      AiConversation[]
+  aiJobs               AiJob[]
   aiCreditBalances     AiCreditBalance[]
   aiCreditUsages       AiCreditUsage[]
   flowVersions         FlowVersion[]         @relation("FlowVersionSavedBy")
@@ -1458,6 +1463,37 @@ model AiMessage {
 
   @@index([conversationId])
   @@map("ai_messages")
+}
+
+// ============================================================
+// 39b. AI JOB
+// Async diagram-generation job. Generation can exceed a reverse-proxy
+// gateway timeout (504); the start endpoint creates a job and returns
+// immediately, generation runs in the background, and the client polls
+// this row for the result. Short-lived (cleared after completion read).
+// ============================================================
+
+model AiJob {
+  id             String    @id @default(cuid())
+  userId         String    @map("user_id")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status         String    @default("pending") // pending | processing | done | error
+  prompt         String?   @db.Text
+  conversationId String?   @map("conversation_id")
+  messageId      String?   @map("message_id")
+  appContext     String?   @map("app_context")
+  teamId         String?   @map("team_id")
+  result         String?   @db.Text // generated mxGraph XML
+  model          String?
+  remainingCredits Int?    @map("remaining_credits")
+  error          String?   @db.Text
+  completedAt    DateTime? @map("completed_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([status])
+  @@map("ai_jobs")
 }
 
 // ============================================================

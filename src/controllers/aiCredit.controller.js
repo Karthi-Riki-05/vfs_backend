@@ -29,6 +29,148 @@ async function resolveAppContextForBilling(
   return headerCtx || currentVersion || "free";
 }
 
+// Persist a generated diagram into the Ai conversation/message history.
+// Shared by the synchronous generateDiagram path and the async job processor
+// so both store identical history. messageId is only updated when it refers to
+// a REAL persisted AiMessage (the chat suggestion is a client-only `local-…`
+// id that does not exist in the DB); otherwise a fresh message pair is created.
+async function persistDiagramToConversation({
+  userId,
+  message,
+  xml,
+  model,
+  appContext,
+  conversationId,
+  messageId,
+}) {
+  let convId = conversationId || null;
+  if (convId) {
+    const owned = await prisma.aiConversation.findFirst({
+      where: { id: convId, userId },
+      select: { id: true },
+    });
+    if (!owned) convId = null;
+  }
+  if (!convId) {
+    const title =
+      message.length > 50 ? message.substring(0, 50) + "..." : message;
+    const conv = await prisma.aiConversation.create({
+      data: { userId, title, appContext },
+    });
+    convId = conv.id;
+  }
+
+  let updated = false;
+  if (messageId) {
+    const existing = await prisma.aiMessage.findFirst({
+      where: { id: messageId, conversationId: convId },
+      select: { id: true },
+    });
+    if (existing) {
+      await prisma.aiMessage.update({
+        where: { id: messageId },
+        data: {
+          content:
+            "Diagram generated. Preview below — click Insert to add to canvas.",
+          diagramXml: xml,
+          metadata: { intent: "generate_diagram", model, wasUpdated: true },
+        },
+      });
+      updated = true;
+    }
+  }
+  if (!updated) {
+    await prisma.aiMessage.create({
+      data: { conversationId: convId, role: "user", content: message },
+    });
+    await prisma.aiMessage.create({
+      data: {
+        conversationId: convId,
+        role: "assistant",
+        content:
+          "Diagram generated. Preview below — click Insert to add to canvas.",
+        diagramXml: xml,
+        metadata: { intent: "generate_diagram", model },
+      },
+    });
+  }
+
+  await prisma.aiConversation.update({
+    where: { id: convId },
+    data: { updatedAt: new Date() },
+  });
+  return convId;
+}
+
+// Background processor for async diagram jobs. Runs AFTER the HTTP response is
+// sent (not awaited by the request), so it is immune to the reverse-proxy
+// gateway timeout that caused the 504. Generates the XML, deducts the credit on
+// success, persists to history, and writes the result back onto the AiJob row
+// for the client to poll. Never throws — all failures land on the job row.
+async function processDiagramJob(jobId) {
+  try {
+    const job = await prisma.aiJob.update({
+      where: { id: jobId },
+      data: { status: "processing" },
+    });
+
+    // generateDiagramXml accepts a userId string and resolves the plan/model.
+    const { xml, model } = await aiDetectService.generateDiagramXml(
+      job.prompt,
+      job.userId,
+    );
+
+    const deduct = await aiCreditService.deductCredit(
+      job.userId,
+      "diagram_generation",
+      model,
+      job.appContext || "free",
+      job.teamId || null,
+    );
+
+    let convId = job.conversationId || null;
+    try {
+      convId = await persistDiagramToConversation({
+        userId: job.userId,
+        message: job.prompt,
+        xml,
+        model,
+        appContext: job.appContext || "free",
+        conversationId: job.conversationId,
+        messageId: job.messageId,
+      });
+    } catch (persistErr) {
+      console.error(
+        "[aiCredit] job conversation persist error:",
+        persistErr.message,
+      );
+    }
+
+    await prisma.aiJob.update({
+      where: { id: jobId },
+      data: {
+        status: "done",
+        result: xml,
+        model,
+        conversationId: convId,
+        remainingCredits: deduct.remaining,
+        completedAt: new Date(),
+      },
+    });
+  } catch (err) {
+    await prisma.aiJob
+      .update({
+        where: { id: jobId },
+        data: {
+          status: "error",
+          error: err.message || "Diagram generation failed",
+          completedAt: new Date(),
+        },
+      })
+      .catch(() => {});
+  }
+}
+
 const ADDON_PACK_MAP = {
   starter: {
     testPriceEnv: "STRIPE_TEST_AI_ADDON_STARTER_PRICE",
@@ -176,19 +318,35 @@ class AiCreditController {
         convId = conv.id;
       }
 
+      // messageId is only updatable when it refers to a REAL persisted
+      // AiMessage. The chat flow creates the "click Generate" suggestion as a
+      // client-only message (id like `local-...`), so that id will not exist in
+      // the DB. Previously prisma.aiMessage.update threw P2025 here, the catch
+      // below swallowed it, and the diagram was NEVER persisted — so it showed
+      // in the live session but vanished on reload. Verify existence first and
+      // fall back to creating a real message pair otherwise.
+      let updated = false;
       if (messageId) {
-        // Update the existing message (usually a suggestion) to show the result
-        await prisma.aiMessage.update({
-          where: { id: messageId },
-          data: {
-            content:
-              "Diagram generated. Preview below — click Insert to add to canvas.",
-            diagramXml: xml,
-            metadata: { intent: "generate_diagram", model, wasUpdated: true },
-          },
+        const existing = await prisma.aiMessage.findFirst({
+          where: { id: messageId, conversationId: convId },
+          select: { id: true },
         });
-      } else {
-        // Create new message pair
+        if (existing) {
+          await prisma.aiMessage.update({
+            where: { id: messageId },
+            data: {
+              content:
+                "Diagram generated. Preview below — click Insert to add to canvas.",
+              diagramXml: xml,
+              metadata: { intent: "generate_diagram", model, wasUpdated: true },
+            },
+          });
+          updated = true;
+        }
+      }
+      if (!updated) {
+        // Create a new persisted message pair (covers the chat→suggestion flow
+        // where messageId is a client-local id, and the no-messageId case).
         await prisma.aiMessage.create({
           data: { conversationId: convId, role: "user", content: message },
         });
@@ -196,7 +354,8 @@ class AiCreditController {
           data: {
             conversationId: convId,
             role: "assistant",
-            content: "Here is your diagram.",
+            content:
+              "Diagram generated. Preview below — click Insert to add to canvas.",
             diagramXml: xml,
             metadata: { intent: "generate_diagram", model },
           },
@@ -220,6 +379,94 @@ class AiCreditController {
         creditsUsed: 1,
         remainingCredits: result.remaining,
         balance: result.balance,
+      },
+    });
+  });
+
+  // ── Async (background-job) diagram generation ──
+  // Returns a jobId immediately so the request never sits open long enough for
+  // a reverse-proxy gateway timeout (the 504). The client polls getDiagramJob.
+  startDiagramJob = asyncHandler(async (req, res) => {
+    const { message, confirmed, conversationId, messageId } = req.body || {};
+    const userId = req.user.id;
+    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const appContext = await resolveAppContextForBilling(
+      userId,
+      req.headers["x-app-context"],
+      teamId,
+      req.user.currentVersion,
+    );
+
+    if (!message || typeof message !== "string" || !message.trim()) {
+      throw new AppError("Message is required", 400, "VALIDATION_ERROR");
+    }
+    if (!confirmed) {
+      throw new AppError(
+        "User confirmation required before generating diagram",
+        400,
+        "CONFIRMATION_REQUIRED",
+      );
+    }
+
+    // Pre-check credits so the user gets an immediate 402 instead of starting a
+    // job that fails. The credit is actually deducted in the background only on
+    // successful generation (mirrors the synchronous path).
+    if (!(await aiCreditService.hasCredits(userId, appContext, teamId))) {
+      const balance = await aiCreditService.getBalance(
+        userId,
+        appContext,
+        teamId,
+      );
+      return res.status(402).json({
+        success: false,
+        error: {
+          code: "INSUFFICIENT_CREDITS",
+          message: "You have used all your diagram credits for this month.",
+          balance,
+          resetAt: balance.planResetsAt,
+        },
+      });
+    }
+
+    const job = await prisma.aiJob.create({
+      data: {
+        userId,
+        status: "pending",
+        prompt: message,
+        conversationId: conversationId || null,
+        messageId: messageId || null,
+        appContext,
+        teamId: teamId || null,
+      },
+    });
+
+    // Fire-and-forget — do NOT await. Runs after the response is sent.
+    processDiagramJob(job.id);
+
+    res.status(202).json({
+      success: true,
+      data: { jobId: job.id, status: "pending" },
+    });
+  });
+
+  getDiagramJob = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const job = await prisma.aiJob.findFirst({
+      where: { id: req.params.jobId, userId },
+    });
+    if (!job) {
+      throw new AppError("Job not found", 404, "JOB_NOT_FOUND");
+    }
+    res.json({
+      success: true,
+      data: {
+        jobId: job.id,
+        status: job.status,
+        xml: job.status === "done" ? job.result : null,
+        model: job.model || null,
+        conversationId: job.conversationId || null,
+        remainingCredits: job.remainingCredits ?? null,
+        error: job.status === "error" ? job.error : null,
       },
     });
   });
