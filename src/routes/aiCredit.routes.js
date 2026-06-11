@@ -26,5 +26,6 @@ router.post(
 );
 router.post("/addon/purchase", aiCreditController.handleAddonPurchase);
 router.post("/addon/checkout", aiCreditController.createAddonCheckout);
+router.get("/addon/verify", aiCreditController.verifyAddonCheckout);
 
 module.exports = router;

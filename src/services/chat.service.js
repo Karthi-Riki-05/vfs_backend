@@ -11,10 +11,11 @@ class ChatService {
     const groups = await prisma.chatGroup.findMany({
       where: {
         appContext,
-        // Own account (no teamId) shows ALL the user's groups; a joined team
-        // shows only groups in that team. Access still requires creator/
-        // membership (the OR below).
-        ...(teamId ? { teamId } : {}),
+        // Own account (no teamId) shows ALL the user's groups in this app
+        // context; a team context shows that team's conversation(s) PLUS the
+        // user's personal groups/DMs (teamId null) — matching getSidebarData.
+        // Access still requires creator/membership (the OR below).
+        ...(teamId ? { AND: [{ OR: [{ teamId }, { teamId: null }] }] } : {}),
         deletedAt: null,
         OR: [{ userId }, { members: { some: { userId } } }],
       },
@@ -69,6 +70,23 @@ class ChatService {
   }
 
   async createChatGroup(userId, data, appContext) {
+    // Explicit teamId = team-wide conversation. Verify the creator actually
+    // belongs to (or owns) that team — otherwise anyone could plant a
+    // conversation inside an arbitrary team.
+    if (data.teamId) {
+      const allowed = await prisma.team.findFirst({
+        where: {
+          id: data.teamId,
+          deletedAt: null,
+          OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
+        },
+        select: { id: true },
+      });
+      if (!allowed) {
+        throw new AppError("Not a member of this team", 403, "FORBIDDEN");
+      }
+    }
+
     // Build the unique member set up-front (creator + recipients, deduped)
     const memberIds = Array.from(
       new Set([
@@ -120,6 +138,10 @@ class ChatService {
         appType: data.appType || null,
         appContext,
         teamId: data.teamId || null,
+        // Schema columns are nullable with no @default — set explicitly so
+        // sidebar ordering (updatedAt desc) doesn't push new groups last.
+        createdAt: new Date(),
+        updatedAt: new Date(),
       },
     });
 
@@ -553,6 +575,30 @@ class ChatService {
     // App-isolation: in Pro workspace, only Pro-context teams are visible.
     const appCtxFilter = appContext === "pro" ? { appContext: "pro" } : {};
 
+    // Validate a client-supplied teamId before using it. The billing/context
+    // switcher can hand us a SYSTEM billing shell (verifyTeam='system') or a
+    // team from the other workspace (pro vs team app) — both are invisible in
+    // the final teams query, so honoring them rendered "No teams" even when
+    // the user had just created a real team. Treat such ids as absent and
+    // fall through to the auto-resolve below.
+    if (activeTeamId) {
+      const validTeam = await prisma.team.findFirst({
+        where: {
+          id: activeTeamId,
+          deletedAt: null,
+          ...appCtxFilter,
+          AND: [
+            { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
+            {
+              OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
+            },
+          ],
+        },
+        select: { id: true },
+      });
+      if (!validTeam) activeTeamId = null;
+    }
+
     // No activeTeamId from the client → if the user OWNS a team in this
     // workspace, auto-resolve to it. Team owners don't switch contexts (they
     // don't appear in the header switcher per /users/team-context), so chat
@@ -560,7 +606,17 @@ class ChatService {
     // when the user truly has no team at all in this workspace.
     if (!activeTeamId) {
       const ownedTeam = await prisma.team.findFirst({
-        where: { teamOwnerId: userId, deletedAt: null, ...appCtxFilter },
+        where: {
+          teamOwnerId: userId,
+          deletedAt: null,
+          ...appCtxFilter,
+          // Skip system-created billing shells — they are filtered out in the
+          // final teams query too, so resolving to one returns teams:[] and
+          // makes chat appear broken for owners of real teams.
+          AND: [
+            { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
+          ],
+        },
         orderBy: { createdAt: "asc" },
         select: { id: true },
       });
@@ -608,11 +664,17 @@ class ChatService {
       };
     }
 
-    // 1. Fetch ONLY the active team.
+    // 1. Fetch ONLY the active team. System-created teams (the auto-created
+    // billing/workspace shells like "X's Pro Team", verifyTeam='system') are
+    // hidden — the Teams page applies the same filter (team.service.js), so
+    // chat must not surface teams the user never sees anywhere else.
     const teams = await prisma.team.findMany({
       where: {
         id: activeTeamId,
         deletedAt: null,
+        AND: [
+          { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
+        ],
       },
       include: {
         owner: { select: { id: true, name: true, email: true, image: true } },
@@ -628,13 +690,17 @@ class ChatService {
       orderBy: { createdAt: "desc" },
     });
 
-    // 2. Fetch chat groups belonging to this team only (the user must also
-    // be a member of the chat group to see it — preserves per-group ACLs).
+    // 2. Fetch the user's chat groups for this workspace:
+    //   • teamId = activeTeamId → the team-wide conversation(s)
+    //   • teamId = null + matching appContext → named groups and DMs
+    //     (workspace-app isolation: pro groups never show in the team app
+    //     and vice-versa; membership is the ACL within an app context).
+    // The user must be creator or member of the group (the OR below).
     const chatGroups = await prisma.chatGroup.findMany({
       where: {
         deletedAt: null,
-        teamId: activeTeamId,
         OR: [{ userId }, { members: { some: { userId } } }],
+        AND: [{ OR: [{ teamId: activeTeamId }, { teamId: null, appContext }] }],
       },
       include: {
         _count: { select: { messages: true, members: true } },
@@ -696,7 +762,28 @@ class ChatService {
       };
 
       if (group.teamId) {
-        teamConvoMap[group.teamId] = g;
+        // One team-wide conversation per team. Legacy data (header-injected
+        // teamIds) may carry several groups for the same team — prefer the
+        // one titled after the team (handleTeamChatOpen creates it that way),
+        // never overwrite an existing match, and surface the rest as regular
+        // named groups so they don't silently vanish.
+        const teamName = teams.find((t) => t.id === group.teamId)?.name;
+        const isTeamConvo = !teamConvoMap[group.teamId] || g.title === teamName;
+        if (isTeamConvo) {
+          const displaced = teamConvoMap[group.teamId];
+          if (displaced && displaced.id !== g.id) {
+            displaced.isDirect = false;
+            displaced.displayName = displaced.title || "Group";
+            displaced.displayImage = null;
+            regularGroups.push(displaced);
+          }
+          teamConvoMap[group.teamId] = g;
+        } else {
+          g.isDirect = false;
+          g.displayName = g.title || "Group";
+          g.displayImage = null;
+          regularGroups.push(g);
+        }
         continue;
       }
 

@@ -102,7 +102,12 @@ class FlowController {
   getFavorites = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const flows = await flowService.getFavorites(req.user.id, appContext);
+    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    const flows = await flowService.getFavorites(
+      req.user.id,
+      appContext,
+      teamId,
+    );
     res.json({ success: true, data: flows });
   });
 

@@ -176,22 +176,22 @@ const ADDON_PACK_MAP = {
     testPriceEnv: "STRIPE_TEST_AI_ADDON_STARTER_PRICE",
     livePriceEnv: "STRIPE_LIVE_AI_ADDON_STARTER_PRICE",
     legacyPriceEnv: "STRIPE_AI_ADDON_STARTER_PRICE",
-    credits: 25,
-    label: "AI Addon - Starter (25 credits)",
+    credits: 50,
+    label: "AI Addon - Starter (50 credits)",
   },
   standard: {
     testPriceEnv: "STRIPE_TEST_AI_ADDON_STANDARD_PRICE",
     livePriceEnv: "STRIPE_LIVE_AI_ADDON_STANDARD_PRICE",
     legacyPriceEnv: "STRIPE_AI_ADDON_STANDARD_PRICE",
-    credits: 60,
-    label: "AI Addon - Standard (60 credits)",
+    credits: 100,
+    label: "AI Addon - Standard (100 credits)",
   },
   proppack: {
     testPriceEnv: "STRIPE_TEST_AI_ADDON_PROPPACK_PRICE",
     livePriceEnv: "STRIPE_LIVE_AI_ADDON_PROPPACK_PRICE",
     legacyPriceEnv: "STRIPE_AI_ADDON_PROPPACK_PRICE",
-    credits: 150,
-    label: "AI Addon - Pro Pack (150 credits)",
+    credits: 200,
+    label: "AI Addon - Pro Pack (200 credits)",
   },
 };
 
@@ -690,6 +690,9 @@ class AiCreditController {
     }
 
     const baseUrl = process.env.APP_URL || "http://localhost:3000";
+    // Land on the dashboard (which handles addon_success + verifies the
+    // session) — NOT the subscription page, which has no handler.
+    const successPath = appContext === "pro" ? "/dashboard/pro" : "/dashboard";
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       customer: customerId,
@@ -703,8 +706,10 @@ class AiCreditController {
         ...(teamId ? { teamId } : {}),
       },
       // Stripe Adaptive Pricing (account-level setting) converts to local currency
-      success_url: `${baseUrl}/dashboard/subscription?addon_success=true&credits=${pack.credits}`,
-      cancel_url: `${baseUrl}/dashboard/subscription?addon_cancelled=true`,
+      // session_id lets the dashboard call /ai/addon/verify as a fallback
+      // when the webhook can't reach the backend (e.g. local dev).
+      success_url: `${baseUrl}${successPath}?addon_success=true&credits=${pack.credits}&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}${successPath}?addon_cancelled=true`,
     });
 
     res.json({
@@ -717,6 +722,142 @@ class AiCreditController {
           credits: pack.credits,
           label: pack.label,
         },
+      },
+    });
+  });
+
+  // Redirect-time fallback for the checkout.session.completed webhook —
+  // grants the credits when the webhook can't reach the backend (local dev)
+  // or hasn't arrived yet. Idempotent via transactionLog.txnId = session.id,
+  // the same key the webhook writes, so double-grants are impossible.
+  verifyAddonCheckout = asyncHandler(async (req, res) => {
+    const sessionId = req.query?.session_id;
+    const userId = req.user.id;
+    if (!sessionId) {
+      throw new AppError("session_id is required", 400, "VALIDATION_ERROR");
+    }
+
+    const stripe = getStripe();
+    let session;
+    try {
+      session = await stripe.checkout.sessions.retrieve(sessionId);
+    } catch (err) {
+      throw new AppError("Invalid checkout session", 400, "INVALID_SESSION");
+    }
+
+    const meta = session.metadata || {};
+    if (meta.purchaseType !== "ai_addon_credits") {
+      throw new AppError(
+        "Not an AI credit purchase session",
+        400,
+        "INVALID_SESSION",
+      );
+    }
+    if (meta.userId !== userId) {
+      throw new AppError(
+        "Session does not belong to this user",
+        403,
+        "FORBIDDEN",
+      );
+    }
+
+    const appContext = meta.appContext || req.user.currentVersion || "free";
+    const metaTeamId = meta.teamId || null;
+
+    if (session.payment_status !== "paid") {
+      return res.json({
+        success: true,
+        data: {
+          granted: false,
+          paymentStatus: session.payment_status,
+          balance: await aiCreditService.getBalance(
+            userId,
+            appContext,
+            metaTeamId,
+          ),
+        },
+      });
+    }
+
+    const amount = parseInt(meta.credits, 10);
+    if (!amount || amount <= 0) {
+      throw new AppError(
+        "Session has no credits metadata",
+        400,
+        "INVALID_SESSION",
+      );
+    }
+
+    // Idempotency: the webhook may have already processed this session.
+    const existingTxn = await prisma.transactionLog.findFirst({
+      where: { txnId: session.id },
+    });
+    let granted = false;
+    if (!existingTxn) {
+      await aiCreditService.addAddonCredits(
+        userId,
+        amount,
+        appContext,
+        metaTeamId,
+      );
+      granted = true;
+
+      const amountTotal = session.amount_total || 0;
+      const currency = session.currency || "usd";
+      const planLabel = `AI Credits Addon${meta.packType ? ` — ${meta.packType}` : ""} (${amount} credits)`;
+      await prisma.$transaction([
+        prisma.transactionLog.create({
+          data: {
+            userId,
+            chargeId: session.payment_intent || session.id,
+            txnId: session.id,
+            amountCharged: amountTotal,
+            currency,
+            status: "success",
+            paymentMethod: session.payment_method_types?.[0] || "card",
+            purchaseType: "ai_addon_credits",
+            appType: appContext === "team" ? "enterprise" : "individual",
+            appContext,
+          },
+        }),
+        prisma.subscriptionHistory.create({
+          data: {
+            userId,
+            planName: planLabel,
+            productType: "ai_addon_credits",
+            status: "completed",
+            price: amountTotal / 100,
+            currency,
+            isRecurring: false,
+            source: "stripe",
+            startedAt: new Date(),
+            archivedReason: "one_time_purchase",
+            stripePaymentId: session.payment_intent || session.id,
+            appContext,
+            snapshot: {
+              sessionId: session.id,
+              packType: meta.packType || null,
+              credits: amount,
+              appContext,
+              verifiedVia: "redirect",
+            },
+          },
+        }),
+      ]);
+    }
+
+    const balance = await aiCreditService.getBalance(
+      userId,
+      appContext,
+      metaTeamId,
+    );
+    res.json({
+      success: true,
+      data: {
+        granted,
+        alreadyProcessed: !!existingTxn,
+        credits: amount,
+        balance,
       },
     });
   });

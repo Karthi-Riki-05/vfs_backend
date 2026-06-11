@@ -17,6 +17,10 @@ const PRICING = {
 
 const downgradeUser = require("../lib/downgradeUser");
 const notificationService = require("./notification.service");
+const {
+  TEAM_CREDITS_PER_SEAT_MONTHLY,
+  TEAM_CREDITS_PER_SEAT_YEARLY,
+} = require("./aiCredit.service");
 
 // True only when the subscription row represents a currently-active paid period.
 // `status='active'` alone is insufficient: the cron/webhook may not have flipped
@@ -1143,6 +1147,14 @@ class SubscriptionService {
         `personal data left untouched.`,
     );
 
+    // Seat-scaled AI credit grant (monthly: seats × 60; yearly: seats × 800
+    // for the whole year upfront). Was previously hardcoded to 300, which
+    // made Team Yearly show the Team Monthly amount until first renewal.
+    const teamPlanCredits =
+      plan === "yearly"
+        ? members * TEAM_CREDITS_PER_SEAT_YEARLY
+        : members * TEAM_CREDITS_PER_SEAT_MONTHLY;
+
     await prisma.$transaction([
       ...archiveOps,
       prisma.subscription.upsert({
@@ -1185,18 +1197,20 @@ class SubscriptionService {
           proPurchasedAt: new Date(),
         },
       }),
-      // Grant team-tier AI credits (300/mo) scoped to team appContext.
+      // Grant seat-scaled team AI credits scoped to team appContext.
+      // Monthly: seats × 60. Yearly: full year upfront (seats × 800) —
+      // e.g. 5 seats yearly = 4000. Mirrors aiCredit.grantTeamCredits().
       prisma.aiCreditBalance.upsert({
         where: { userId_appContext: { userId, appContext: "team" } },
         create: {
           userId,
-          planCredits: 300,
+          planCredits: teamPlanCredits,
           addonCredits: 0,
           planResetsAt: expiresAt,
           appContext: "team",
         },
         update: {
-          planCredits: 300,
+          planCredits: teamPlanCredits,
           planResetsAt: expiresAt,
         },
       }),
@@ -1294,16 +1308,16 @@ class SubscriptionService {
       logger.warn(`[push] paymentSuccess notify skipped: ${err.message}`);
     }
 
-    // In-app notification (non-blocking). Team checkout grants 300 AI credits.
+    // In-app notification (non-blocking). Credit amount is seat-scaled.
     try {
       const planName = dbPlan?.name || "Team";
       await notificationService.createNotification(
         userId,
         "subscription_activated",
         "Subscription Activated!",
-        `Your ${planName} plan is now active. You have 300 AI credits.`,
+        `Your ${planName} plan is now active. You have ${teamPlanCredits} AI credits.`,
         "/dashboard/subscription",
-        { planName, creditAmount: 300, expiresAt },
+        { planName, creditAmount: teamPlanCredits, expiresAt },
       );
     } catch (err) {
       logger.warn(`[notify] subscription_activated skipped: ${err.message}`);
@@ -1367,8 +1381,11 @@ class SubscriptionService {
 
     const seats = sub.usersCount || 5;
     const isYearly = sub.productType === "team_yearly";
-    // Monthly: 60 credits/seat. Yearly: full year upfront (60 × 12 per seat).
-    const credits = isYearly ? seats * 60 * 12 : seats * 60;
+    // Monthly: 60 credits/seat. Yearly: full year upfront (800/seat/year),
+    // matching aiCredit.service grant logic — e.g. 5 seats yearly = 4000.
+    const credits = isYearly
+      ? seats * TEAM_CREDITS_PER_SEAT_YEARLY
+      : seats * TEAM_CREDITS_PER_SEAT_MONTHLY;
 
     await prisma.$transaction(async (tx) => {
       await tx.subscription.update({

@@ -345,7 +345,8 @@ class PaymentService {
     ]);
 
     // Grant seat-scaled AI credits to the team owner immediately on activation.
-    await grantTeamCredits(userId, seats, plan).catch((err) =>
+    // Yearly plans get the full year upfront, resetting at the renewal date.
+    await grantTeamCredits(userId, seats, plan, expiresAt).catch((err) =>
       logger.error(
         `[Checkout] grantTeamCredits failed for ${userId}: ${err.message}`,
       ),

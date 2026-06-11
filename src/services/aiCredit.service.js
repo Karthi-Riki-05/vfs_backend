@@ -13,8 +13,19 @@ const PLAN_CREDITS = {
 // credit pool, not their own 20). The caller must be a verified member/
 // owner of the team; otherwise we silently fall back to the caller's own
 // balance so we never leak a team's credits to a non-member.
-async function resolveBillingUser(userId, activeTeamId) {
+async function resolveBillingUser(
+  userId,
+  activeTeamId,
+  explicitAppContext = null,
+) {
   if (!activeTeamId) {
+    // When the caller explicitly requests the pro context (e.g. the Pro app
+    // sends x-app-context: pro), honour it — never silently redirect a pro
+    // user to their team pool just because they also own a team subscription.
+    if (explicitAppContext === "pro") {
+      return { userId, appContext: "pro" };
+    }
+
     // No explicit team context was supplied (e.g. the mobile forced-team
     // WebView, the diagram editor opened before a workspace switch, or a
     // Team owner who simply never switched). If the caller OWNS an active
@@ -98,20 +109,27 @@ async function getOrCreateBalance(userId, appContext = "team") {
     balance.planResetsAt &&
     new Date() > balance.planResetsAt
   ) {
-    balance = await prisma.aiCreditBalance.update({
-      where: { userId_appContext: { userId, appContext } },
-      data: {
-        planCredits: planCreditsFor(appContext),
-        planResetsAt: getNextResetDate(),
-      },
-    });
+    // Seat-aware refill: monthly teams refill to seats × 60. Yearly teams
+    // return null here — their renewal is handled by the invoice.paid
+    // webhook, so we must NOT clobber the upfront yearly grant with the
+    // flat 300 baseline.
+    const refill = await teamCreditsForOwner(userId);
+    if (refill !== null) {
+      balance = await prisma.aiCreditBalance.update({
+        where: { userId_appContext: { userId, appContext } },
+        data: {
+          planCredits: refill,
+          planResetsAt: getNextResetDate(),
+        },
+      });
+    }
   }
 
   return balance;
 }
 
 async function hasCredits(userId, appContext = "team", activeTeamId = null) {
-  const billing = await resolveBillingUser(userId, activeTeamId);
+  const billing = await resolveBillingUser(userId, activeTeamId, appContext);
   const ctx = billing.appContext || appContext;
   const balance = await getOrCreateBalance(billing.userId, ctx);
   return balance.planCredits + balance.addonCredits > 0;
@@ -127,7 +145,7 @@ async function deductCredit(
   // Deductions hit the billing user (team owner in team context, self in
   // personal). Usage audit row still records the ACTING user so you can
   // see who spent which team credits.
-  const billing = await resolveBillingUser(userId, activeTeamId);
+  const billing = await resolveBillingUser(userId, activeTeamId, appContext);
   const ctx = billing.appContext || appContext;
   const balance = await getOrCreateBalance(billing.userId, ctx);
   const total = balance.planCredits + balance.addonCredits;
@@ -193,7 +211,7 @@ async function addAddonCredits(
   appContext = "team",
   activeTeamId = null,
 ) {
-  const billing = await resolveBillingUser(userId, activeTeamId);
+  const billing = await resolveBillingUser(userId, activeTeamId, appContext);
   const ctx = billing.appContext || appContext;
   await getOrCreateBalance(billing.userId, ctx);
   return prisma.aiCreditBalance.update({
@@ -205,7 +223,7 @@ async function addAddonCredits(
 async function getBalance(userId, appContext = "team", activeTeamId = null) {
   // resolveBillingUser now centralizes the team-owner fallback, so display,
   // gating and deduction all resolve to the same (team) pool. See C8.
-  const billing = await resolveBillingUser(userId, activeTeamId);
+  const billing = await resolveBillingUser(userId, activeTeamId, appContext);
   const ctx = billing.appContext || appContext;
   const balance = await getOrCreateBalance(billing.userId, ctx);
   return {
@@ -214,9 +232,37 @@ async function getBalance(userId, appContext = "team", activeTeamId = null) {
     totalCredits: balance.planCredits + balance.addonCredits,
     planResetsAt: balance.planResetsAt,
     appContext: balance.appContext,
+    // The plan's full grant (progress-bar denominator). Team plans are
+    // seat-scaled (seats × 60/mo or seats × 800/yr), so the frontend can't
+    // hardcode it.
+    planLimit: await planLimitFor(billing.userId, ctx),
     // Lets the frontend label "Team credits" vs "Personal credits".
     source: billing.userId === userId ? "self" : "team",
   };
+}
+
+// Full plan grant for a user in a given context — used as the display
+// denominator ("X of Y credits used").
+async function planLimitFor(userId, ctx) {
+  if (ctx === "team") {
+    const sub = await prisma.subscription.findFirst({
+      where: { userId, status: "active" },
+      select: { usersCount: true, productType: true },
+    });
+    if (!sub) return PLAN_CREDITS.team;
+    const seats = sub.usersCount || 5;
+    return sub.productType === "team_yearly"
+      ? seats * TEAM_CREDITS_PER_SEAT_YEARLY
+      : seats * TEAM_CREDITS_PER_SEAT_MONTHLY;
+  }
+  if (ctx === "pro") {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { isLegacyPro: true },
+    });
+    return planCreditsFor("pro", u?.isLegacyPro);
+  }
+  return planCreditsFor(ctx);
 }
 
 // Credits per seat per month for team plans (60/seat/month).
@@ -302,14 +348,23 @@ async function resetAllPlanCredits() {
 }
 
 // Grant initial team AI credits when a subscription is first activated.
-// seats × 60/month for monthly; seats × 800 / 12 per monthly cycle for yearly.
-async function grantTeamCredits(userId, seats, plan) {
-  const credits =
-    plan === "yearly"
-      ? Math.round((seats * TEAM_CREDITS_PER_SEAT_YEARLY) / 12)
-      : seats * TEAM_CREDITS_PER_SEAT_MONTHLY;
+// Monthly: seats × 60, resets next month (cron). Yearly: the FULL year
+// upfront (seats × 800), resets at the yearly renewal (invoice.paid webhook).
+async function grantTeamCredits(userId, seats, plan, expiresAt = null) {
+  const yearly = plan === "yearly";
+  const credits = yearly
+    ? seats * TEAM_CREDITS_PER_SEAT_YEARLY
+    : seats * TEAM_CREDITS_PER_SEAT_MONTHLY;
 
-  const nextReset = getNextResetDate();
+  const nextReset = expiresAt
+    ? new Date(expiresAt)
+    : yearly
+      ? (() => {
+          const d = new Date();
+          d.setFullYear(d.getFullYear() + 1);
+          return d;
+        })()
+      : getNextResetDate();
   await prisma.aiCreditBalance.upsert({
     where: { userId_appContext: { userId, appContext: "team" } },
     update: { planCredits: credits, planResetsAt: nextReset },

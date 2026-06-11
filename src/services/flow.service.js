@@ -4,19 +4,16 @@ const AppError = require("../utils/AppError");
 const { personalFlowTeamOr } = require("../lib/personalFlowScope");
 
 class FlowService {
-  async getAllFlows(userId, options = {}, appContext = "team") {
-    const { search, page = 1, limit = 10, nonEmpty, teamId } = options;
-    const take = Math.min(Number(limit) || 10, 100);
-    const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
-
-    // Strict workspace scoping (DATA-LOSS-001). ownerId always bounds the
-    // query — never teamId alone, which would expose other members' rows.
-    //   • Joined team context (teamId set) → only that team's flows.
-    //   • Personal/own context (no teamId) → flows with NO team OR in a team
-    //     the user OWNS. Owned teams have no switcher row (they fold into the
-    //     personal context, see getMyContexts), so their flows must surface
-    //     here — but flows created inside a JOINED team stay out of personal.
-    const where = { ownerId: userId, deletedAt: null };
+  // Strict workspace scoping (DATA-LOSS-001). ownerId always bounds the
+  // query — never teamId alone, which would expose other members' rows.
+  //   • Joined team context (teamId set) → only that team's flows.
+  //   • Personal/own context (no teamId) → flows with NO team OR in a team
+  //     the user OWNS. Owned teams have no switcher row (they fold into the
+  //     personal context, see getMyContexts), so their flows must surface
+  //     here — but flows created inside a JOINED team stay out of personal.
+  // Returns a partial where-clause ({ teamId } or { AND: [...] }) to merge
+  // into an ownerId-bounded query. Shared by getAllFlows and getFavorites.
+  async _workspaceScope(userId, appContext, teamId) {
     if (teamId) {
       // If the header refers to the user's OWN team-app team, treat it as
       // personal context: show free flows (NULL) + that team's flows together.
@@ -32,11 +29,11 @@ class FlowService {
       });
       if (isOwnTeamAppTeam) {
         // Personal context via own-team header: free + team flows.
-        where.AND = [{ OR: [{ teamId: null }, { teamId }] }];
-      } else {
-        where.teamId = teamId;
+        return { AND: [{ OR: [{ teamId: null }, { teamId }] }] };
       }
-    } else if (appContext === "pro") {
+      return { teamId };
+    }
+    if (appContext === "pro") {
       // Pro user calling without X-Team-Context header. This is a race-condition
       // window: the frontend hasn't pinned vc_ai_billing_team yet (cleared
       // localStorage, first render before ProGuard runs, iOS WebView restart).
@@ -46,31 +43,40 @@ class FlowService {
         where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
         select: { id: true },
       });
-      if (proTeam) {
-        where.teamId = proTeam.id;
-      } else {
-        // Pro grant still in flight — return empty rather than leak free flows.
-        where.teamId = "__no_pro_team__";
-      }
-    } else {
-      // Team/free user personal context = NULL-team flows + team-app owned teams.
-      // Exclude pro-app owned teams (appContext='pro') so pro flows never
-      // leak into the team-app personal view (cross-app isolation).
-      const ownedTeams = await prisma.team.findMany({
-        where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
-        select: { id: true },
-      });
-      const ownedTeamIds = ownedTeams.map((t) => t.id);
-      // Use AND (not OR) so we don't clobber the search OR added below.
-      where.AND = [
+      // Pro grant still in flight — return empty rather than leak free flows.
+      return { teamId: proTeam ? proTeam.id : "__no_pro_team__" };
+    }
+    // Team/free user personal context = NULL-team flows + team-app owned teams.
+    // Exclude pro-app owned teams (appContext='pro') so pro flows never
+    // leak into the team-app personal view (cross-app isolation).
+    const ownedTeams = await prisma.team.findMany({
+      where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
+      select: { id: true },
+    });
+    const ownedTeamIds = ownedTeams.map((t) => t.id);
+    // Use AND (not OR) so callers don't clobber their own search OR.
+    return {
+      AND: [
         {
           OR: [
             { teamId: null },
             ...(ownedTeamIds.length ? [{ teamId: { in: ownedTeamIds } }] : []),
           ],
         },
-      ];
-    }
+      ],
+    };
+  }
+
+  async getAllFlows(userId, options = {}, appContext = "team") {
+    const { search, page = 1, limit = 10, nonEmpty, teamId } = options;
+    const take = Math.min(Number(limit) || 10, 100);
+    const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
+
+    const where = {
+      ownerId: userId,
+      deletedAt: null,
+      ...(await this._workspaceScope(userId, appContext, teamId)),
+    };
 
     if (search) {
       where.OR = [
@@ -418,9 +424,17 @@ class FlowService {
     });
   }
 
-  async getFavorites(userId) {
+  async getFavorites(userId, appContext = "team", teamId = null) {
+    // Workspace-scoped (DATA-LOSS-001): favorites must follow the active
+    // context like every other personal-data list — previously this returned
+    // ALL of the user's favorites across personal + every team workspace.
     return await prisma.flow.findMany({
-      where: { ownerId: userId, isFavorite: true, deletedAt: null },
+      where: {
+        ownerId: userId,
+        isFavorite: true,
+        deletedAt: null,
+        ...(await this._workspaceScope(userId, appContext, teamId)),
+      },
       orderBy: { updatedAt: "desc" },
       select: { id: true, name: true, thumbnail: true },
     });
