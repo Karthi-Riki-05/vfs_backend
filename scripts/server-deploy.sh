@@ -111,6 +111,15 @@ ALTER TABLE shape_groups ADD COLUMN IF NOT EXISTS workspace_team_id   TEXT;
 CREATE INDEX IF NOT EXISTS shapes_team_id_idx                 ON shapes (team_id);
 CREATE INDEX IF NOT EXISTS issue_list_team_id_idx             ON issue_list (team_id);
 CREATE INDEX IF NOT EXISTS shape_groups_workspace_team_id_idx ON shape_groups (workspace_team_id);
+-- Flow-pack grace period + shape↔team/chat associations (idempotent).
+-- Added to match prisma/schema.prisma; code in pro/shape/flowPackExpiry
+-- services reads these, so they must exist on the server DB.
+ALTER TABLE users  ADD COLUMN IF NOT EXISTS flow_addon_grace_period_end TIMESTAMPTZ;
+ALTER TABLE shapes ADD COLUMN IF NOT EXISTS associated_team_id          TEXT;
+ALTER TABLE shapes ADD COLUMN IF NOT EXISTS associated_chat_group_id    TEXT;
+ALTER TABLE shapes ADD COLUMN IF NOT EXISTS association_type            TEXT;
+CREATE INDEX IF NOT EXISTS shapes_associated_team_id_idx       ON shapes (associated_team_id);
+CREATE INDEX IF NOT EXISTS shapes_associated_chat_group_id_idx ON shapes (associated_chat_group_id);
 DELETE FROM transaction_logs a USING transaction_logs b
   WHERE a.id > b.id AND a.txn_id = b.txn_id AND a.txn_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS transaction_logs_txn_id_key ON transaction_logs (txn_id);

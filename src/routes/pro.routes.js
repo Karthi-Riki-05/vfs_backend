@@ -33,9 +33,19 @@ router.post("/purchase", authenticate, proController.purchasePro);
 router.post("/checkout", authenticate, proController.purchasePro);
 
 // Buy extra flows (Pro only)
+// DEPRECATED (System A — one-time 30-day packs). Soft-retired in favor of
+// the recurring flow add-on (/flow-addon/checkout): blocked while an add-on
+// is active (ADDON_SUBSCRIPTION_ACTIVE), no UI button. Kept only so users
+// without an add-on can still renew until hard removal after 2026-12-31.
+// See FLOWPACK_AUDIT.md "System A Retirement Plan".
 router.post(
   "/buy-flows",
   authenticate,
+  (req, res, next) => {
+    res.set("Deprecation", "true");
+    res.set("Sunset", "Thu, 31 Dec 2026 23:59:59 GMT");
+    next();
+  },
   validate(buyFlowsSchema),
   proController.buyFlows,
 );
@@ -73,6 +83,12 @@ router.get(
   "/flow-addon/status",
   authenticate,
   proController.getFlowAddonStatus,
+);
+// Safety net — activates the add-on if the checkout webhook was lost
+router.post(
+  "/verify-flow-addon",
+  authenticate,
+  proController.verifyFlowAddonCheckout,
 );
 
 module.exports = router;

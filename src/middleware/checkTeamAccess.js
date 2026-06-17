@@ -4,7 +4,9 @@ const logger = require("../utils/logger");
 /**
  * Middleware that checks team/chat access based on app context.
  * - Pro users (currentVersion === 'pro' && hasPro): full access, no subscription needed
- * - ValueChart users: require active subscription (falls through to checkSubscription + requireActivePlan)
+ * - X-Team-Context header present: verify membership in THAT specific team (Fix 2 & 3)
+ * - No header: fall back to any valid team membership (original behavior)
+ * - No team at all: delegate to checkSubscription + requireActivePlan
  *
  * Must be used AFTER authenticate middleware (needs req.user).
  */
@@ -25,15 +27,78 @@ async function checkTeamAccess(req, res, next) {
 
     // Pro users in Pro mode get full access — no subscription needed
     if (user?.hasPro && user.currentVersion === "pro") {
-      // Set a mock subscription so downstream code (like addMember teamMemberLimit) doesn't break
       req.subscription = { active: true, plan: "pro", teamMemberLimit: 999 };
       return next();
     }
 
-    // Team members (anyone belonging to at least one non-deleted team,
-    // whether as owner or invited MEMBER) get access via their team —
-    // the team owner's subscription covers them. Chat + group creation
-    // are team-collab features; membership is the entitlement.
+    // Fix 2: Dynamic X-Team-Context resolution.
+    // When the frontend sends a specific team context header, we MUST verify
+    // membership against that exact team — not the first team the user belongs
+    // to. This prevents stale-token claims from granting access to a team the
+    // user was removed from mid-session (Fix 3: session context verification).
+    const requestedTeamId = req.headers["x-team-context"] || null;
+
+    if (requestedTeamId) {
+      // Fetch the team record and membership in parallel.
+      // We need the team's stored appContext to detect cross-context attacks
+      // (e.g. a client claiming X-App-Context: team against a Pro team).
+      const [team, membership] = await Promise.all([
+        prisma.team.findFirst({
+          where: { id: requestedTeamId, deletedAt: null },
+          select: { id: true, appContext: true },
+        }),
+        prisma.teamMember.findFirst({
+          where: {
+            userId,
+            teamId: requestedTeamId,
+            team: { deletedAt: null }, // Fix 3: reject deleted/inactive teams
+          },
+          select: { id: true, role: true, teamId: true },
+        }),
+      ]);
+
+      if (!team || !membership) {
+        return res.status(403).json({
+          success: false,
+          error: {
+            code: "FORBIDDEN",
+            message:
+              "You are not an active member of this team. Your session may be stale — please refresh.",
+          },
+        });
+      }
+
+      // Block requests where the client's X-App-Context header contradicts
+      // the team's actual appContext stored in the database. A 'team'-context
+      // request must never access a 'pro' team and vice-versa.
+      const requestedAppContext = req.headers["x-app-context"] || null;
+      if (
+        requestedAppContext &&
+        team.appContext &&
+        requestedAppContext !== team.appContext
+      ) {
+        return res.status(403).json({
+          success: false,
+          error: {
+            code: "APP_CONTEXT_MISMATCH",
+            message: `App context mismatch: request carries '${requestedAppContext}' but this team operates in '${team.appContext}' mode.`,
+          },
+        });
+      }
+
+      req.subscription = {
+        active: true,
+        plan: "team",
+        teamMemberLimit: 999,
+        via: "team-membership",
+        teamId: requestedTeamId,
+        role: membership.role,
+      };
+      return next();
+    }
+
+    // Fallback: no X-Team-Context header — pick the first valid membership.
+    // Still filters to non-deleted teams (Fix 3 session integrity baseline).
     const teamMembership = await prisma.teamMember.findFirst({
       where: {
         userId,
@@ -41,6 +106,7 @@ async function checkTeamAccess(req, res, next) {
       },
       select: { id: true, role: true, teamId: true },
     });
+
     if (teamMembership) {
       req.subscription = {
         active: true,

@@ -1,9 +1,18 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const shapeController = require('../controllers/shape.controller');
-const { authenticate } = require('../middleware/auth.middleware');
-const validate = require('../middleware/validate');
-const { createShapeSchema, updateShapeSchema, idParamSchema } = require('../validators/shape.validator');
+const shapeController = require("../controllers/shape.controller");
+const { authenticate } = require("../middleware/auth.middleware");
+const validate = require("../middleware/validate");
+const {
+  createShapeSchema,
+  updateShapeSchema,
+  idParamSchema,
+  associateTeamSchema,
+  associateGroupSchema,
+  shapeIdParamSchema,
+  checkAssociationsSchema,
+  bulkDeleteSchema,
+} = require("../validators/shape.validator");
 
 router.use(authenticate);
 
@@ -21,7 +30,7 @@ router.use(authenticate);
  *       401:
  *         description: Unauthorized
  */
-router.get('/', shapeController.getAllShapes);
+router.get("/", shapeController.getAllShapes);
 
 /**
  * @swagger
@@ -35,7 +44,191 @@ router.get('/', shapeController.getAllShapes);
  *       200:
  *         description: List of categories
  */
-router.get('/categories', shapeController.getCategories);
+router.get("/categories", shapeController.getCategories);
+
+/**
+ * @swagger
+ * /api/v1/shapes/check-associations:
+ *   post:
+ *     summary: Check which of the provided shape IDs have team/group associations
+ *     tags: [Shapes]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [shapeIds]
+ *             properties:
+ *               shapeIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: List of associated shapes with their team/group details
+ */
+router.post(
+  "/check-associations",
+  validate(checkAssociationsSchema),
+  shapeController.checkAssociations,
+);
+
+/**
+ * @swagger
+ * /api/v1/shapes/bulk-delete:
+ *   delete:
+ *     summary: Soft delete multiple shapes and remove their associations
+ *     tags: [Shapes]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [shapeIds]
+ *             properties:
+ *               shapeIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Shapes soft-deleted, associations cleared
+ */
+// NOTE: registered BEFORE '/:id' so 'bulk-delete' is never captured as an id.
+router.delete(
+  "/bulk-delete",
+  validate(bulkDeleteSchema),
+  shapeController.bulkDelete,
+);
+
+/**
+ * @swagger
+ * /api/v1/shapes/{shapeId}/associate-team:
+ *   post:
+ *     summary: Associate a shape with a team (adds it to the team shape library)
+ *     tags: [Shapes]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shapeId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [teamId]
+ *             properties:
+ *               teamId:
+ *                 type: string
+ *               shape:
+ *                 type: object
+ *                 description: Inline shape data — creates the Shape row if shapeId does not exist yet
+ *     responses:
+ *       200:
+ *         description: Shape associated with team
+ *       404:
+ *         description: Team or shape not found
+ */
+router.post(
+  "/:shapeId/associate-team",
+  validate(associateTeamSchema),
+  shapeController.associateTeam,
+);
+
+/**
+ * @swagger
+ * /api/v1/shapes/{shapeId}/associate-group:
+ *   post:
+ *     summary: Associate a shape with a chat group
+ *     tags: [Shapes]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shapeId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [groupId]
+ *             properties:
+ *               groupId:
+ *                 type: string
+ *               shape:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Shape associated with chat group
+ */
+router.post(
+  "/:shapeId/associate-group",
+  validate(associateGroupSchema),
+  shapeController.associateGroup,
+);
+
+/**
+ * @swagger
+ * /api/v1/shapes/{shapeId}/remove-association:
+ *   delete:
+ *     summary: Remove any team/group association from a shape
+ *     tags: [Shapes]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shapeId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Association removed
+ */
+router.delete(
+  "/:shapeId/remove-association",
+  validate(shapeIdParamSchema),
+  shapeController.removeAssociation,
+);
+
+/**
+ * @swagger
+ * /api/v1/shapes/{shapeId}/association:
+ *   get:
+ *     summary: Get the current team/group association of a shape
+ *     tags: [Shapes]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shapeId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Association details (type is null when unassociated)
+ */
+router.get(
+  "/:shapeId/association",
+  validate(shapeIdParamSchema),
+  shapeController.getAssociation,
+);
 
 /**
  * @swagger
@@ -57,7 +250,7 @@ router.get('/categories', shapeController.getCategories);
  *       404:
  *         description: Shape not found
  */
-router.get('/:id', validate(idParamSchema), shapeController.getShapeById);
+router.get("/:id", validate(idParamSchema), shapeController.getShapeById);
 
 /**
  * @swagger
@@ -95,7 +288,7 @@ router.get('/:id', validate(idParamSchema), shapeController.getShapeById);
  *       400:
  *         description: Validation error
  */
-router.post('/', validate(createShapeSchema), shapeController.createShape);
+router.post("/", validate(createShapeSchema), shapeController.createShape);
 
 /**
  * @swagger
@@ -128,7 +321,7 @@ router.post('/', validate(createShapeSchema), shapeController.createShape);
  *       200:
  *         description: Shape updated
  */
-router.put('/:id', validate(updateShapeSchema), shapeController.updateShape);
+router.put("/:id", validate(updateShapeSchema), shapeController.updateShape);
 
 /**
  * @swagger
@@ -148,6 +341,6 @@ router.put('/:id', validate(updateShapeSchema), shapeController.updateShape);
  *       200:
  *         description: Shape deleted
  */
-router.delete('/:id', validate(idParamSchema), shapeController.deleteShape);
+router.delete("/:id", validate(idParamSchema), shapeController.deleteShape);
 
 module.exports = router;

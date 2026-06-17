@@ -77,4 +77,26 @@ const aiLimiter = isTest
       },
     });
 
-module.exports = { globalLimiter, authLimiter, aiLimiter };
+// Keyed per authenticated user — prevents a single abuser from flooding the
+// mail server. Applied to POST /api/v1/teams/invite after authenticate runs.
+const inviteLimiter = isTest
+  ? passthrough
+  : rateLimit({
+      windowMs: 60 * 1000, // 1 minute
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+      keyGenerator: (req) => {
+        if (req.user?.id) return `invite:u:${req.user.id}`;
+        return keyByUserOrIp(req);
+      },
+      message: {
+        success: false,
+        error: {
+          code: "INVITE_RATE_LIMIT",
+          message: "Too many invite requests. Please try again in a minute.",
+        },
+      },
+    });
+
+module.exports = { globalLimiter, authLimiter, aiLimiter, inviteLimiter };

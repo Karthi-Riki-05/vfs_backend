@@ -200,6 +200,37 @@ async function downgradeUser(pack, summary) {
     where: { id: pack.id },
     data: { status: "expired" },
   });
+
+  // GUARD: a recurring flow add-on subscription (Stripe-managed) may still
+  // be active. Its webhook owns proFlowLimit/proUnlimitedFlows — only clear
+  // the one-time-pack fields and skip the downgrade/picker entirely.
+  // 'cancelling' keeps access until the paid period ends.
+  const addonUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { flowAddonStatus: true, flowAddonCurrentPeriodEnd: true },
+  });
+  const hasActiveAddon =
+    addonUser?.flowAddonStatus === "active" ||
+    (addonUser?.flowAddonStatus === "cancelling" &&
+      addonUser?.flowAddonCurrentPeriodEnd &&
+      new Date(addonUser.flowAddonCurrentPeriodEnd) > new Date());
+
+  if (hasActiveAddon) {
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        activeFlowPackId: null,
+        flowPackExpiresAt: null,
+        proAdditionalFlowsPurchased: 0,
+      },
+    });
+    logger.info(
+      `[flowPackExpiry] user=${userId} pack expired but flow add-on is active — skipped limit reset`,
+    );
+    summary.expiredNoPicker++;
+    return;
+  }
+
   await prisma.user.update({
     where: { id: userId },
     data: {
@@ -288,4 +319,85 @@ async function downgradeUser(pack, summary) {
   void safeIds;
 }
 
-module.exports = { runDailyCheck };
+// past_due grace enforcement (FLOWPACK Gap #6): when a recurring flow
+// add-on payment fails, handleFlowAddonSubscriptionUpdated starts a 3-day
+// grace window. If Stripe dunning hasn't recovered the payment by then,
+// reduce entitlements to base Pro and trigger the flow picker — exactly
+// like a cancellation. Idempotent: flowAddonGracePeriodEnd is cleared after
+// processing, and recovery (status → active) restores entitlements.
+async function checkPastDueGrace() {
+  const now = new Date();
+  const summary = { reduced: 0, pickerTriggered: 0 };
+
+  const overdueUsers = await prisma.user.findMany({
+    where: {
+      flowAddonStatus: "past_due",
+      flowAddonGracePeriodEnd: { lte: now },
+    },
+    select: { id: true, email: true, name: true, flowAddonPlan: true },
+  });
+
+  for (const user of overdueUsers) {
+    try {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          proFlowLimit: 10,
+          proUnlimitedFlows: false,
+          flowAddonGracePeriodEnd: null,
+        },
+      });
+      summary.reduced++;
+
+      const personalScopeOr = await personalFlowTeamOr(user.id);
+      const flowCount = await prisma.flow.count({
+        where: { ownerId: user.id, deletedAt: null, OR: personalScopeOr },
+      });
+
+      if (flowCount > 10) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { isInFlowPickerPhase: true },
+        });
+        const excess = await prisma.flow.findMany({
+          where: { ownerId: user.id, deletedAt: null, OR: personalScopeOr },
+          orderBy: { updatedAt: "desc" },
+          skip: 10,
+          select: { id: true },
+        });
+        if (excess.length > 0) {
+          await prisma.flow.updateMany({
+            where: { id: { in: excess.map((f) => f.id) } },
+            data: { markedForDowngrade: true },
+          });
+        }
+        summary.pickerTriggered++;
+      }
+
+      await notificationService.createNotification(
+        user.id,
+        "flow_addon_grace_expired",
+        "Flow pack reduced — payment still failing",
+        "Your flow add-on payment couldn't be collected. You're back on the base 10 flows. Update your payment method to restore your pack.",
+        "/dashboard/subscription",
+        { plan: user.flowAddonPlan },
+      );
+      pushSafe(user.id, {
+        title: "Flow pack reduced",
+        body: "Payment failed — you're back on 10 flows. Update your payment method to restore your pack.",
+        data: { type: "flow_addon", url: "/dashboard/subscription" },
+      });
+
+      logger.info(
+        `[checkPastDueGrace] user=${user.id} grace expired — entitlements reduced`,
+      );
+    } catch (err) {
+      logger.error(`[checkPastDueGrace] user=${user.id}: ${err.message}`);
+    }
+  }
+
+  logger.info(`[checkPastDueGrace] ${JSON.stringify(summary)}`);
+  return summary;
+}
+
+module.exports = { runDailyCheck, checkPastDueGrace };

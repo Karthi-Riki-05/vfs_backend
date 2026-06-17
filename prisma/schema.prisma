@@ -212,6 +212,10 @@ model User {
   flowAddonPlan               String?     @map("flow_addon_plan")              // 'standard_100' | 'unlimited'
   flowAddonStatus             String?     @map("flow_addon_status")            // 'active' | 'cancelling' | 'cancelled' | 'past_due'
   flowAddonCurrentPeriodEnd   DateTime?   @map("flow_addon_current_period_end")
+  // 3-day grace window after a flow-addon payment fails (past_due). Set by
+  // the Stripe subscription.updated webhook; enforced by checkPastDueGrace
+  // in the daily cron; cleared on recovery or cancellation.
+  flowAddonGracePeriodEnd     DateTime?   @map("flow_addon_grace_period_end")
   currentVersion              UserVersion @default(free) @map("current_version")
   isLegacyPro                 Boolean     @default(false) @map("is_legacy_pro")
   isLegacyBcrypt              Boolean     @default(false) @map("is_legacy_bcrypt")
@@ -554,6 +558,7 @@ model Team {
   projects    Project[]
   chatGroups  ChatGroup[]
   shapes      Shape[]
+  associatedShapes Shape[] @relation("ShapeAssociatedTeam")
   shapeGroups ShapeGroup[]
   issueItems  IssueItem[]
   createdAt   DateTime     @default(now()) @map("created_at")
@@ -843,6 +848,13 @@ model Shape {
   xmlContent    String?     @map("xml_content") @db.Text // Legacy
   thumbnail     String?
   isPublic      Boolean     @default(false) @map("is_public")
+  // Shape → Team / Chat Group association (exclusive: one OR the other).
+  // associationType: 'team' | 'group' — mirrors which FK is set.
+  associatedTeamId      String?    @map("associated_team_id")
+  associatedTeam        Team?      @relation("ShapeAssociatedTeam", fields: [associatedTeamId], references: [id], onDelete: SetNull)
+  associatedChatGroupId String?    @map("associated_chat_group_id")
+  associatedChatGroup   ChatGroup? @relation("ShapeAssociatedGroup", fields: [associatedChatGroupId], references: [id], onDelete: SetNull)
+  associationType       String?    @map("association_type")
   createdAt     DateTime    @default(now()) @map("created_at")
   updatedAt     DateTime?   @map("updated_at")
   deletedAt     DateTime?   @map("deleted_at")
@@ -850,6 +862,8 @@ model Shape {
   @@index([groupId])
   @@index([appContext])
   @@index([teamId])
+  @@index([associatedTeamId])
+  @@index([associatedChatGroupId])
   @@map("shapes")
 }
 
@@ -876,6 +890,7 @@ model ChatGroup {
   members      ChatGroupUser[]
   messages     ChatMessage[]
   msgUsers     ChatMessageUser[]
+  associatedShapes Shape[]      @relation("ShapeAssociatedGroup")
   createdAt    DateTime?         @map("created_at")
   updatedAt    DateTime?         @map("updated_at")
   deletedAt    DateTime?         @map("deleted_at")

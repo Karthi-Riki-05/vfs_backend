@@ -64,7 +64,8 @@ router.post(
 /**
  * POST /api/v1/cron/check-flow-pack-expiry
  * Daily: notifications (7/3/1d), grace transition, expiry + flow picker
- * trigger, and trash purge for downgrade-flagged flows.
+ * trigger, trash purge for downgrade-flagged flows, and past_due grace
+ * enforcement for the recurring flow add-on.
  */
 router.post(
   "/check-flow-pack-expiry",
@@ -72,7 +73,8 @@ router.post(
     if (!requireCronSecret(req, res)) return;
     const flowPackExpiry = require("../services/flowPackExpiry.service");
     const result = await flowPackExpiry.runDailyCheck();
-    res.json({ success: true, data: result });
+    const pastDue = await flowPackExpiry.checkPastDueGrace();
+    res.json({ success: true, data: { ...result, pastDue } });
   }),
 );
 

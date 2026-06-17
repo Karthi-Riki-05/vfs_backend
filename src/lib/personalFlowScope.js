@@ -25,7 +25,7 @@ async function personalFlowTeamOr(userId) {
     where: { teamOwnerId: userId, deletedAt: null },
     select: { id: true },
   });
-  const ownedTeamIds = ownedTeams.map((t) => t.id);
+  const ownedTeamIds = (ownedTeams || []).map((t) => t.id);
   return ownedTeamIds.length
     ? [{ teamId: null }, { teamId: { in: ownedTeamIds } }]
     : [{ teamId: null }];

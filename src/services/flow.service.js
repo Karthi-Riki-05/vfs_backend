@@ -130,9 +130,12 @@ class FlowService {
     };
   }
 
-  async getFlowById(id, userId) {
+  async getFlowById(id, userId, appContext = null, teamId = null) {
+    const scopeWhere = appContext
+      ? await this._workspaceScope(userId, appContext, teamId)
+      : {};
     return await prisma.flow.findFirst({
-      where: { id, ownerId: userId },
+      where: { id, ownerId: userId, ...scopeWhere },
     });
   }
 
@@ -171,6 +174,7 @@ class FlowService {
               id: true,
               proUnlimitedFlows: true,
               proFlowLimit: true,
+              proAdditionalFlowsPurchased: true,
             },
           },
         },
@@ -194,13 +198,17 @@ class FlowService {
         );
       }
       if (!team.owner.proUnlimitedFlows) {
-        const limit = team.owner.proFlowLimit || 10;
+        // Base allowance plus one-time flow packs (System A) — keeps
+        // enforcement in sync with getPackStatus/getProSubscriptionStatus.
+        const effectiveLimit =
+          (team.owner.proFlowLimit || 10) +
+          (team.owner.proAdditionalFlowsPurchased || 0);
         const count = await prisma.flow.count({
           where: { teamId, deletedAt: null },
         });
-        if (count >= limit) {
+        if (count >= effectiveLimit) {
           throw new AppError(
-            `Team flow limit reached (${limit}). Upgrade the team plan to create more flows.`,
+            `Team flow limit reached (${effectiveLimit}). Upgrade the team plan to create more flows.`,
             403,
             "FLOW_LIMIT_REACHED",
           );
@@ -213,22 +221,30 @@ class FlowService {
           hasPro: true,
           proUnlimitedFlows: true,
           proFlowLimit: true,
+          proAdditionalFlowsPurchased: true,
         },
       });
       if (user && !user.proUnlimitedFlows) {
-        const limit = user.proFlowLimit || 10;
+        // Base allowance plus one-time flow packs (System A) — keeps
+        // enforcement in sync with getPackStatus/getProSubscriptionStatus.
+        const effectiveLimit =
+          (user.proFlowLimit || 10) + (user.proAdditionalFlowsPurchased || 0);
         // Count ALL personal flows against the limit, not just the current
         // tier's — the cap is per-user, not per-appContext (see DATA-LOSS-001).
+        // Unified scope: personalFlowTeamOr (teamId=null + owned teams) is
+        // the single definition used by getPackStatus, the expiry cron, and
+        // the add-on cancellation handler — Pro flows live in the owner's
+        // Pro team, so teamId:null alone undercounts (FLOWPACK Gap #4).
         const count = await prisma.flow.count({
           where: {
             ownerId: userId,
-            teamId: null,
             deletedAt: null,
+            OR: await personalFlowTeamOr(userId),
           },
         });
-        if (count >= limit) {
+        if (count >= effectiveLimit) {
           throw new AppError(
-            `Flow limit reached (${limit}). Upgrade to create more flows.`,
+            `Flow limit reached (${effectiveLimit}). Upgrade to create more flows.`,
             403,
             "FLOW_LIMIT_REACHED",
           );
@@ -764,7 +780,10 @@ class FlowService {
         sharedWithId: userId,
         sharedById: team.teamOwnerId,
         appContext,
-        flow: { deletedAt: null },
+        // Double-anchor: the share record AND the underlying flow must both
+        // carry the same appContext so a Pro flow never leaks into a Team
+        // viewport and vice-versa.
+        flow: { deletedAt: null, appContext },
       },
       include: {
         flow: {
@@ -790,21 +809,46 @@ class FlowService {
       }));
   }
 
-  async getFlowByIdWithAccess(id, userId) {
+  async getFlowByIdWithAccess(id, userId, appContext = null, teamId = null) {
     const flow = await prisma.flow.findFirst({
       where: { id, deletedAt: null },
     });
     if (!flow) return null;
 
-    // Owner
+    // Owner path — enforce appContext workspace scope when context is known.
+    // A Pro flow cannot be opened from a Team context and vice-versa.
     if (flow.ownerId === userId) {
+      if (appContext) {
+        const scopeWhere = await this._workspaceScope(
+          userId,
+          appContext,
+          teamId,
+        );
+        const inScope = await prisma.flow.findFirst({
+          where: { id, ownerId: userId, ...scopeWhere },
+          select: { id: true },
+        });
+        if (!inScope) {
+          // Flow exists but lives outside the active workspace context.
+          throw new AppError(
+            "Flow not found in current app context",
+            404,
+            "NOT_FOUND",
+          );
+        }
+      }
       return { ...flow, permission: "owner" };
     }
 
-    // Shared user
-    const share = await prisma.flowShare.findFirst({
-      where: { flowId: id, sharedWithId: userId },
-    });
+    // Shared path — shares are tagged with the appContext they were created in.
+    // Allow null-appContext shares through (legacy records predating the field)
+    // but strictly block cross-context shares (pro share ≠ team context).
+    const shareWhere = {
+      flowId: id,
+      sharedWithId: userId,
+      ...(appContext ? { OR: [{ appContext }, { appContext: null }] } : {}),
+    };
+    const share = await prisma.flowShare.findFirst({ where: shareWhere });
     if (share) {
       if (share.requiresPro) {
         const recipient = await prisma.user.findUnique({

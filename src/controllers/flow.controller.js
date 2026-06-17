@@ -38,7 +38,15 @@ class FlowController {
 
   getFlowById = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const flow = await flowService.getFlowByIdWithAccess(req.params.id, userId);
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const teamId = req.headers["x-team-context"] || null;
+    const flow = await flowService.getFlowByIdWithAccess(
+      req.params.id,
+      userId,
+      appContext,
+      teamId,
+    );
     if (!flow) {
       return res.status(404).json({
         success: false,
@@ -211,9 +219,14 @@ class FlowController {
   });
 
   getFlowByIdWithAccess = asyncHandler(async (req, res) => {
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const teamId = req.headers["x-team-context"] || null;
     const flow = await flowService.getFlowByIdWithAccess(
       req.params.id,
       req.user.id,
+      appContext,
+      teamId,
     );
     if (!flow) {
       return res.status(404).json({

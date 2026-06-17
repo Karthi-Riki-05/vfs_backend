@@ -2,12 +2,20 @@ const { z } = require("zod");
 
 const createChatGroupSchema = z.object({
   body: z.object({
-    title: z.string().min(1, "Title cannot be empty").max(255).trim().optional(),
+    title: z
+      .string()
+      .min(1, "Title cannot be empty")
+      .max(255)
+      .trim()
+      .optional(),
     flowId: z.number().int().optional(),
     flowItemId: z.string().optional(),
     appType: z.enum(["enterprise", "individual"]).optional(),
     teamId: z.string().optional(),
     memberIds: z.array(z.string().min(1)).optional(),
+    // Alternative to memberIds — emails are resolved to user ids server-side
+    // (unknown emails are skipped). Used by Create-Group-from-Shape modal.
+    memberEmails: z.array(z.string().email()).max(50).optional(),
     // When true, this is a 1-on-1 DM — backend dedupes against existing
     // DM groups between the same two users instead of creating new.
     isDirect: z.boolean().optional(),

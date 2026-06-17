@@ -233,14 +233,32 @@ class TeamService {
   }
 
   async removeMember(teamId, memberUserId, requestingUserId) {
-    const team = await prisma.team.findFirst({
-      where: { id: teamId, teamOwnerId: requestingUserId },
-    });
-    if (!team)
-      throw new AppError("Team not found or not owner", 404, "NOT_FOUND");
+    const team = await prisma.team.findUnique({ where: { id: teamId } });
+    if (!team) throw new AppError("Team not found", 404, "NOT_FOUND");
+
+    // Fix 5: Expand RBAC — both OWNER and ADMIN roles may remove members,
+    // matching the permission model already in place for invites.
+    const isOwner = team.teamOwnerId === requestingUserId;
+    if (!isOwner) {
+      const adminMembership = await prisma.teamMember.findFirst({
+        where: {
+          teamId,
+          userId: requestingUserId,
+          role: { in: ["OWNER", "ADMIN"] },
+        },
+      });
+      if (!adminMembership) {
+        throw new AppError(
+          "Only team owners and admins can remove members",
+          403,
+          "FORBIDDEN",
+        );
+      }
+    }
+
     if (memberUserId === requestingUserId) {
       throw new AppError(
-        "Cannot remove yourself from your own team",
+        "Cannot remove yourself from the team",
         400,
         "BAD_REQUEST",
       );
@@ -260,6 +278,16 @@ class TeamService {
   }
 
   async createInvite(teamId, userId, emails, appContext = "team") {
+    // Fix 1: Normalize and deduplicate ALL emails upfront before any DB I/O.
+    // This eliminates case-sensitivity race conditions where "User@Test.com"
+    // and "user@test.com" could bypass duplicate checks and flood the mail server.
+    const normalized = [
+      ...new Set(emails.map((e) => e.trim().toLowerCase()).filter(Boolean)),
+    ];
+    if (normalized.length === 0) {
+      throw new AppError("No valid emails provided", 400, "BAD_REQUEST");
+    }
+
     // The resolved team (owner row or member row). MUST be declared — class
     // methods run in strict mode, so the bare `inviteTeam = ...` assignments
     // below otherwise throw ReferenceError and every invite 500s.
@@ -292,6 +320,18 @@ class TeamService {
       where: { id: userId },
       select: { name: true, email: true },
     });
+
+    // Fix 2: Block self-invite. Fetch the inviter's canonical email from the
+    // DB (not from the token) and reject if it appears in the invite list.
+    const inviterEmail = inviter?.email?.toLowerCase();
+    if (inviterEmail && normalized.includes(inviterEmail)) {
+      throw new AppError(
+        "You cannot invite yourself to a team",
+        400,
+        "SELF_INVITE",
+      );
+    }
+
     const baseUrl =
       process.env.APP_URL ||
       process.env.FRONTEND_URL ||
@@ -299,10 +339,7 @@ class TeamService {
       "http://localhost:3000";
     const results = [];
 
-    for (const email of emails) {
-      const trimmed = email.trim().toLowerCase();
-      if (!trimmed) continue;
-
+    for (const trimmed of normalized) {
       // Check if already a member
       const existingUser = await prisma.user.findUnique({
         where: { email: trimmed },
@@ -313,7 +350,7 @@ class TeamService {
         });
         if (existingMember) {
           // If single email invite, throw error for clear frontend feedback
-          if (emails.length === 1) {
+          if (normalized.length === 1) {
             throw new AppError(
               "This email is already a member of this team",
               409,
@@ -458,18 +495,23 @@ class TeamService {
       throw new AppError("Invitation has expired", 400, "EXPIRED");
     }
 
-    // Pro-app invites require the invitee to hold lifetime Pro ($1) before
-    // joining. Surface that requirement so the FE can route to the
-    // /invite/pro-purchase flow when needed.
+    // Fix 4: Move the Pro paywall gate to the preview stage so non-Pro users
+    // are blocked before the token is consumed at acceptance. Throws 402 here
+    // rather than returning a soft `requiresProPurchase` flag.
     const inviteAppContext =
       invite.appContext || invite.team?.appContext || "free";
-    let requiresProPurchase = false;
     if (inviteAppContext === "pro") {
       const invitee = await prisma.user.findUnique({
         where: { email: invite.email.toLowerCase() },
         select: { hasPro: true, proPurchasedAt: true },
       });
-      requiresProPurchase = !invitee?.hasPro || !invitee?.proPurchasedAt;
+      if (!invitee?.hasPro || !invitee?.proPurchasedAt) {
+        throw new AppError(
+          "This team uses ValueChart Pro. Purchase Pro ($1 lifetime) to join.",
+          402,
+          "PRO_REQUIRED",
+        );
+      }
     }
 
     return {
@@ -481,7 +523,6 @@ class TeamService {
       appContext: inviteAppContext,
       role: invite.role,
       email: invite.email,
-      requiresProPurchase,
     };
   }
 

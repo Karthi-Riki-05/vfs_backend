@@ -73,16 +73,20 @@ class DashboardService {
 
   async getActivity(userId, appContext = "free", teamId = null) {
     const scopeInfo = await this._resolveScope(userId, teamId);
-    const days = [];
     const now = new Date();
+    const ranges = [];
     for (let i = 6; i >= 0; i--) {
       const date = new Date(now);
       date.setDate(date.getDate() - i);
       date.setHours(0, 0, 0, 0);
       const nextDate = new Date(date);
       nextDate.setDate(nextDate.getDate() + 1);
+      ranges.push({ date, nextDate });
+    }
 
-      const [created, edited] = await Promise.all([
+    // Issue all 14 day-counts in one batch instead of 7 serial round-trips.
+    const counts = await Promise.all(
+      ranges.flatMap(({ date, nextDate }) => [
         prisma.flow.count({
           where: this._flowWhere(scopeInfo, appContext, {
             createdAt: { gte: date, lt: nextDate },
@@ -95,17 +99,15 @@ class DashboardService {
             createdAt: { lt: date },
           }),
         }),
-      ]);
+      ]),
+    );
 
-      days.push({
-        date: date.toISOString().split("T")[0],
-        label: date.toLocaleDateString("en-US", { weekday: "short" }),
-        created,
-        edited,
-      });
-    }
-
-    return days;
+    return ranges.map(({ date }, idx) => ({
+      date: date.toISOString().split("T")[0],
+      label: date.toLocaleDateString("en-US", { weekday: "short" }),
+      created: counts[idx * 2],
+      edited: counts[idx * 2 + 1],
+    }));
   }
 
   async getRecentFlows(userId, appContext = "free", limit = 5, teamId = null) {
@@ -135,14 +137,16 @@ class DashboardService {
     // returns [] — the caller hides the section there.
     let teamIds;
     if (teamId) {
-      const membership = await prisma.teamMember.findFirst({
-        where: { teamId, userId },
-        select: { id: true },
-      });
-      const owns = await prisma.team.findFirst({
-        where: { id: teamId, teamOwnerId: userId },
-        select: { id: true },
-      });
+      const [membership, owns] = await Promise.all([
+        prisma.teamMember.findFirst({
+          where: { teamId, userId },
+          select: { id: true },
+        }),
+        prisma.team.findFirst({
+          where: { id: teamId, teamOwnerId: userId },
+          select: { id: true },
+        }),
+      ]);
       if (!membership && !owns) return [];
       teamIds = [teamId];
     } else {

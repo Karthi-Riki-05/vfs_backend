@@ -425,19 +425,31 @@ class AiAssistantService {
       }),
     ]);
 
-    // Subscription (with ALL fields needed for date questions)
-    const subscription = await prisma.subscription.findFirst({
-      where: { userId, status: "active" },
-      include: {
-        plan: { select: { name: true, duration: true, price: true } },
-      },
-    });
+    // Subscription, team memberships, and projects are mutually independent —
+    // fetch them in one batch instead of three serial awaits.
+    const [subscription, teamMemberships, projects] = await Promise.all([
+      // Subscription (with ALL fields needed for date questions)
+      prisma.subscription.findFirst({
+        where: { userId, status: "active" },
+        include: {
+          plan: { select: { name: true, duration: true, price: true } },
+        },
+      }),
+      // Teams
+      prisma.teamMember.findMany({
+        where: { userId },
+        include: { team: true },
+      }),
+      // Projects
+      prisma.project.findMany({
+        where: { createdBy: userId, deletedAt: null },
+        select: {
+          name: true,
+          _count: { select: { flows: true } },
+        },
+      }),
+    ]);
 
-    // Teams
-    const teamMemberships = await prisma.teamMember.findMany({
-      where: { userId },
-      include: { team: true },
-    });
     const teamIds = teamMemberships.map((tm) => tm.team?.id).filter(Boolean);
     const teamMemberCounts =
       teamIds.length > 0
@@ -447,15 +459,6 @@ class AiAssistantService {
             _count: { id: true },
           })
         : [];
-
-    // Projects
-    const projects = await prisma.project.findMany({
-      where: { createdBy: userId, deletedAt: null },
-      select: {
-        name: true,
-        _count: { select: { flows: true } },
-      },
-    });
 
     // Shapes
     const shapeCount = await prisma.shape.count({

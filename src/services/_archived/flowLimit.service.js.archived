@@ -1,3 +1,11 @@
+// ARCHIVED 2026-06-11 (FLOWPACK_AUDIT.md Gap #8)
+// Dead code — never imported anywhere (verified: zero requires in src/,
+// index.js, and tests/). The FlowLimit table was the legacy free-tier
+// counter; all live limit enforcement is now:
+//   1. flow.service.js createFlow (creation check, personalFlowTeamOr scope)
+//   2. flowPackExpiry.service.js (expiry cron + past_due grace)
+//   3. pro.service.js (add-on webhooks)
+// Safe to hard-delete after 2026-09-11 if no issues.
 const { prisma } = require('../lib/prisma');
 const AppError = require('../utils/AppError');
 

@@ -5,6 +5,11 @@ const { grantProCredits } = require("../lib/grantProCredits");
 const asyncHandler = require("../utils/asyncHandler");
 const logger = require("../utils/logger");
 
+// NOTE: Flow packs (flow add-on 'standard_100' / 'unlimited') are WEB-ONLY
+// purchases via Stripe Checkout — they are intentionally absent here.
+// Adding them requires a business decision plus App Store / Play Store
+// products and a flow_addon handler mirroring
+// proService.handleFlowAddonCheckoutWebhook. See FLOWPACK_AUDIT.md Gap #9.
 const PRODUCT_MAP = {
   valuechart_pro_monthly: { hasPro: true, currentVersion: "pro" },
   valuechart_pro_yearly: { hasPro: true, currentVersion: "pro" },

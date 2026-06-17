@@ -4,6 +4,7 @@ const teamController = require("../controllers/team.controller");
 const { authenticate } = require("../middleware/auth.middleware");
 const { checkTeamAccess } = require("../middleware/checkTeamAccess");
 const validate = require("../middleware/validate");
+const { inviteLimiter } = require("../middleware/rateLimiter");
 const {
   createTeamSchema,
   updateTeamSchema,
@@ -112,6 +113,7 @@ router.post(
  */
 router.post(
   "/invite",
+  inviteLimiter,
   checkTeamAccess,
   validate(inviteSchema),
   teamController.invite,

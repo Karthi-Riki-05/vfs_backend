@@ -87,6 +87,14 @@ class ProController {
     const result = await proService.getFlowAddonStatus(req.user.id);
     res.json({ success: true, data: result });
   });
+
+  verifyFlowAddonCheckout = asyncHandler(async (req, res) => {
+    const result = await proService.verifyFlowAddonCheckout(
+      req.user.id,
+      req.body.sessionId || req.query.session_id,
+    );
+    res.json({ success: true, data: result });
+  });
 }
 
 module.exports = new ProController();
