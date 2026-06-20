@@ -729,8 +729,10 @@ class SuperAdminController {
             _count: { select: { messages: true } },
           },
         },
-        firebaseUser: {
+        firebaseUsers: {
+          where: { deletedAt: null },
           select: { fcmToken: true, fcmUsername: true, updatedAt: true },
+          orderBy: { updatedAt: "desc" },
         },
         _count: {
           select: {

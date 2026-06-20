@@ -1,6 +1,7 @@
 const rateLimit = require("express-rate-limit");
 const { ipKeyGenerator } = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
+const securityAlert = require("../services/securityAlert.service");
 
 // In-process rate limiters share state across an entire Jest worker.
 // That makes tests flaky (the 11th request in a 10/15-min window is 429).
@@ -89,6 +90,22 @@ const inviteLimiter = isTest
       keyGenerator: (req) => {
         if (req.user?.id) return `invite:u:${req.user.id}`;
         return keyByUserOrIp(req);
+      },
+      // On breach: fire a fail-open security alert to the team owner/admins,
+      // then send the SAME response body the `message` option would have sent.
+      handler: (req, res, _next, options) => {
+        securityAlert.alertInviteRateLimit({
+          actorId: req.user?.id,
+          actorEmail: req.user?.email,
+          teamId:
+            req.params?.teamId ||
+            req.body?.teamId ||
+            req.headers["x-team-context"] ||
+            null,
+          ip: req.ip,
+          route: req.originalUrl,
+        }); // intentionally not awaited — must not delay the 429
+        res.status(options.statusCode).json(options.message);
       },
       message: {
         success: false,

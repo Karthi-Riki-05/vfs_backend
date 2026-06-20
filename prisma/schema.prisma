@@ -257,10 +257,11 @@ model User {
   accounts             Account[]
   sessions             Session[]
   flows                Flow[]
+  flowsLastModified    Flow[]                @relation("FlowLastModifiedBy")
   shapeGroups          ShapeGroup[]
   shapes               Shape[]
   subscription         Subscription?
-  firebaseUser         FirebaseUser?
+  firebaseUsers        FirebaseUser[]
   usersApps            UserApp[]
   ownedTeams           Team[]
   teamMemberships      TeamMember[]
@@ -301,11 +302,32 @@ model User {
   adminLogsReceived    AdminLog[]            @relation("AdminLogTarget")
   subscriptionHistory  SubscriptionHistory[]
   transactionLogs      TransactionLog[]
+  devices              UserDevice[]
 
   @@index([legacyVsId])
   @@index([companyId])
   @@index([suspendedAt])
   @@map("users")
+}
+
+// ============================================================
+// Known sign-in devices/IPs for new-device security alerts.
+// Stores SHA-256 hashes of (ip) and (user-agent) — never raw values —
+// so a leaked DB can't be used to geo-track users. A login whose
+// (userId, ipHash, uaHash) tuple is absent is treated as a new device.
+// ============================================================
+model UserDevice {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ipHash    String   @map("ip_hash")
+  uaHash    String   @map("ua_hash")
+  lastSeen  DateTime @default(now()) @map("last_seen")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, ipHash, uaHash])
+  @@index([userId])
+  @@map("user_devices")
 }
 
 // ============================================================
@@ -344,9 +366,14 @@ model Permission {
 // Source: value_stream.firebase_user
 // ============================================================
 
+// Multi-device topology: ONE row per (user, device-token). A user may have
+// many. Device identity is the COMPOSITE (userId, fcmToken) — not fcmToken
+// alone, because legacy migrated data stores tokens as JSON blobs that are
+// shared across users. Upserts key on the composite; per-user sends fan out
+// over every row for the userId.
 model FirebaseUser {
   id          String    @id @default(cuid())
-  userId      String    @unique @map("user_id")
+  userId      String    @map("user_id")
   user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   fcmUsername String?   @map("fcm_username")
   fcmPassword String?   @map("fcm_password")
@@ -356,6 +383,8 @@ model FirebaseUser {
   updatedAt   DateTime? @map("updated_at")
   deletedAt   DateTime? @map("deleted_at")
 
+  @@unique([userId, fcmToken])
+  @@index([userId])
   @@map("firebase_users")
 }
 
@@ -561,6 +590,7 @@ model Team {
   associatedShapes Shape[] @relation("ShapeAssociatedTeam")
   shapeGroups ShapeGroup[]
   issueItems  IssueItem[]
+  notifications Notification[]
   createdAt   DateTime     @default(now()) @map("created_at")
   updatedAt   DateTime?    @map("updated_at")
   deletedAt   DateTime?    @map("deleted_at")
@@ -636,6 +666,9 @@ model Flow {
   isFavorite     Boolean         @default(false) @map("is_favorite")
   ownerId        String          @map("owner_id")
   owner          User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  // Last actor (owner or collaborator) to persist diagram data on this flow.
+  lastModifiedById String?       @map("last_modified_by_id")
+  lastModifiedBy   User?         @relation("FlowLastModifiedBy", fields: [lastModifiedById], references: [id], onDelete: SetNull)
   projectId      String?         @map("project_id")
   project        Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
   // Workspace scoping: null = personal, non-null = belongs to that team.
@@ -662,6 +695,7 @@ model Flow {
   @@index([appContext])
   @@index([projectId])
   @@index([teamId])
+  @@index([lastModifiedById])
   @@index([legacyId, legacySource])
   @@map("flows")
 }
@@ -1217,6 +1251,7 @@ model UserAction {
   action      String
   actionModel String?     @map("action_model")
   actionId    Int?        @map("action_id")
+  details     Json?       // structured audit context (flowId is a cuid, won't fit Int actionId)
   userId      String?     @map("user_id")
   user        User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
   appContext  UserVersion @default(free) @map("app_context")
@@ -1405,6 +1440,11 @@ model Notification {
   id        String    @id @default(cuid())
   userId    String    @map("user_id")
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Workspace boundary. NULL = a personal notification (scoped by appContext);
+  // non-null = belongs to that team's workspace. SetNull on team delete so the
+  // notification survives as a personal one rather than vanishing.
+  teamId    String?   @map("team_id")
+  team      Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
   // Examples: flow_pack_7day, flow_pack_3day, flow_pack_1day,
   //           flow_pack_grace, flow_pack_expired, flow_picker_required,
   //           flows_restored.
@@ -1418,7 +1458,11 @@ model Notification {
   createdAt DateTime    @default(now()) @map("created_at")
   expiresAt DateTime?   @map("expires_at")
 
+  // Primary access path: a user's notifications within one workspace, by read
+  // state. Mirrors the { ownerId, teamId } boundary used across the app.
+  @@index([userId, teamId, isRead])
   @@index([userId, isRead])
+  @@index([teamId])
   @@index([createdAt])
   @@map("notifications")
 }

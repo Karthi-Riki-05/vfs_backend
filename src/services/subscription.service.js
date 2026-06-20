@@ -1189,12 +1189,19 @@ class SubscriptionService {
       }),
       // Flip the user onto the team tier so hasPro / currentVersion gates
       // (dashboard, flow-limit checks, AI pipeline) pick it up.
+      //
+      // SECURITY (multi-plan auth leak fix): do NOT set proPurchasedAt here.
+      // proPurchasedAt is the SOLE marker of the standalone $5 Pro product and
+      // is what every Pro-app gate (enforceProContext, ProGuard, switchApp) keys
+      // on. A Team subscription unlocks Pro-tier *features inside the Team
+      // workspace*, but must NEVER grant access to the standalone Pro app — that
+      // is a separate purchase. Writing proPurchasedAt on team activation let a
+      // Team subscriber walk straight into the Pro app for free.
       prisma.user.update({
         where: { id: userId },
         data: {
           hasPro: true,
           currentVersion: "team",
-          proPurchasedAt: new Date(),
         },
       }),
       // Grant seat-scaled team AI credits scoped to team appContext.

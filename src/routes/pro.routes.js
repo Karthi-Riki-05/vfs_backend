@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const proController = require("../controllers/pro.controller");
 const { authenticate } = require("../middleware/auth.middleware");
+const mobileAppOnly = require("../middleware/mobileAppOnly");
 const validate = require("../middleware/validate");
 const {
   switchAppSchema,
@@ -11,13 +12,23 @@ const {
 // App status (current app, pro status, flow usage)
 router.get("/app-status", authenticate, proController.getAppStatus);
 
-// Grant Pro from the Pro app (App Store / Play Store purchase). Called
-// automatically by ProGuard when the user is in ?app=pro context — no Stripe
-// charge. The ?app=pro URL is trusted as proof of purchase (product decision),
-// so no WebView/mobile guard here; the grant is idempotent (one 200-credit
-// grant per account, re-grant is a no-op). `authenticate` is still required.
-// NOTE: mobileAppOnly.js is kept in the codebase for potential future use.
-router.post("/grant-from-mobile", authenticate, proController.grantFromMobile);
+// Grant Pro from the Pro app (App Store / Play Store purchase). Called by
+// ProGuard ONLY inside the genuine Flutter WebView — no Stripe charge. The
+// grant is idempotent (one 200-credit grant per account, re-grant is a no-op).
+//
+// SECURITY (trust model reversed 2026-06-18): the ?app=pro URL is NO LONGER
+// trusted as proof of purchase. `mobileAppOnly` keeps normal web sessions out
+// of this Pro-granting endpoint, and ProGuard refuses to call it from a
+// browser (device-mode === 'web'). Web users must buy Pro via switchApp →
+// Stripe. `mobileAppOnly` is a soft (client-set) signal, so the authoritative
+// boundary remains the server-side X-App-Context gate (enforceProContext)
+// which denies Pro-scoped data to anyone whose account is not actually Pro.
+router.post(
+  "/grant-from-mobile",
+  authenticate,
+  mobileAppOnly,
+  proController.grantFromMobile,
+);
 
 // Switch between free and pro apps
 router.put(

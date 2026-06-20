@@ -86,14 +86,21 @@ class ProjectService {
           projectId: id,
           teamId: project.teamId,
           deletedAt: null,
-          appContext: "team",
+          // Free folds into the Team-App container (no standalone free shell).
+          appContext: { in: ["team", "free"] },
         }
       : {
           projectId: id,
           ownerId: userId,
           teamId: null,
           deletedAt: null,
-          appContext: project.appContext,
+          // A free personal project folds into the Team container; flows are
+          // only ever tagged pro/team, so map free → {team,free} to avoid
+          // matching zero rows (DATA-LOSS-001). Pro stays strictly isolated.
+          appContext:
+            project.appContext === "free"
+              ? { in: ["team", "free"] }
+              : project.appContext,
         };
 
     if (search) {

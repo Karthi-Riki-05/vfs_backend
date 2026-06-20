@@ -19,6 +19,25 @@ function init() {
   initialized = true;
 }
 
+// FCM error codes that mean the token is permanently dead — purge on sight.
+const STALE_TOKEN_CODES = new Set([
+  "messaging/registration-token-not-registered",
+  "messaging/invalid-registration-token",
+]);
+
+function isStaleTokenError(e) {
+  return !!e && STALE_TOKEN_CODES.has(e.code);
+}
+
+// Best-effort removal of a dead device row. Never throws into the send path.
+async function purgeToken(fcmToken) {
+  try {
+    await prisma.firebaseUser.deleteMany({ where: { fcmToken } });
+  } catch (e) {
+    console.error("[FCM] purgeToken failed:", e.message);
+  }
+}
+
 async function sendPushNotification(fcmToken, title, body, data = {}) {
   try {
     init();
@@ -32,18 +51,42 @@ async function sendPushNotification(fcmToken, title, body, data = {}) {
       data: stringData,
       android: { priority: "high" },
       apns: { payload: { aps: { sound: "default" } } },
+      webpush: data.url
+        ? { fcmOptions: { link: String(data.url) } }
+        : undefined,
     });
     return { success: true };
   } catch (e) {
-    console.error("[FCM] send failed:", e.message);
+    // Per-user sends now self-heal: a dead token is purged from the DB so it
+    // never accumulates (previously only broadcastToAll cleaned up).
+    if (isStaleTokenError(e)) {
+      await purgeToken(fcmToken);
+      console.error(`[FCM] purged stale token (${e.code})`);
+    } else {
+      console.error("[FCM] send failed:", e.message);
+    }
     return { success: false, error: e.message };
   }
 }
 
+// Fan out across EVERY active device registered to the user.
 async function sendToUser(userId, title, body, data = {}) {
-  const fb = await prisma.firebaseUser.findFirst({ where: { userId } });
-  if (!fb || !fb.fcmToken) return { success: false, error: "No FCM token" };
-  return sendPushNotification(fb.fcmToken, title, body, data);
+  const devices = await prisma.firebaseUser.findMany({
+    where: { userId, fcmToken: { not: null }, deletedAt: null },
+    select: { fcmToken: true },
+  });
+  if (devices.length === 0) return { success: false, error: "No FCM token" };
+
+  const results = await Promise.all(
+    devices.map((d) => sendPushNotification(d.fcmToken, title, body, data)),
+  );
+  const sent = results.filter((r) => r.success).length;
+  return {
+    success: sent > 0,
+    sent,
+    failed: results.length - sent,
+    total: results.length,
+  };
 }
 
 async function broadcastToAll(title, body, data = {}) {
@@ -81,9 +124,8 @@ async function broadcastToAll(title, body, data = {}) {
     }
   });
   if (stale.length > 0) {
-    await prisma.firebaseUser.updateMany({
+    await prisma.firebaseUser.deleteMany({
       where: { id: { in: stale } },
-      data: { fcmToken: null },
     });
   }
 

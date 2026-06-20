@@ -8,9 +8,9 @@ class ProController {
   });
 
   // POST /api/v1/pro/grant-from-mobile
-  // Called by ProGuard in the Flutter WebView after an App Store purchase.
-  // Grants Pro (credits + user promotion + own Pro team), no Stripe charge.
-  // Protected by authenticate + mobileAppOnly. Idempotent.
+  // Called by ProGuard ONLY inside the Flutter WebView after an App Store /
+  // Play Store purchase. Grants Pro (credits + user promotion + own Pro team),
+  // no Stripe charge. Protected by authenticate + mobileAppOnly. Idempotent.
   grantFromMobile = asyncHandler(async (req, res) => {
     const result = await proService.grantFromMobile(req.user.id);
     res.json({ success: true, data: result });

@@ -6,7 +6,8 @@ const aiCreditService = require("../services/aiCredit.service");
 
 class TeamController {
   getTeams = asyncHandler(async (req, res) => {
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const result = await teamService.getTeams(
       req.user.id,
       req.query,
@@ -16,7 +17,8 @@ class TeamController {
   });
 
   getTeamById = asyncHandler(async (req, res) => {
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const team = await teamService.getTeamById(
       req.params.id,
       req.user.id,
@@ -26,7 +28,8 @@ class TeamController {
   });
 
   createTeam = asyncHandler(async (req, res) => {
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     const team = await teamService.createTeam(
       req.user.id,
       req.body,
@@ -85,7 +88,8 @@ class TeamController {
 
   invite = asyncHandler(async (req, res) => {
     const { teamId, email, emails } = req.body;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     // Support single email or comma-separated list. Guard email.includes —
     // `email` is optional when `emails[]` is supplied (would throw otherwise).
     const emailList = emails
@@ -118,6 +122,13 @@ class TeamController {
     res.json({ success: true, data: result });
   });
 
+  declineInvite = asyncHandler(async (req, res) => {
+    const token = req.query.token || req.body?.token;
+    if (!token) throw new AppError("Token required", 400, "BAD_REQUEST");
+    const result = await teamService.declineInvite(token, req.user.id);
+    res.json({ success: true, data: result });
+  });
+
   listPendingInvites = asyncHandler(async (req, res) => {
     const { teamId } = req.query;
     if (!teamId) throw new AppError("teamId required", 400, "BAD_REQUEST");
@@ -133,7 +144,8 @@ class TeamController {
   // NOT expose or scope any flow/chat data (DATA-LOSS-001).
   getMyContexts = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const personalCtx = req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const personalCtx =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
 
     // Determine which app is calling via X-Team-Context. When the header
     // carries a proTeamId, we're in pro app context; otherwise (no header or

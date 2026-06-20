@@ -2,6 +2,12 @@ const { prisma } = require("../lib/prisma");
 const produce = require("immer").produce;
 const AppError = require("../utils/AppError");
 const { personalFlowTeamOr } = require("../lib/personalFlowScope");
+const notificationService = require("./notification.service");
+
+// Throttle window for collaborator-edit notifications: at most one "X edited
+// your flow" per flow per editor within this window, so a save-heavy session
+// produces a single clean action-log entry rather than a notification storm.
+const FLOW_EDIT_NOTIFY_THROTTLE_MS = 10 * 60 * 1000;
 
 class FlowService {
   // Strict workspace scoping (DATA-LOSS-001). ownerId always bounds the
@@ -22,7 +28,9 @@ class FlowService {
         where: {
           id: teamId,
           teamOwnerId: userId,
-          appContext: "team",
+          // Free teams fold into the Team-App container (no standalone free
+          // app shell): an owned team OR free header is personal context.
+          appContext: { in: ["team", "free"] },
           deletedAt: null,
         },
         select: { id: true },
@@ -46,11 +54,16 @@ class FlowService {
       // Pro grant still in flight — return empty rather than leak free flows.
       return { teamId: proTeam ? proTeam.id : "__no_pro_team__" };
     }
-    // Team/free user personal context = NULL-team flows + team-app owned teams.
-    // Exclude pro-app owned teams (appContext='pro') so pro flows never
-    // leak into the team-app personal view (cross-app isolation).
+    // Team/free user personal context = NULL-team flows + owned team-app AND
+    // free teams (free folds into the Team-App container). Exclude pro-app
+    // owned teams (appContext='pro') so pro flows never leak into the
+    // team-app personal view (cross-app isolation).
     const ownedTeams = await prisma.team.findMany({
-      where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
+      where: {
+        teamOwnerId: userId,
+        appContext: { in: ["team", "free"] },
+        deletedAt: null,
+      },
       select: { id: true },
     });
     const ownedTeamIds = ownedTeams.map((t) => t.id);
@@ -65,6 +78,15 @@ class FlowService {
         },
       ],
     };
+  }
+
+  // Public wrapper so OTHER services (e.g. dashboard stats) reuse the EXACT
+  // same workspace scope as the flows list — dashboard counts must never
+  // diverge from what the user actually sees, and must never re-implement
+  // scoping (DATA-LOSS-001). Returns the same partial where-clause as
+  // _workspaceScope; merge it into an ownerId-bounded query.
+  async resolveWorkspaceScope(userId, appContext, teamId) {
+    return this._workspaceScope(userId, appContext, teamId);
   }
 
   async getAllFlows(userId, options = {}, appContext = "team") {
@@ -294,7 +316,7 @@ class FlowService {
 
     const updated = await prisma.flow.update({
       where: { id },
-      data: updateData,
+      data: { ...updateData, lastModifiedById: userId }, // record acting owner
     });
 
     // Create a version snapshot whenever diagramData changes
@@ -326,9 +348,56 @@ class FlowService {
       } catch (e) {
         console.error("FlowVersion snapshot failed:", e.message);
       }
+
+      // P1 collaboration trigger: notify the flow owner that a collaborator
+      // edited their flow (throttled to one entry per flow/editor per window).
+      //
+      // NOTE: updateFlow is currently owner-scoped (`ownerId: userId` above),
+      // so `flow.ownerId === userId` always holds and this branch is dormant —
+      // it fires the instant a collaborator-edit path is enabled (i.e. when
+      // the update is allowed to resolve a team-mate's flow). It is guarded so
+      // it can never notify the editor about their own edit. Do NOT relax the
+      // ownerId binding to activate this without isolation sign-off
+      // (DATA-LOSS-001).
+      await this._notifyOwnerOfCollaboratorEdit(flow, userId).catch(() => {});
     }
 
     return updated;
+  }
+
+  async _notifyOwnerOfCollaboratorEdit(flow, editorId) {
+    if (!flow?.ownerId || flow.ownerId === editorId) return; // own edit — skip
+
+    // Throttle: skip if we already logged an edit for this flow within window.
+    const since = new Date(Date.now() - FLOW_EDIT_NOTIFY_THROTTLE_MS);
+    const recent = await prisma.notification.findFirst({
+      where: {
+        userId: flow.ownerId,
+        type: "flow_updated",
+        createdAt: { gte: since },
+        metadata: { path: ["flowId"], equals: flow.id },
+      },
+      select: { id: true },
+    });
+    if (recent) return;
+
+    const editor = await prisma.user.findUnique({
+      where: { id: editorId },
+      select: { name: true, email: true },
+    });
+
+    await notificationService.createNotification(
+      flow.ownerId,
+      "flow_updated",
+      "Flow updated",
+      `${editor?.name || editor?.email || "A collaborator"} edited "${
+        flow.name || "your flow"
+      }".`,
+      `/dashboard/flows/${flow.id}`,
+      { flowId: flow.id, flowName: flow.name || null, editedBy: editorId },
+      flow.appContext || "team", // appContext
+      flow.teamId || null, // scope to the flow's workspace
+    );
   }
 
   async deleteFlow(id, userId) {
@@ -356,7 +425,9 @@ class FlowService {
         where: {
           id: teamId,
           teamOwnerId: userId,
-          appContext: "team",
+          // Free teams fold into the Team-App container (no standalone free
+          // app shell): an owned team OR free header is personal context.
+          appContext: { in: ["team", "free"] },
           deletedAt: null,
         },
         select: { id: true },
@@ -374,7 +445,11 @@ class FlowService {
       where.teamId = proTeam ? proTeam.id : "__no_pro_team__";
     } else {
       const ownedTeams = await prisma.team.findMany({
-        where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
+        where: {
+          teamOwnerId: userId,
+          appContext: { in: ["team", "free"] },
+          deletedAt: null,
+        },
         select: { id: true },
       });
       const ownedTeamIds = ownedTeams.map((t) => t.id);
@@ -927,7 +1002,7 @@ class FlowService {
 
     const updated = await prisma.flow.update({
       where: { id },
-      data: updateData,
+      data: { ...updateData, lastModifiedById: userId }, // record acting collaborator/owner
     });
 
     // Capture a version snapshot for shared-edit saves, exactly like
@@ -962,9 +1037,64 @@ class FlowService {
       } catch (e) {
         console.error("FlowVersion snapshot failed (shared edit):", e.message);
       }
+
+      // P1 collaboration triggers on the LIVE co-edit path. updateFlow (the
+      // owner-only primitive) keeps its ownerId binding untouched per
+      // DATA-LOSS-001; the collaborator-edit side-effects belong here, where
+      // access has already been verified (owner OR FlowShare edit).
+      //
+      // Both helpers self-guard against owner==editor, so the owner editing
+      // their own flow produces neither a notification nor an audit row.
+      // createNotification() emits over Socket.IO to room user:<ownerId>
+      // automatically, satisfying the real-time requirement with no extra
+      // socket plumbing. Best-effort — a notify/audit failure must never roll
+      // back a persisted edit.
+      await this._notifyOwnerOfCollaboratorEdit(flow, userId).catch(() => {});
+      await this._auditCollaboratorEdit(flow, userId).catch(() => {});
     }
 
     return updated;
+  }
+
+  // Immutable audit row: "{editor} edited shared flow {flow} owned by {owner}
+  // (Version #n)". Skipped for self-edits — an owner editing their own flow is
+  // not a collaboration event. Never throws into the caller (best-effort).
+  async _auditCollaboratorEdit(flow, editorId) {
+    if (!flow?.ownerId || flow.ownerId === editorId) return;
+
+    const [editor, owner, versionCount] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: editorId },
+        select: { name: true, email: true },
+      }),
+      prisma.user.findUnique({
+        where: { id: flow.ownerId },
+        select: { name: true, email: true },
+      }),
+      prisma.flowVersion.count({ where: { flowId: flow.id } }),
+    ]);
+    const editorName = editor?.name || editor?.email || "A collaborator";
+    const ownerName = owner?.name || owner?.email || "the owner";
+
+    await prisma.userAction.create({
+      data: {
+        action: "flow_collaborator_edit",
+        actionModel: "Flow",
+        userId: editorId, // the actor — never the owner
+        appContext: flow.appContext || "team",
+        details: {
+          message: `${editorName} edited shared flow "${
+            flow.name || "Untitled"
+          }" owned by ${ownerName} (Version #${versionCount})`,
+          flowId: flow.id,
+          ownerId: flow.ownerId,
+          editorId,
+          version: versionCount,
+        },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    });
   }
 
   async duplicateSharedFlow(id, userId, appContext = "team") {

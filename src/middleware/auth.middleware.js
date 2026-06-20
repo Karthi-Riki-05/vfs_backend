@@ -2,6 +2,7 @@ const jwt = require("jsonwebtoken");
 const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
+const { proContextViolation } = require("./enforceProContext");
 
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -55,6 +56,9 @@ const authenticate = async (req, res, next) => {
         userStatus: true,
         currentVersion: true,
         suspendedAt: true,
+        // Needed by the Pro app-context gate (enforceProContext) below.
+        hasPro: true,
+        proPurchasedAt: true,
       },
     });
 
@@ -87,8 +91,18 @@ const authenticate = async (req, res, next) => {
       id: userId,
       role: user.role,
       currentVersion: user.currentVersion || "free",
+      hasPro: user.hasPro === true,
+      proPurchasedAt: user.proPurchasedAt || null,
       ...decoded,
     };
+
+    // Pro app-context gate: reject any request that claims the Pro context
+    // (X-App-Context: pro / _appctx=pro) when the user is not entitled to Pro.
+    // Runs here so every authenticated route is covered with no per-route
+    // wiring. Provisioning/auth routes are exempt (see enforceProContext).
+    const proViolation = proContextViolation(req);
+    if (proViolation) return next(proViolation);
+
     next();
   } catch (error) {
     if (error.name === "TokenExpiredError") {

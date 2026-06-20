@@ -166,6 +166,19 @@ router.get("/accept", validate(acceptQuerySchema), teamController.acceptInvite);
 
 /**
  * @swagger
+ * /api/v1/teams/decline:
+ *   post:
+ *     summary: Decline a pending team invitation (notifies the inviter)
+ *     responses:
+ *       200:
+ *         description: Invitation declined
+ *       400:
+ *         description: Invalid or already-used token
+ */
+router.post("/decline", teamController.declineInvite);
+
+/**
+ * @swagger
  * /api/v1/teams/{id}:
  *   get:
  *     summary: Get team by ID with members

@@ -198,6 +198,27 @@ router.post("/fcm-token", authenticate, c.registerFcmToken);
 
 /**
  * @swagger
+ * /api/v1/auth/mobile/fcm-token:
+ *   delete:
+ *     summary: Unregister an FCM token on logout (one device, or all if omitted)
+ *     tags: [Mobile Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               fcmToken: { type: string }
+ *     responses:
+ *       200: { description: FCM token unregistered }
+ *       401: { description: Unauthorized }
+ */
+router.delete("/fcm-token", authenticate, c.unregisterFcmToken);
+
+/**
+ * @swagger
  * /api/v1/auth/mobile/editor-url/{flowId}:
  *   get:
  *     summary: Generate a short-lived web-browser URL to open the flow editor from mobile

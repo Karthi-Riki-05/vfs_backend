@@ -1,5 +1,6 @@
 const { prisma } = require("../lib/prisma");
 const logger = require("../utils/logger");
+const securityAlert = require("../services/securityAlert.service");
 
 /**
  * Middleware that checks team/chat access based on app context.
@@ -58,6 +59,15 @@ async function checkTeamAccess(req, res, next) {
       ]);
 
       if (!team || !membership) {
+        // Potential broken-access-control / stale-token probe — audit + escalate.
+        securityAlert.alertAccessViolation({
+          kind: "team_membership",
+          actorId: userId,
+          actorEmail: req.user?.email,
+          teamId: requestedTeamId,
+          ip: req.ip,
+          route: req.originalUrl,
+        });
         return res.status(403).json({
           success: false,
           error: {
@@ -77,6 +87,16 @@ async function checkTeamAccess(req, res, next) {
         team.appContext &&
         requestedAppContext !== team.appContext
       ) {
+        securityAlert.alertAccessViolation({
+          kind: "app_context_mismatch",
+          actorId: userId,
+          actorEmail: req.user?.email,
+          teamId: requestedTeamId,
+          requestedAppContext,
+          teamAppContext: team.appContext,
+          ip: req.ip,
+          route: req.originalUrl,
+        });
         return res.status(403).json({
           success: false,
           error: {

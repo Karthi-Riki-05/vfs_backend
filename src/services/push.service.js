@@ -25,11 +25,17 @@ async function sendPushToUser(userId, { title, body, data = {} }) {
 
 async function sendPushToMultipleUsers(userIds, notification) {
   if (!Array.isArray(userIds) || userIds.length === 0) return [];
-  // Resolve tokens first — gives us a chance to clean up obviously-empty
-  // rows before we try to push.
+  // Find which users actually have a registered device, deduped to UNIQUE
+  // userIds — sendPushToUser fans out across all of a user's devices itself,
+  // so calling it per device-row would send duplicate notifications.
   const fbUsers = await prisma.firebaseUser.findMany({
-    where: { userId: { in: userIds }, fcmToken: { not: null } },
-    select: { userId: true, fcmToken: true },
+    where: {
+      userId: { in: userIds },
+      fcmToken: { not: null },
+      deletedAt: null,
+    },
+    select: { userId: true },
+    distinct: ["userId"],
   });
   const results = [];
   for (const u of fbUsers) {

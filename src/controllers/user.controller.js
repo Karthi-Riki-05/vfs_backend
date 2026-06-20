@@ -241,6 +241,8 @@ class UserController {
       req.user.id,
       req.body.currentPassword,
       req.body.newPassword,
+      req.ip,
+      req.headers["user-agent"],
     );
     res.json({
       success: true,
@@ -257,7 +259,12 @@ class UserController {
   });
 
   resetPassword = asyncHandler(async (req, res) => {
-    await userService.resetPassword(req.body.token, req.body.password);
+    await userService.resetPassword(
+      req.body.token,
+      req.body.password,
+      req.ip,
+      req.headers["user-agent"],
+    );
     res.json({
       success: true,
       data: { message: "Password reset successfully" },

@@ -2,48 +2,61 @@ const dashboardService = require("../services/dashboard.service");
 const asyncHandler = require("../utils/asyncHandler");
 
 class DashboardController {
+  // Resolve the active workspace context from a request. Headers are the
+  // primary channel, but the axios interceptor ALSO mirrors them as query
+  // params (_appctx / _tc) for URL cache-keying — so we fall back to those,
+  // making context resolution survive a proxy layer that strips custom
+  // headers. Final fallback is the user's stored plan.
+  _appContext(req) {
+    return (
+      req.headers["x-app-context"] ||
+      req.query._appctx ||
+      req.user.currentVersion ||
+      "team"
+    );
+  }
+
+  _teamId(req) {
+    return (
+      req.query.teamId || req.headers["x-team-context"] || req.query._tc || null
+    );
+  }
+
   getStats = asyncHandler(async (req, res) => {
-    const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
-    const stats = await dashboardService.getStats(userId, appContext, teamId);
+    const stats = await dashboardService.getStats(
+      req.user.id,
+      this._appContext(req),
+      this._teamId(req),
+    );
     res.json({ success: true, data: stats });
   });
 
   getActivity = asyncHandler(async (req, res) => {
-    const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const activity = await dashboardService.getActivity(
-      userId,
-      appContext,
-      teamId,
+      req.user.id,
+      this._appContext(req),
+      this._teamId(req),
     );
     res.json({ success: true, data: activity });
   });
 
   getRecentFlows = asyncHandler(async (req, res) => {
-    const userId = req.user.id;
-    const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const limit = Math.min(Number(req.query.limit) || 5, 20);
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const flows = await dashboardService.getRecentFlows(
-      userId,
-      appContext,
+      req.user.id,
+      this._appContext(req),
       limit,
-      teamId,
+      this._teamId(req),
     );
     res.json({ success: true, data: flows });
   });
 
   getTeamActivity = asyncHandler(async (req, res) => {
-    const userId = req.user.id;
     const limit = Math.min(Number(req.query.limit) || 10, 50);
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const activity = await dashboardService.getTeamActivity(
-      userId,
+      req.user.id,
       limit,
-      teamId,
+      this._teamId(req),
     );
     res.json({ success: true, data: activity });
   });

@@ -7,6 +7,7 @@ const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const { sendVerificationEmail } = require("../utils/email");
+const securityAlert = require("../services/securityAlert.service");
 
 const VERIFY_OTP_TTL_MIN = 15;
 
@@ -258,6 +259,16 @@ exports.validateUser = asyncHandler(async (req, res) => {
   }
 
   logger.info(`User authenticated: ${user.id}`);
+
+  // Security hygiene: record the device and alert on a new device/IP.
+  // Fire-and-forget — must never delay or fail the login response.
+  securityAlert.checkLoginDevice({
+    userId: user.id,
+    email: user.email,
+    name: user.name,
+    ip: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
 
   const token = jwt.sign(
     { sub: user.id, email: user.email, name: user.name, role: user.role },

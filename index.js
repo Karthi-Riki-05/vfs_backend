@@ -37,6 +37,7 @@ const aiAssistantRoutes = require("./src/routes/ai-assistant.routes");
 const aiCreditRoutes = require("./src/routes/aiCredit.routes");
 const pricingRoutes = require("./src/routes/pricing.routes");
 const dashboardRoutes = require("./src/routes/dashboard.routes");
+const entitlementsRoutes = require("./src/routes/entitlements.routes");
 
 // Validate required env vars at startup
 const requiredEnvVars = ["NEXTAUTH_SECRET"];
@@ -173,6 +174,7 @@ app.use("/api/v1/ai-assistant", aiAssistantRoutes);
 app.use("/api/v1/ai", aiCreditRoutes);
 app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/dashboard", dashboardRoutes);
+app.use("/api/v1/entitlements", entitlementsRoutes);
 app.use("/api/v1/notifications", require("./src/routes/notification.routes"));
 app.use("/api/notifications", require("./src/routes/notification.routes"));
 app.use("/api/v1/auth/mobile", require("./src/routes/mobile.auth.routes"));
@@ -201,6 +203,7 @@ app.use("/api/ai-assistant", aiAssistantRoutes);
 app.use("/api/ai", aiCreditRoutes);
 app.use("/api/pricing", pricingRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/entitlements", entitlementsRoutes);
 
 // DISABLED: Legacy Gemini 1.5-flash route at /api/v1/ai/generate-diagram
 // (and alias /api/ai/generate-diagram) — returned {nodes, edges} JSON

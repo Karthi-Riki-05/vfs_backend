@@ -26,7 +26,12 @@ class ShapeService {
       // Pro-app owned teams (appContext='pro') are excluded so pro shapes
       // don't leak into the team-app personal view (cross-app isolation).
       const ownedTeams = await prisma.team.findMany({
-        where: { teamOwnerId: userId, appContext: "team", deletedAt: null },
+        // Free teams fold into the Team-App container (no standalone free shell).
+        where: {
+          teamOwnerId: userId,
+          appContext: { in: ["team", "free"] },
+          deletedAt: null,
+        },
         select: { id: true },
       });
       const ownedTeamIds = ownedTeams.map((t) => t.id);

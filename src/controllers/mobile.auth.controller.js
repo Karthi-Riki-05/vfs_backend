@@ -279,6 +279,9 @@ class MobileAuthController {
     });
   });
 
+  // Multi-device: upsert keyed on the COMPOSITE (userId, fcmToken), never the
+  // userId alone — so a second device adds a row instead of overwriting the
+  // first. Re-registering the same device clears any soft-delete flag.
   registerFcmToken = asyncHandler(async (req, res) => {
     const { fcmToken } = req.body;
 
@@ -287,19 +290,33 @@ class MobileAuthController {
     }
 
     await prisma.firebaseUser.upsert({
-      where: { userId: req.user.id },
+      where: { userId_fcmToken: { userId: req.user.id, fcmToken } },
       create: {
         userId: req.user.id,
         fcmToken,
         updatedAt: new Date(),
       },
       update: {
-        fcmToken,
+        deletedAt: null,
         updatedAt: new Date(),
       },
     });
 
     res.json({ success: true, data: { message: "FCM token registered" } });
+  });
+
+  // Remove a device token on logout. With a specific fcmToken, deletes just
+  // that device; without one, clears every device for the user (logout-all).
+  unregisterFcmToken = asyncHandler(async (req, res) => {
+    const { fcmToken } = req.body || {};
+
+    const where = fcmToken
+      ? { userId: req.user.id, fcmToken }
+      : { userId: req.user.id };
+
+    await prisma.firebaseUser.deleteMany({ where });
+
+    res.json({ success: true, data: { message: "FCM token unregistered" } });
   });
 
   // Richer device-registration variant. Stores fcmToken via FirebaseUser and
@@ -313,7 +330,7 @@ class MobileAuthController {
       throw new AppError("fcmToken is required", 400, "VALIDATION_ERROR");
     }
     await prisma.firebaseUser.upsert({
-      where: { userId: req.user.id },
+      where: { userId_fcmToken: { userId: req.user.id, fcmToken } },
       create: {
         userId: req.user.id,
         fcmToken,
@@ -322,7 +339,7 @@ class MobileAuthController {
         updatedAt: new Date(),
       },
       update: {
-        fcmToken,
+        deletedAt: null,
         fcmUsername: deviceName || platform || undefined,
         fcmUserId: deviceId || undefined,
         updatedAt: new Date(),

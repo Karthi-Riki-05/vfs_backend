@@ -1,8 +1,9 @@
 const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 const crypto = require("crypto");
-const { sendTeamInviteEmail } = require("../utils/email");
+const { sendTeamInviteEmail, sendEmail } = require("../utils/email");
 const notificationService = require("./notification.service");
+const logger = require("../utils/logger");
 
 class TeamService {
   async getTeams(userId, options = {}, appContext = "team") {
@@ -275,6 +276,128 @@ class TeamService {
       where: { id: teamId },
       data: { countMem: { decrement: 1 } },
     });
+
+    // ── P1: tell the removed member, by every channel, + leave an audit trail.
+    // All best-effort: a comms/audit failure must never undo the removal.
+    const removedUser = await prisma.user.findUnique({
+      where: { id: memberUserId },
+      select: { email: true, name: true },
+    });
+    const teamName = team.name || "your team";
+
+    // 1. Audit trail (immutable user_actions row).
+    try {
+      await prisma.userAction.create({
+        data: {
+          action: "team_member_removed",
+          actionModel: "Team",
+          userId: requestingUserId, // the actor who performed the removal
+          appContext: team.appContext || "team",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+    } catch (err) {
+      logger.error(`[Team] audit log (removeMember) failed: ${err.message}`);
+    }
+
+    // 2. In-app notification — scoped to the removed member's PERSONAL
+    //    workspace (teamId: null), since they no longer belong to the team and
+    //    a team-scoped notification would be invisible to them.
+    try {
+      await notificationService.createNotification(
+        memberUserId,
+        "team_member_removed",
+        "Removed from team",
+        `You have been removed from "${teamName}".`,
+        "/dashboard/teams",
+        { teamId, teamName: team.name || null, removedBy: requestingUserId },
+        team.appContext || "team", // appContext
+        null, // teamId null → lands in their personal workspace
+      );
+    } catch (err) {
+      logger.error(`[Team] removal notification failed: ${err.message}`);
+    }
+
+    // 3. Email.
+    if (removedUser?.email) {
+      try {
+        await sendEmail({
+          to: removedUser.email,
+          subject: `You have been removed from ${teamName}`,
+          html: `<p>Hi ${removedUser.name || "there"},</p>
+<p>You have been removed from the team <strong>${teamName}</strong> on ValueChart.</p>
+<p>You no longer have access to that team's workspace. Your personal flows and data are unaffected.</p>`,
+          text: `You have been removed from the team "${teamName}" on ValueChart. Your personal flows and data are unaffected.`,
+        });
+      } catch (err) {
+        logger.error(`[Team] removal email failed: ${err.message}`);
+      }
+    }
+  }
+
+  /**
+   * P1 — Invitee declines a pending team invite. Token-based and mirrors
+   * acceptInvite's guards (valid, pending, not expired, email matches the
+   * caller). Marks the invite `declined` and notifies the inviter in real time.
+   */
+  async declineInvite(token, userId) {
+    const invite = await prisma.teamInvite.findUnique({ where: { token } });
+    if (!invite) throw new AppError("Invalid invitation", 404, "NOT_FOUND");
+    if (invite.status !== "pending")
+      throw new AppError("Invitation already used", 400, "BAD_REQUEST");
+
+    const decliningUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
+    if (!decliningUser) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    // Only the addressed invitee may decline (same guard as acceptInvite).
+    if (decliningUser.email.toLowerCase() !== invite.email.toLowerCase()) {
+      throw new AppError(
+        `This invitation was sent to ${invite.email}.`,
+        403,
+        "EMAIL_MISMATCH",
+      );
+    }
+
+    await prisma.teamInvite.update({
+      where: { id: invite.id },
+      data: { status: "declined" },
+    });
+
+    const team = await prisma.team.findUnique({
+      where: { id: invite.teamId },
+      select: { id: true, name: true, appContext: true },
+    });
+
+    // Notify the inviter that their invite was declined. Non-blocking.
+    if (invite.invitedBy) {
+      try {
+        await notificationService.createNotification(
+          invite.invitedBy,
+          "team_invite_declined",
+          "Invitation declined",
+          `${decliningUser.name || invite.email} declined your invitation to "${
+            team?.name || "your team"
+          }".`,
+          `/dashboard/teams/${invite.teamId}`,
+          {
+            teamId: invite.teamId,
+            teamName: team?.name || null,
+            declinedBy: userId,
+            declinedEmail: invite.email,
+          },
+          team?.appContext || "team", // appContext
+          invite.teamId, // scope to the team's workspace
+        );
+      } catch (err) {
+        logger.error(`[Team] decline notification failed: ${err.message}`);
+      }
+    }
+
+    return { teamId: invite.teamId, status: "declined" };
   }
 
   async createInvite(teamId, userId, emails, appContext = "team") {
@@ -636,6 +759,8 @@ class TeamService {
             memberName: acceptingUser.name || null,
             memberEmail: acceptingUser.email,
           },
+          team.appContext || "team", // appContext
+          team.id, // teamId — scope to the team's workspace
         );
       } catch {
         // never block invite acceptance on notification failure

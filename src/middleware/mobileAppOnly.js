@@ -12,7 +12,8 @@ const AppError = require("../utils/AppError");
  *
  * Allowed when ANY mobile indicator is present:
  *   1. X-App-Source is one of the known mobile-app values
- *   2. A ValueChart app user-agent token
+ *   2. A ValueChart app user-agent token — the canonical `ValueChartsMobile`
+ *      signature (Pro and Team shells) or the legacy `ValueChart(Pro)App` tags
  *   3. Android in-app WebView UA (`Android` + `wv`)
  *   4. iOS WKWebView UA (`iPhone` without the `Safari` token)
  *
@@ -32,6 +33,10 @@ module.exports = function mobileAppOnly(req, res, next) {
 
   const isMobile =
     MOBILE_APP_SOURCES.has(appSource) ||
+    // Canonical signature stamped by the current Flutter shells (Pro + Team):
+    //   ValueChartsMobile/Pro-App | ValueChartsMobile/Team-App
+    userAgent.includes("ValueChartsMobile") ||
+    // Legacy native tokens from older shell builds (pre-ValueChartsMobile).
     userAgent.includes("ValueChartApp") ||
     userAgent.includes("ValueChartProApp") ||
     // Android in-app WebView pattern
