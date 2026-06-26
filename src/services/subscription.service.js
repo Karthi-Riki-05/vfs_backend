@@ -337,7 +337,7 @@ class SubscriptionService {
         metadata: { userId, plan, teamMembers: String(teamMembers) },
       },
       // Stripe Adaptive Pricing (account-level setting) converts to local currency
-      success_url: `${baseUrl}/dashboard/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${baseUrl}/payment-return.html?redirect=%2Fsubscription%2Fsuccess&type=team&app_context=team&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/dashboard/subscription`,
     });
 

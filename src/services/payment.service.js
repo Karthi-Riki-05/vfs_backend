@@ -65,7 +65,11 @@ class PaymentService {
       metadata: { userId, planId, appType: plan.appType || "" },
       success_url:
         urls.successUrl ||
-        `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
+        `${baseUrl}/payment-return.html?redirect=%2Fsubscription%2Fsuccess&type=${
+          plan.appType === "enterprise" ? "team" : "pro"
+        }&app_context=${
+          plan.appType === "enterprise" ? "team" : "pro"
+        }&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: urls.cancelUrl || `${baseUrl}/subscription`,
     });
 

@@ -591,9 +591,7 @@ class AiCreditController {
     }
 
     const baseUrl = process.env.APP_URL || "http://localhost:3000";
-    // Land on the dashboard (which handles addon_success + verifies the
-    // session) — NOT the subscription page, which has no handler.
-    const successPath = appContext === "pro" ? "/dashboard/pro" : "/dashboard";
+    const cancelPath = appContext === "pro" ? "/dashboard/pro" : "/dashboard";
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       customer: customerId,
@@ -608,11 +606,10 @@ class AiCreditController {
       },
       // BUG-PAY-002: save card for future charges after one-time payment
       payment_intent_data: { setup_future_usage: "off_session" },
-      // Stripe Adaptive Pricing (account-level setting) converts to local currency
-      // session_id lets the dashboard call /ai/addon/verify as a fallback
+      // session_id lets the success page call /ai/addon/verify as a fallback
       // when the webhook can't reach the backend (e.g. local dev).
-      success_url: `${baseUrl}${successPath}?addon_success=true&credits=${pack.credits}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}${successPath}?addon_cancelled=true`,
+      success_url: `${baseUrl}/payment-return.html?redirect=%2Fsubscription%2Fsuccess&type=ai_credits&credits=${pack.credits}&packType=${packType}&app_context=${appContext}&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}${cancelPath}?addon_cancelled=true`,
     });
 
     res.json({

@@ -450,7 +450,7 @@ class ProService {
       // BUG-PAY-002: save card for future charges after one-time payment
       payment_intent_data: { setup_future_usage: "off_session" },
       // Stripe Adaptive Pricing (account-level setting) converts to local currency
-      success_url: `${baseUrl}/upgrade-pro/success?session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${baseUrl}/payment-return.html?redirect=%2Fsubscription%2Fsuccess&type=pro&plan=ValueCharts%2BPro&app_context=pro&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/upgrade-pro?cancelled=true`,
     };
 
@@ -557,7 +557,7 @@ class ProService {
       // session_id is needed by the success page to call the verify-purchase
       // fallback when the Stripe webhook hasn't reached the backend yet
       // (common in local dev without `stripe listen`).
-      success_url: `${baseUrl}/dashboard/subscription?purchased=${flowPackage}&session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${baseUrl}/payment-return.html?redirect=%2Fsubscription%2Fsuccess&type=purchase&plan=${flowPackage}&app_context=pro&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/dashboard/subscription`,
     });
 
@@ -1088,7 +1088,7 @@ class ProService {
       metadata: { purchaseType: "flow_addon", userId, plan: addonPlan },
       // session_id lets the success page call the verify-flow-addon safety
       // net when the Stripe webhook hasn't reached the backend yet.
-      success_url: `${baseUrl}/dashboard/subscription?flow_addon_subscribed=${addonPlan}&session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${baseUrl}/payment-return.html?redirect=%2Fsubscription%2Fsuccess&type=addon&plan=${addonPlan}&app_context=pro&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/dashboard/subscription`,
     });
 
