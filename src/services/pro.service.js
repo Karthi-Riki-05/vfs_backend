@@ -172,13 +172,20 @@ class ProService {
 
     let proFlowsUsed = 0;
     if (user.hasPro) {
-      // Unified scope (FLOWPACK Gap #4) — same count the createFlow limit
-      // check enforces, so "used" never disagrees with creation errors.
+      // Count only flows visible in the Pro app: flows inside the user's Pro
+      // team (appContext='pro'). If no Pro team exists yet, fall back to
+      // personal flows (teamId=null) for users pre-dating Pro team setup.
+      // Team-subscription teams (appContext='team') are excluded — their flows
+      // are a separate workspace and must not affect the Pro limit.
+      const proTeam = await prisma.team.findFirst({
+        where: { teamOwnerId: userId, deletedAt: null, appContext: "pro" },
+        select: { id: true },
+      });
       proFlowsUsed = await prisma.flow.count({
         where: {
           ownerId: userId,
           deletedAt: null,
-          OR: await personalFlowTeamOr(userId),
+          teamId: proTeam ? proTeam.id : null,
         },
       });
     }
@@ -440,6 +447,8 @@ class ProService {
           ? { pendingInviteToken: String(pendingInviteToken).slice(0, 128) }
           : {}),
       },
+      // BUG-PAY-002: save card for future charges after one-time payment
+      payment_intent_data: { setup_future_usage: "off_session" },
       // Stripe Adaptive Pricing (account-level setting) converts to local currency
       success_url: `${baseUrl}/upgrade-pro/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/upgrade-pro?cancelled=true`,
@@ -542,6 +551,8 @@ class ProService {
         flowPackage,
         flowCount: String(flowCount),
       },
+      // BUG-PAY-002: save card for future charges after one-time payment
+      payment_intent_data: { setup_future_usage: "off_session" },
       // Stripe Adaptive Pricing (account-level setting) converts to local currency
       // session_id is needed by the success page to call the verify-purchase
       // fallback when the Stripe webhook hasn't reached the backend yet
@@ -946,7 +957,11 @@ class ProService {
 
   // ── Flow Add-on Subscription ──────────────────────────────────────────────
 
-  async createFlowAddonSubscriptionCheckout(userId, plan) {
+  async createFlowAddonSubscriptionCheckout(
+    userId,
+    plan,
+    paymentMethodId = null,
+  ) {
     if (plan !== "standard" && plan !== "unlimited") {
       throw new AppError(
         'Invalid plan. Use "standard" or "unlimited"',
@@ -1036,8 +1051,36 @@ class ProService {
       );
     }
 
-    const baseUrl = process.env.APP_URL || "http://localhost:3000";
     const addonPlan = plan === "unlimited" ? "unlimited" : "standard_100";
+
+    // Direct charge with saved card — no Stripe redirect needed.
+    // off_session + error_if_incomplete: Stripe immediately charges the card
+    // and throws a StripeCardError on failure (same pattern as subscription
+    // plan-change in subscription.service.js). Subscription is "active" on
+    // return if the charge succeeded.
+    if (paymentMethodId) {
+      const subscription = await stripe.subscriptions.create({
+        customer: customerId,
+        items: [{ price: priceId }],
+        default_payment_method: paymentMethodId,
+        off_session: true,
+        payment_behavior: "error_if_incomplete",
+        metadata: { purchaseType: "flow_addon", userId, plan: addonPlan },
+      });
+
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          flowAddonStatus: "active",
+          flowAddonPlan: addonPlan,
+          flowAddonStripeSubId: subscription.id,
+        },
+      });
+      return { subscribed: true };
+    }
+
+    // Hosted Stripe checkout (new card path).
+    const baseUrl = process.env.APP_URL || "http://localhost:3000";
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: customerId,
@@ -1518,13 +1561,17 @@ class ProService {
       throw new AppError("Pro access required", 403, "PRO_REQUIRED");
     }
 
-    // Unified scope (FLOWPACK Gap #4) — same count the createFlow limit
-    // check enforces, so used/remaining never disagree with creation errors.
+    // Count only flows visible in the Pro app (Pro-owned team), matching
+    // getAppStatus and getPackStatus so all three display the same number.
+    const proTeam = await prisma.team.findFirst({
+      where: { teamOwnerId: userId, deletedAt: null, appContext: "pro" },
+      select: { id: true },
+    });
     const flowCount = await prisma.flow.count({
       where: {
         ownerId: userId,
         deletedAt: null,
-        OR: await personalFlowTeamOr(userId),
+        teamId: proTeam ? proTeam.id : null,
       },
     });
 

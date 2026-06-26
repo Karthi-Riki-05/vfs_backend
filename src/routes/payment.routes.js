@@ -1,9 +1,12 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const paymentController = require('../controllers/payment.controller');
-const { authenticate } = require('../middleware/auth.middleware');
-const validate = require('../middleware/validate');
-const { createCheckoutSchema, getTransactionsQuerySchema } = require('../validators/payment.validator');
+const paymentController = require("../controllers/payment.controller");
+const { authenticate } = require("../middleware/auth.middleware");
+const validate = require("../middleware/validate");
+const {
+  createCheckoutSchema,
+  getTransactionsQuerySchema,
+} = require("../validators/payment.validator");
 
 /**
  * @swagger
@@ -33,7 +36,12 @@ const { createCheckoutSchema, getTransactionsQuerySchema } = require('../validat
  *       404:
  *         description: Plan not found
  */
-router.post('/', authenticate, validate(createCheckoutSchema), paymentController.createCheckout);
+router.post(
+  "/",
+  authenticate,
+  validate(createCheckoutSchema),
+  paymentController.createCheckout,
+);
 
 /**
  * @swagger
@@ -48,7 +56,7 @@ router.post('/', authenticate, validate(createCheckoutSchema), paymentController
  *       400:
  *         description: Invalid signature
  */
-router.post('/webhook', paymentController.webhook);
+router.post("/webhook", paymentController.webhook);
 
 /**
  * @swagger
@@ -71,6 +79,28 @@ router.post('/webhook', paymentController.webhook);
  *       200:
  *         description: Paginated transaction list
  */
-router.get('/transactions', authenticate, validate(getTransactionsQuerySchema), paymentController.getTransactions);
+router.get(
+  "/transactions",
+  authenticate,
+  validate(getTransactionsQuerySchema),
+  paymentController.getTransactions,
+);
+
+// Stripe publishable key — safe to expose (public key), no auth required
+router.get("/stripe-config", paymentController.stripeConfig);
+
+// Card management endpoints
+router.post("/setup-intent", authenticate, paymentController.setupIntent);
+router.get(
+  "/payment-methods",
+  authenticate,
+  paymentController.listPaymentMethods,
+);
+router.post(
+  "/set-default-card",
+  authenticate,
+  paymentController.setDefaultCard,
+);
+router.delete("/remove-card", authenticate, paymentController.removeCard);
 
 module.exports = router;

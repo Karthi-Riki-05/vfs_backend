@@ -192,7 +192,12 @@ class ChatController {
   });
 
   getUnreadCounts = asyncHandler(async (req, res) => {
-    const counts = await chatService.getUnreadCounts(req.user.id);
+    const appContext =
+      req.headers["x-app-context"] ||
+      req.query.appContext ||
+      req.user.currentVersion ||
+      "team";
+    const counts = await chatService.getUnreadCounts(req.user.id, appContext);
     res.json({ success: true, data: counts });
   });
 
@@ -250,6 +255,32 @@ class ChatController {
   deleteGroup = asyncHandler(async (req, res) => {
     await chatService.deleteGroup(req.params.id, req.user.id);
     res.json({ success: true, data: { message: "Group deleted" } });
+  });
+
+  editMessage = asyncHandler(async (req, res) => {
+    const message = await chatService.editMessage(
+      req.params.messageId,
+      req.user.id,
+      req.body.content,
+    );
+    res.json({ success: true, data: message });
+  });
+
+  deleteMessage = asyncHandler(async (req, res) => {
+    const result = await chatService.deleteMessage(
+      req.params.messageId,
+      req.user.id,
+    );
+    res.json({ success: true, data: result });
+  });
+
+  toggleReaction = asyncHandler(async (req, res) => {
+    const result = await chatService.toggleReaction(
+      req.params.messageId,
+      req.user.id,
+      req.body.emoji,
+    );
+    res.json({ success: true, data: result });
   });
 }
 

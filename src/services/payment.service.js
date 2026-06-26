@@ -20,15 +20,30 @@ class PaymentService {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
 
+    // BUG-PAY-001: always reuse existing Stripe customer to avoid duplicates
+    let customerId = user.stripeCustomerId;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+        metadata: { userId },
+      });
+      customerId = customer.id;
+      await prisma.user.update({
+        where: { id: userId },
+        data: { stripeCustomerId: customerId },
+      });
+    }
+
     const baseUrl = process.env.APP_URL || "http://localhost:3000";
+    const mode =
+      plan.price === 0
+        ? "setup"
+        : plan.duration === "monthly" || plan.duration === "yearly"
+          ? "subscription"
+          : "payment";
     const session = await stripe.checkout.sessions.create({
-      mode:
-        plan.price === 0
-          ? "setup"
-          : plan.duration === "monthly" || plan.duration === "yearly"
-            ? "subscription"
-            : "payment",
-      customer_email: user.email,
+      mode,
+      customer: customerId,
       line_items: [
         {
           price_data: {
@@ -77,6 +92,27 @@ class PaymentService {
       eventId: event.id,
     });
     console.log("[Webhook][payment.service]", event.type, "received");
+
+    // Event-level idempotency (PAY-010): record this event id before dispatch.
+    // Stripe delivers at-least-once and retries on any non-2xx/network error,
+    // so the same event.id may arrive multiple times. The unique constraint on
+    // (provider, eventId) means a redelivery (or a concurrent duplicate) hits
+    // P2002 — we treat that as "already processed" and skip dispatch.
+    try {
+      await prisma.webhookEvent.create({
+        data: { provider: "stripe", eventId: event.id, type: event.type },
+      });
+    } catch (err) {
+      if (err.code === "P2002") {
+        logger.info(`[Webhook] event ${event.id} already processed — skipping`);
+        return { received: true };
+      }
+      // Any other DB error: log and acknowledge (Stripe must not retry-loop on
+      // our infra issues; per-handler guards still protect against duplicates).
+      logger.error(`[Webhook] idempotency record failed: ${err.message}`, {
+        eventId: event.id,
+      });
+    }
 
     // Webhook processors MUST always return 200 to Stripe to prevent infinite
     // retries. Catch any internal error, log it, and acknowledge receipt.
@@ -561,6 +597,166 @@ class PaymentService {
         ),
       );
     }
+  }
+
+  async createSetupIntent(userId) {
+    const stripe = getStripe();
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    let customerId = user.stripeCustomerId;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+        metadata: { userId },
+      });
+      customerId = customer.id;
+      await prisma.user.update({
+        where: { id: userId },
+        data: { stripeCustomerId: customerId },
+      });
+    }
+
+    const intent = await stripe.setupIntents.create({
+      customer: customerId,
+      payment_method_types: ["card"],
+      metadata: { userId },
+    });
+
+    return { clientSecret: intent.client_secret };
+  }
+
+  async listPaymentMethods(userId) {
+    const stripe = getStripe();
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    if (!user.stripeCustomerId) {
+      return { paymentMethods: [], defaultPaymentMethodId: null };
+    }
+
+    const [pmList, customer] = await Promise.all([
+      stripe.paymentMethods.list({
+        customer: user.stripeCustomerId,
+        type: "card",
+        limit: 10,
+      }),
+      stripe.customers.retrieve(user.stripeCustomerId),
+    ]);
+
+    const defaultPmId =
+      customer?.invoice_settings?.default_payment_method ||
+      customer?.default_source ||
+      null;
+
+    const paymentMethods = pmList.data.map((pm) => ({
+      id: pm.id,
+      brand: pm.card?.brand || "unknown",
+      last4: pm.card?.last4 || "****",
+      expMonth: pm.card?.exp_month,
+      expYear: pm.card?.exp_year,
+      isDefault: pm.id === defaultPmId,
+    }));
+
+    return { paymentMethods, defaultPaymentMethodId: defaultPmId };
+  }
+
+  async setDefaultCard(userId, paymentMethodId) {
+    const stripe = getStripe();
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+    if (!user.stripeCustomerId)
+      throw new AppError("No payment methods on file", 400, "NO_CUSTOMER");
+
+    // Verify this PM belongs to this customer before setting as default
+    const pm = await stripe.paymentMethods
+      .retrieve(paymentMethodId)
+      .catch(() => null);
+    if (!pm || pm.customer !== user.stripeCustomerId)
+      throw new AppError("Payment method not found", 404, "NOT_FOUND");
+
+    await stripe.customers.update(user.stripeCustomerId, {
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+
+    return { success: true };
+  }
+
+  async removeCard(userId, paymentMethodId, cancelRecurring = false) {
+    const stripe = getStripe();
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        stripeCustomerId: true,
+        flowAddonStripeSubId: true,
+        flowAddonStatus: true,
+        flowAddonCurrentPeriodEnd: true,
+      },
+    });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+    if (!user.stripeCustomerId)
+      throw new AppError("No payment methods on file", 400, "NO_CUSTOMER");
+
+    // Verify this PM belongs to this customer
+    const pm = await stripe.paymentMethods
+      .retrieve(paymentMethodId)
+      .catch(() => null);
+    if (!pm || pm.customer !== user.stripeCustomerId)
+      throw new AppError("Payment method not found", 404, "NOT_FOUND");
+
+    // Check for active team subscription or flow addon
+    const activeSub = await prisma.subscription.findFirst({
+      where: { userId, status: { in: ["active", "past_due"] } },
+      select: { paymentId: true, expiresAt: true },
+    });
+    const hasActiveFlowAddon = ["active", "past_due"].includes(
+      user.flowAddonStatus,
+    );
+
+    if (activeSub || hasActiveFlowAddon) {
+      const customer = await stripe.customers.retrieve(user.stripeCustomerId);
+      const defaultPmId =
+        customer?.invoice_settings?.default_payment_method ||
+        customer?.default_source ||
+        null;
+
+      if (defaultPmId === paymentMethodId) {
+        if (!cancelRecurring) {
+          // Return expiry info so frontend can show confirmation modal
+          const err = new AppError(
+            "Removing this card will cancel auto-renewal on your active subscription(s). Your plan stays active until the current billing period ends.",
+            400,
+            "DEFAULT_CARD_ACTIVE_SUB",
+          );
+          err.subscriptionExpiry = activeSub?.expiresAt || null;
+          err.flowAddonExpiry = user.flowAddonCurrentPeriodEnd || null;
+          throw err;
+        }
+
+        // cancelRecurring=true: cancel at period end then detach
+        if (activeSub?.paymentId) {
+          await stripe.subscriptions.update(activeSub.paymentId, {
+            cancel_at_period_end: true,
+          });
+          await prisma.subscription.updateMany({
+            where: { userId, status: { in: ["active", "past_due"] } },
+            data: { status: "cancelling" },
+          });
+        }
+        if (hasActiveFlowAddon && user.flowAddonStripeSubId) {
+          await stripe.subscriptions.update(user.flowAddonStripeSubId, {
+            cancel_at_period_end: true,
+          });
+          await prisma.user.update({
+            where: { id: userId },
+            data: { flowAddonStatus: "cancelling" },
+          });
+        }
+      }
+    }
+
+    await stripe.paymentMethods.detach(paymentMethodId);
+    return { success: true };
   }
 
   async getTransactions(userId, options = {}) {

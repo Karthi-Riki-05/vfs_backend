@@ -9,7 +9,27 @@ class ShapeService {
     // teams fold into the personal context — see getMyContexts).
     let ownedClause;
     if (teamId) {
-      ownedClause = { ownerId: userId, teamId };
+      // Mirror flow.service._workspaceScope: if the header refers to the user's
+      // OWN team-app/free team, treat it as personal context — include NULL-team
+      // shapes created before the team existed (upgrade data-loss fix).
+      // Joined teams (user is a member, not owner) stay strict.
+      const isOwnTeamAppTeam = await prisma.team.findFirst({
+        where: {
+          id: teamId,
+          teamOwnerId: userId,
+          appContext: { in: ["team", "free"] },
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (isOwnTeamAppTeam) {
+        ownedClause = {
+          ownerId: userId,
+          OR: [{ teamId: null }, { teamId }],
+        };
+      } else {
+        ownedClause = { ownerId: userId, teamId };
+      }
     } else if (appContext === "pro") {
       // Pro user without header — same defense-in-depth as flow.service: never
       // include teamId=null shapes. Use the user's pro team for strict isolation.

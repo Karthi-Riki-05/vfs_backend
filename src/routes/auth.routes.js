@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const authController = require("../controllers/auth.controller");
 const validate = require("../middleware/validate");
-const { authLimiter } = require("../middleware/rateLimiter");
+const { authLimiter, resendLimiter } = require("../middleware/rateLimiter");
 const {
   registerSchema,
   validateSchema,
@@ -134,6 +134,7 @@ router.post(
 
 router.post(
   "/resend-verification",
+  resendLimiter,
   authLimiter,
   validate(resendVerificationSchema),
   authController.resendVerification,

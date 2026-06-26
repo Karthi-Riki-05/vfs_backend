@@ -39,6 +39,11 @@ const oauthSyncSchema = z.object({
     name: z.string().max(100).trim().optional(),
     image: z.string().max(500).optional(),
     provider: z.string().min(1).max(50),
+    // Without these, Zod strips them (validate.js replaces req.body with the
+    // parsed result) and the Account.upsert guard `if (provider && providerAccountId)`
+    // skips — so the OAuth link is never written. See bug-003.
+    providerAccountId: z.union([z.string(), z.number()]).optional(),
+    accountType: z.string().max(50).optional(),
   }),
 });
 

@@ -116,4 +116,63 @@ const inviteLimiter = isTest
       },
     });
 
-module.exports = { globalLimiter, authLimiter, aiLimiter, inviteLimiter };
+// Keyed per target email — a 45s-equivalent server cooldown that mirrors the
+// client-side resend timer. Prevents mailbox-bombing an unverified address and
+// stops OTP churn. Falls back to IP when no email is present in the body.
+const resendLimiter = isTest
+  ? passthrough
+  : rateLimit({
+      windowMs: 60 * 1000, // 60 seconds
+      max: 1,
+      standardHeaders: true,
+      legacyHeaders: false,
+      keyGenerator: (req, res) => {
+        const email = req.body?.email;
+        if (email && typeof email === "string") {
+          return `resend:${email.trim().toLowerCase()}`;
+        }
+        return keyByUserOrIp(req, res);
+      },
+      message: {
+        success: false,
+        error: {
+          code: "RESEND_RATE_LIMIT",
+          message: "Please wait before requesting another code.",
+        },
+      },
+    });
+
+// Per-user message throttle on chat sends — 30 messages / minute. Keyed by
+// user id so one chatty user can't slow the room for everyone else. Exposed as
+// a builder so tests can exercise the real limiter (the live `chatMessageLimiter`
+// is bypassed under NODE_ENV=test like the others).
+const buildChatMessageLimiter = () =>
+  rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 30, // 30 messages per minute
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req, res) => {
+      if (req.user?.id) return `chat:u:${req.user.id}`;
+      return keyByUserOrIp(req, res);
+    },
+    message: {
+      success: false,
+      error: {
+        code: "CHAT_RATE_LIMIT",
+        message: "Too many messages. Please slow down.",
+      },
+    },
+  });
+
+const chatMessageLimiter = isTest ? passthrough : buildChatMessageLimiter();
+
+module.exports = {
+  globalLimiter,
+  authLimiter,
+  aiLimiter,
+  inviteLimiter,
+  resendLimiter,
+  chatMessageLimiter,
+  buildChatMessageLimiter,
+};

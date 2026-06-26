@@ -200,6 +200,9 @@ model User {
   proFlowLimit                Int         @default(10) @map("pro_flow_limit")
   proAdditionalFlowsPurchased Int         @default(0) @map("pro_additional_flows_purchased")
   proUnlimitedFlows           Boolean     @default(false) @map("pro_unlimited_flows")
+  // --- Team App flow limits (FEAT-001) ---
+  teamFlowLimit               Int         @default(50) @map("team_flow_limit")
+  teamUnlimitedFlows          Boolean     @default(false) @map("team_unlimited_flows")
   // Pack-lifecycle tracking. activeFlowPackId is the most recent ACTIVE
   // ProFlowPurchase; nulled when the pack expires past grace period.
   // isInFlowPickerPhase is set when a user with >10 personal flows expires
@@ -207,6 +210,7 @@ model User {
   activeFlowPackId            String?     @map("active_flow_pack_id")
   flowPackExpiresAt           DateTime?   @map("flow_pack_expires_at")
   isInFlowPickerPhase         Boolean     @default(false) @map("is_in_flow_picker_phase")
+  isInTeamPickerPhase Boolean @default(false) @map("is_in_team_picker_phase")
   // Recurring flow add-on subscription (separate from one-time flow packs)
   flowAddonStripeSubId        String?     @map("flow_addon_stripe_sub_id")
   flowAddonPlan               String?     @map("flow_addon_plan")              // 'standard_100' | 'unlimited'
@@ -257,6 +261,7 @@ model User {
   accounts             Account[]
   sessions             Session[]
   flows                Flow[]
+  flowsCreated         Flow[]                @relation("FlowCreator")
   flowsLastModified    Flow[]                @relation("FlowLastModifiedBy")
   shapeGroups          ShapeGroup[]
   shapes               Shape[]
@@ -274,6 +279,7 @@ model User {
   chatMessagesSent     ChatMessage[]
   chatMsgSender        ChatMessageUser[]     @relation("ChatMsgSender")
   chatMsgReceiver      ChatMessageUser[]     @relation("ChatMsgReceiver")
+  messageReactions     MessageReaction[]
   conversations        ConversationUser[]
   messages             Message[]
   messageNotifications MessageNotification[]
@@ -666,6 +672,10 @@ model Flow {
   isFavorite     Boolean         @default(false) @map("is_favorite")
   ownerId        String          @map("owner_id")
   owner          User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  // Original creator — separate from ownerId (which becomes tenantOwnerId in
+  // the multi-tenant model). Null on legacy flows; backfilled = ownerId.
+  creatorId        String?       @map("creator_id")
+  creator          User?         @relation("FlowCreator", fields: [creatorId], references: [id], onDelete: SetNull)
   // Last actor (owner or collaborator) to persist diagram data on this flow.
   lastModifiedById String?       @map("last_modified_by_id")
   lastModifiedBy   User?         @relation("FlowLastModifiedBy", fields: [lastModifiedById], references: [id], onDelete: SetNull)
@@ -691,6 +701,7 @@ model Flow {
   deletedAt      DateTime?       @map("deleted_at")
 
   @@index([ownerId])
+  @@index([creatorId])
   @@index([appType])
   @@index([appContext])
   @@index([projectId])
@@ -977,6 +988,7 @@ model ChatMessage {
   appType      AppType?          @map("app_type")
   files        ChatFile[]
   msgUsers     ChatMessageUser[]
+  reactions    MessageReaction[]
   createdAt    DateTime          @default(now()) @map("created_at")
   updatedAt    DateTime?         @map("updated_at")
   deletedAt    DateTime?         @map("deleted_at")
@@ -984,6 +996,19 @@ model ChatMessage {
   @@index([userId])
   @@index([groupId])
   @@map("chat_messages")
+}
+
+model MessageReaction {
+  id        String      @id @default(cuid())
+  messageId String      @map("message_id")
+  userId    String      @map("user_id")
+  emoji     String
+  createdAt DateTime    @default(now()) @map("created_at")
+  message   ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@map("message_reactions")
 }
 
 // ============================================================
@@ -1156,6 +1181,22 @@ model TransactionLog {
   @@index([userId])
   @@index([userId, appContext])
   @@map("transaction_logs")
+}
+
+// Event-level webhook idempotency (PAY-010). One row per processed provider
+// event id. Insert is attempted once at ingest, after signature verification
+// and before dispatch — a unique-constraint hit means the event was already
+// handled, so processing is skipped. See bugs/bug-012-webhook-idempotency.md.
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  provider    String   @default("stripe")
+  eventId     String   @map("event_id")
+  type        String?
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@unique([provider, eventId])
+  @@index([processedAt])
+  @@map("webhook_events")
 }
 
 // ============================================================

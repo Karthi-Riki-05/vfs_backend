@@ -3,6 +3,7 @@ const produce = require("immer").produce;
 const AppError = require("../utils/AppError");
 const { personalFlowTeamOr } = require("../lib/personalFlowScope");
 const notificationService = require("./notification.service");
+const { getEntitlements } = require("./entitlements.service");
 
 // Throttle window for collaborator-edit notifications: at most one "X edited
 // your flow" per flow per editor within this window, so a save-heavy session
@@ -90,21 +91,62 @@ class FlowService {
   }
 
   async getAllFlows(userId, options = {}, appContext = "team") {
-    const { search, page = 1, limit = 10, nonEmpty, teamId } = options;
+    const {
+      search,
+      page = 1,
+      limit = 10,
+      nonEmpty,
+      teamId,
+      sort,
+      sortDirection,
+      isFavorite,
+      projectId,
+    } = options;
+    const sortField = ["updatedAt", "name", "createdAt"].includes(sort)
+      ? sort
+      : "updatedAt";
+    const sortDir = sortDirection === "asc" ? "asc" : "desc";
     const take = Math.min(Number(limit) || 10, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
+    // §5 multi-tenant sandbox isolation: when the caller is a MEMBER of a team
+    // (not the owner), flows are scoped by tenantOwner's ownerId + caller's
+    // creatorId. Owner queries keep ownerId=userId (owns the whole namespace).
+    let queryOwnerId = userId;
+    if (teamId) {
+      const team = await prisma.team.findFirst({
+        where: { id: teamId, deletedAt: null },
+        select: { teamOwnerId: true },
+      });
+      if (team && team.teamOwnerId !== userId) {
+        queryOwnerId = team.teamOwnerId;
+      }
+    }
+
     const where = {
-      ownerId: userId,
+      ownerId: queryOwnerId,
       deletedAt: null,
       ...(await this._workspaceScope(userId, appContext, teamId)),
     };
+
+    // Sandbox: members only see their own created flows within the tenant.
+    if (queryOwnerId !== userId) {
+      where.creatorId = userId;
+    }
 
     if (search) {
       where.OR = [
         { name: { contains: search, mode: "insensitive" } },
         { description: { contains: search, mode: "insensitive" } },
       ];
+    }
+
+    if (isFavorite === true) {
+      where.isFavorite = true;
+    }
+
+    if (projectId) {
+      where.projectId = projectId;
     }
 
     // Filter to non-empty flows only (has real diagram data)
@@ -121,10 +163,13 @@ class FlowService {
         where,
         skip,
         take,
-        orderBy: { updatedAt: "desc" },
+        orderBy: { [sortField]: sortDir },
         include: {
           project: {
             select: { id: true, name: true },
+          },
+          creator: {
+            select: { id: true, name: true, email: true },
           },
           _count: {
             select: { flowShares: true },
@@ -134,7 +179,7 @@ class FlowService {
       prisma.flow.count({ where }),
     ]);
 
-    // Flatten project name and share count onto flow objects
+    // Flatten project name, share count, and creator onto flow objects
     const flowsWithProject = flows.map((f) => ({
       ...f,
       projectName: f.project?.name || null,
@@ -142,6 +187,9 @@ class FlowService {
       shareCount: f._count?.flowShares || 0,
       _count: undefined,
       accessType: "owner",
+      createdByName: f.creator?.name || f.creator?.email || null,
+      createdBySelf: !f.creatorId || f.creatorId === userId,
+      creator: undefined,
     }));
 
     return {
@@ -150,6 +198,40 @@ class FlowService {
       page: Number(page) || 1,
       totalPages: Math.ceil(total / take),
     };
+  }
+
+  /**
+   * Owner master view (§5 GAP-02): returns ALL flows whose ownerId = userId
+   * inside the given teamId, including member-created ones (creatorId ≠ userId).
+   * Only the tenant owner should call this — scope enforcement is in the controller.
+   */
+  async getOwnerMasterFlows(userId, teamId) {
+    const where = {
+      ownerId: userId,
+      teamId: teamId || null,
+      deletedAt: null,
+    };
+    const flows = await prisma.flow.findMany({
+      where,
+      orderBy: { updatedAt: "desc" },
+      take: 200,
+      include: {
+        creator: {
+          select: { id: true, name: true, email: true },
+        },
+        project: {
+          select: { id: true, name: true },
+        },
+      },
+    });
+    return flows.map((f) => ({
+      ...f,
+      projectName: f.project?.name || null,
+      project: undefined,
+      createdByName: f.creator?.name || f.creator?.email || null,
+      createdBySelf: !f.creatorId || f.creatorId === userId,
+      creator: undefined,
+    }));
   }
 
   async getFlowById(id, userId, appContext = null, teamId = null) {
@@ -163,6 +245,10 @@ class FlowService {
 
   async createFlow(userId, data, appContext) {
     let teamId = data.teamId || null;
+    // §5 multi-tenant: ownerId follows the tenant owner so member-created flows
+    // land in the tenant namespace (ownerId=tenantOwner, creatorId=member).
+    // Set inside the teamId block once the team row is fetched.
+    let resolvedOwnerId = userId;
 
     // Pro users have a personal Pro workspace backed by their own Pro team.
     // When no explicit team context is supplied, route the flow into that Pro
@@ -205,6 +291,11 @@ class FlowService {
         throw new AppError("Team not found", 404, "NOT_FOUND");
       }
       workspaceAppContext = team.appContext;
+      // §5 tenant ownership: ownerId on the flow is always the tenant owner's
+      // ID so all team flows share the same ownerId namespace regardless of who
+      // created them. creatorId captures the actual member (resolvedOwnerId is
+      // set here and used in the prisma.flow.create call below).
+      resolvedOwnerId = team.teamOwnerId;
       const [membership, isOwner] = await Promise.all([
         prisma.teamMember.findFirst({
           where: { teamId, userId },
@@ -219,7 +310,11 @@ class FlowService {
           "FORBIDDEN",
         );
       }
-      if (!team.owner.proUnlimitedFlows) {
+      // Team-app workspaces get unlimited flows. workspaceAppContext is the
+      // team's DB-stored appContext (NOT the spoofable X-App-Context header),
+      // and membership was already verified above — so this signal is
+      // server-trusted (see checkTeamAccess APP_CONTEXT_MISMATCH guard).
+      if (workspaceAppContext !== "team" && !team.owner.proUnlimitedFlows) {
         // Base allowance plus one-time flow packs (System A) — keeps
         // enforcement in sync with getPackStatus/getProSubscriptionStatus.
         const effectiveLimit =
@@ -244,32 +339,48 @@ class FlowService {
           proUnlimitedFlows: true,
           proFlowLimit: true,
           proAdditionalFlowsPurchased: true,
+          teamFlowLimit: true,
+          teamUnlimitedFlows: true,
         },
       });
-      if (user && !user.proUnlimitedFlows) {
-        // Base allowance plus one-time flow packs (System A) — keeps
-        // enforcement in sync with getPackStatus/getProSubscriptionStatus.
-        const effectiveLimit =
-          (user.proFlowLimit || 10) + (user.proAdditionalFlowsPurchased || 0);
-        // Count ALL personal flows against the limit, not just the current
-        // tier's — the cap is per-user, not per-appContext (see DATA-LOSS-001).
-        // Unified scope: personalFlowTeamOr (teamId=null + owned teams) is
-        // the single definition used by getPackStatus, the expiry cron, and
-        // the add-on cancellation handler — Pro flows live in the owner's
-        // Pro team, so teamId:null alone undercounts (FLOWPACK Gap #4).
-        const count = await prisma.flow.count({
-          where: {
-            ownerId: userId,
-            deletedAt: null,
-            OR: await personalFlowTeamOr(userId),
-          },
-        });
-        if (count >= effectiveLimit) {
-          throw new AppError(
-            `Flow limit reached (${effectiveLimit}). Upgrade to create more flows.`,
-            403,
-            "FLOW_LIMIT_REACHED",
-          );
+      if (user) {
+        // Workspace-context-aware effective limit (FEAT-001). A null limit
+        // means unlimited → skip enforcement entirely.
+        //   • Team context  → use the user's team-flow allowance.
+        //   • Pro/other     → existing Pro allowance + flow-pack logic
+        //                      (unchanged).
+        let effectiveLimit = null;
+        if (appContext === "team") {
+          if (!user.teamUnlimitedFlows) {
+            effectiveLimit = user.teamFlowLimit || 50;
+          }
+        } else if (!user.proUnlimitedFlows) {
+          // Base allowance plus one-time flow packs (System A) — keeps
+          // enforcement in sync with getPackStatus/getProSubscriptionStatus.
+          effectiveLimit =
+            (user.proFlowLimit || 10) + (user.proAdditionalFlowsPurchased || 0);
+        }
+        if (effectiveLimit !== null) {
+          // Count ALL personal flows against the limit, not just the current
+          // tier's — the cap is per-user, not per-appContext (see DATA-LOSS-001).
+          // Unified scope: personalFlowTeamOr (teamId=null + owned teams) is
+          // the single definition used by getPackStatus, the expiry cron, and
+          // the add-on cancellation handler — Pro flows live in the owner's
+          // Pro team, so teamId:null alone undercounts (FLOWPACK Gap #4).
+          const count = await prisma.flow.count({
+            where: {
+              ownerId: userId,
+              deletedAt: null,
+              OR: await personalFlowTeamOr(userId),
+            },
+          });
+          if (count >= effectiveLimit) {
+            throw new AppError(
+              `Flow limit reached (${effectiveLimit}). Upgrade to create more flows.`,
+              403,
+              "FLOW_LIMIT_REACHED",
+            );
+          }
         }
       }
     }
@@ -281,7 +392,10 @@ class FlowService {
         thumbnail: data.thumbnail,
         diagramData: data.xml || data.diagramData || "",
         isPublic: data.isPublic || false,
-        ownerId: userId,
+        // §5: ownerId = tenantOwner for team flows, userId for personal.
+        // creatorId always = the actual creator (userId).
+        ownerId: resolvedOwnerId,
+        creatorId: userId,
         projectId: data.projectId || null,
         teamId,
         // Workspace-derived appContext: a Pro team tags flows 'pro' (so the Pro
@@ -296,7 +410,11 @@ class FlowService {
     });
   }
 
-  async updateFlow(id, userId, data) {
+  async updateFlow(id, userId, data, createVersion = false) {
+    // FEAT-002: version snapshots are now manual-save-only. The flag can be
+    // passed explicitly OR ride along in the request body (controller forwards
+    // req.body verbatim as `data`), so both call paths are supported.
+    if (data && data.createVersion) createVersion = true;
     const flow = await prisma.flow.findFirst({
       where: { id, ownerId: userId, deletedAt: null },
     });
@@ -319,8 +437,10 @@ class FlowService {
       data: { ...updateData, lastModifiedById: userId }, // record acting owner
     });
 
-    // Create a version snapshot whenever diagramData changes
+    // Create a version snapshot on a MANUAL save whose diagramData changed.
+    // Autosaves (createVersion=false) update the flow but never snapshot.
     if (
+      createVersion &&
       updateData.diagramData !== undefined &&
       updateData.diagramData &&
       updateData.diagramData !== flow.diagramData
@@ -334,13 +454,17 @@ class FlowService {
             thumbnail: data.thumbnail || null,
           },
         });
+        // Retain the newest N per the flow OWNER's tier (free 10 / pro 50 /
+        // team 100); prune the rest.
+        const entitlements = await getEntitlements(flow.ownerId);
+        const versionLimit = entitlements.limits.versionLimit || 20;
         const all = await prisma.flowVersion.findMany({
           where: { flowId: id },
           orderBy: { createdAt: "desc" },
           select: { id: true },
         });
-        if (all.length > 20) {
-          const oldIds = all.slice(20).map((v) => v.id);
+        if (all.length > versionLimit) {
+          const oldIds = all.slice(versionLimit).map((v) => v.id);
           await prisma.flowVersion.deleteMany({
             where: { id: { in: oldIds } },
           });
@@ -402,14 +526,33 @@ class FlowService {
 
   async deleteFlow(id, userId) {
     const flow = await prisma.flow.findFirst({
-      where: { id, ownerId: userId, deletedAt: null },
+      where: { id, deletedAt: null },
     });
     if (!flow) throw new AppError("Flow not found", 404, "NOT_FOUND");
 
-    return await prisma.flow.update({
-      where: { id },
-      data: { deletedAt: new Date() },
-    });
+    // Owner can always delete
+    if (flow.ownerId === userId) {
+      return await prisma.flow.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+      });
+    }
+
+    // §5 multi-tenant: creator (member) can delete their own flow
+    if (flow.creatorId === userId && flow.teamId) {
+      const membership = await prisma.teamMember.findFirst({
+        where: { teamId: flow.teamId, userId, team: { deletedAt: null } },
+        select: { id: true },
+      });
+      if (membership) {
+        return await prisma.flow.update({
+          where: { id },
+          data: { deletedAt: new Date() },
+        });
+      }
+    }
+
+    throw new AppError("Flow not found", 404, "NOT_FOUND");
   }
 
   async getTrash(userId, options = {}, appContext = "team", teamId = null) {
@@ -491,6 +634,86 @@ class FlowService {
     return result;
   }
 
+  // FEAT-003: Restore a flow to a prior version WITHOUT losing the current
+  // state. Snapshots the live diagram first (so a restore is always undoable),
+  // overwrites the flow with the chosen version's XML, then records the
+  // restored XML as the new latest version. Both snapshots count toward the
+  // owner's tier version limit and are pruned together. Atomic via $transaction.
+  async restoreFlowVersion(flowId, versionId, userId) {
+    // 1. Ownership check — only the owner may restore (mirrors updateFlow).
+    const flow = await prisma.flow.findFirst({
+      where: { id: flowId, ownerId: userId, deletedAt: null },
+    });
+    if (!flow)
+      throw new AppError("Access denied or flow not found", 403, "FORBIDDEN");
+
+    // 2. Load the target version.
+    const version = await prisma.flowVersion.findFirst({
+      where: { id: versionId, flowId },
+    });
+    if (!version) throw new AppError("Version not found", 404, "NOT_FOUND");
+
+    // Resolve the owner's tier version cap up front (read-only).
+    const entitlements = await getEntitlements(flow.ownerId);
+    const versionLimit = entitlements.limits.versionLimit || 20;
+
+    // 3-6. Snapshot current → overwrite → snapshot restored → prune, atomically.
+    return await prisma.$transaction(async (tx) => {
+      // 3. Snapshot the CURRENT (pre-restore) state so the restore is undoable.
+      //    Skip only if the flow has no diagram yet (xml is a required column).
+      if (flow.diagramData) {
+        await tx.flowVersion.create({
+          data: {
+            flowId,
+            xml: flow.diagramData,
+            savedById: userId,
+            thumbnail: flow.thumbnail || null,
+          },
+        });
+      }
+
+      // 4. Overwrite the live flow with the chosen version's XML.
+      const updated = await tx.flow.update({
+        where: { id: flowId },
+        data: {
+          diagramData: version.xml,
+          thumbnail: version.thumbnail ?? flow.thumbnail,
+          lastModifiedById: userId,
+          updatedAt: new Date(),
+        },
+      });
+
+      // 5. Record the restored XML as the new latest version.
+      await tx.flowVersion.create({
+        data: {
+          flowId,
+          xml: version.xml,
+          savedById: userId,
+          thumbnail: version.thumbnail || null,
+        },
+      });
+
+      // 6. Prune to the owner's tier limit — keep newest N, delete the rest.
+      const all = await tx.flowVersion.findMany({
+        where: { flowId },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      if (all.length > versionLimit) {
+        const oldIds = all.slice(versionLimit).map((v) => v.id);
+        await tx.flowVersion.deleteMany({ where: { id: { in: oldIds } } });
+      }
+
+      return {
+        message: "Flow restored to selected version",
+        flowId,
+        restoredFromVersionId: versionId,
+        diagramData: updated.diagramData,
+        totalVersions: Math.min(all.length, versionLimit),
+      };
+    });
+  }
+
   async permanentDeleteFlow(id, userId) {
     const result = await prisma.flow.deleteMany({
       where: { id, ownerId: userId, deletedAt: { not: null } },
@@ -553,9 +776,15 @@ class FlowService {
   // ==================== SHARING ====================
 
   async shareFlow(flowId, userId, shares, appContext = "team") {
-    // Verify flow belongs to current user
+    // Verify flow belongs to current user — either as tenant owner or as the
+    // member who created it under a tenant namespace (ownerId = tenant owner,
+    // creatorId = this member).
     const flow = await prisma.flow.findFirst({
-      where: { id: flowId, ownerId: userId, deletedAt: null },
+      where: {
+        id: flowId,
+        deletedAt: null,
+        OR: [{ ownerId: userId }, { creatorId: userId }],
+      },
     });
     if (!flow)
       throw new AppError(
@@ -737,7 +966,10 @@ class FlowService {
     });
     if (!flow) throw new AppError("Flow not found", 404, "NOT_FOUND");
 
-    if (flow.ownerId !== userId) {
+    // Allow: tenant owner, flow creator (member working under tenant), or a recipient
+    const isOwnerOrCreator =
+      flow.ownerId === userId || flow.creatorId === userId;
+    if (!isOwnerOrCreator) {
       const share = await prisma.flowShare.findFirst({
         where: { flowId, sharedWithId: userId },
       });
@@ -836,24 +1068,40 @@ class FlowService {
   }
 
   async getSharedFlows(userId, appContext = "team", activeTeamId = null) {
-    // "Shared with me" is a TEAM-context feature. Personal accounts don't
-    // see any incoming shares — sharing is strictly for team workspaces.
-    if (!activeTeamId) return [];
-
-    // A share is visible in Team X's workspace ONLY if the sharer is Team
-    // X's owner (the team owner is the person authorised to distribute
-    // flows inside their team). Shares originated by members of other
-    // teams stay scoped to THOSE teams and never cross-leak here.
-    const team = await prisma.team.findFirst({
-      where: { id: activeTeamId, deletedAt: null },
-      select: { teamOwnerId: true },
-    });
-    if (!team) return [];
+    // Resolve which team owners can deliver shares to this user.
+    // - Team context: only the active team's owner (strict workspace isolation).
+    // - Personal context (no team selected): show shares from ANY team owner
+    //   the user belongs to, so new users with empty localStorage still see
+    //   their incoming shares before the workspace switcher reconciles.
+    let sharedByFilter;
+    if (activeTeamId) {
+      const team = await prisma.team.findFirst({
+        where: { id: activeTeamId, deletedAt: null },
+        select: { teamOwnerId: true },
+      });
+      if (!team) return [];
+      sharedByFilter = { sharedById: team.teamOwnerId };
+    } else {
+      // Personal context — collect owners of every team the user is a member of.
+      const memberships = await prisma.teamMember.findMany({
+        where: { userId, team: { deletedAt: null } },
+        select: { team: { select: { teamOwnerId: true } } },
+      });
+      const ownerIds = [
+        ...new Set(
+          (Array.isArray(memberships) ? memberships : []).map(
+            (m) => m.team.teamOwnerId,
+          ),
+        ),
+      ];
+      if (!ownerIds.length) return [];
+      sharedByFilter = { sharedById: { in: ownerIds } };
+    }
 
     const shares = await prisma.flowShare.findMany({
       where: {
         sharedWithId: userId,
-        sharedById: team.teamOwnerId,
+        ...sharedByFilter,
         appContext,
         // Double-anchor: the share record AND the underlying flow must both
         // carry the same appContext so a Pro flow never leaks into a Team
@@ -915,6 +1163,19 @@ class FlowService {
       return { ...flow, permission: "owner" };
     }
 
+    // §5 multi-tenant member path: the caller created this flow under a tenant
+    // owner's namespace (ownerId=tenantOwner, creatorId=caller). Verify active
+    // membership before granting owner-level access.
+    if (flow.creatorId === userId && flow.teamId) {
+      const membership = await prisma.teamMember.findFirst({
+        where: { teamId: flow.teamId, userId, team: { deletedAt: null } },
+        select: { id: true },
+      });
+      if (membership) {
+        return { ...flow, permission: "owner" };
+      }
+    }
+
     // Shared path — shares are tagged with the appContext they were created in.
     // Allow null-appContext shares through (legacy records predating the field)
     // but strictly block cross-context shares (pro share ≠ team context).
@@ -966,6 +1227,15 @@ class FlowService {
       return await this.updateFlow(id, userId, data);
     }
 
+    // §5 multi-tenant: creator (member) can edit their own flow
+    if (flow.creatorId === userId && flow.teamId) {
+      const membership = await prisma.teamMember.findFirst({
+        where: { teamId: flow.teamId, userId, team: { deletedAt: null } },
+        select: { id: true },
+      });
+      if (membership) return await this.updateFlow(id, flow.ownerId, data);
+    }
+
     // Check shared edit permission
     const share = await prisma.flowShare.findFirst({
       where: { flowId: id, sharedWithId: userId, permission: "edit" },
@@ -1005,11 +1275,13 @@ class FlowService {
       data: { ...updateData, lastModifiedById: userId }, // record acting collaborator/owner
     });
 
-    // Capture a version snapshot for shared-edit saves, exactly like
-    // updateFlow does on the owner path. Without this, edits by team
+    // Capture a version snapshot for shared-edit MANUAL saves, exactly like
+    // updateFlow does on the owner path. Autosaves (createVersion absent/false)
+    // update the flow but never snapshot. Without this, manual edits by team
     // members never appeared in the version-history drawer, so "who
     // changed what, when" was unanswerable for collaborative flows.
     if (
+      data.createVersion &&
       updateData.diagramData !== undefined &&
       updateData.diagramData &&
       updateData.diagramData !== flow.diagramData
@@ -1023,13 +1295,17 @@ class FlowService {
             thumbnail: data.thumbnail || null,
           },
         });
+        // Retain the newest N per the flow OWNER's tier (free 10 / pro 50 /
+        // team 100); prune the rest.
+        const entitlements = await getEntitlements(flow.ownerId);
+        const versionLimit = entitlements.limits.versionLimit || 20;
         const all = await prisma.flowVersion.findMany({
           where: { flowId: id },
           orderBy: { createdAt: "desc" },
           select: { id: true },
         });
-        if (all.length > 20) {
-          const oldIds = all.slice(20).map((v) => v.id);
+        if (all.length > versionLimit) {
+          const oldIds = all.slice(versionLimit).map((v) => v.id);
           await prisma.flowVersion.deleteMany({
             where: { id: { in: oldIds } },
           });
@@ -1158,7 +1434,12 @@ class FlowService {
 
   // Flows shown in the picker modal. Order: shared first, then most-
   // recently updated. Only PERSONAL flows (teamId null) are at risk.
-  async getPickerList(userId) {
+  // teamPicker=true scopes to team flows (the team-subscription-expired
+  // picker) instead of personal Pro flows.
+  async getPickerList(userId, teamPicker = false) {
+    const scopeOr = teamPicker
+      ? [{ teamId: null, appContext: "team" }]
+      : await personalFlowTeamOr(userId);
     const flows = await prisma.flow.findMany({
       where: {
         ownerId: userId,
@@ -1166,7 +1447,7 @@ class FlowService {
         // team folds into personal). Nest both OR-clauses under AND so they
         // don't collide.
         AND: [
-          { OR: await personalFlowTeamOr(userId) },
+          { OR: scopeOr },
           // Include both active and currently-marked-for-downgrade flows so
           // the user can see what's at risk and pick from everything.
           { OR: [{ deletedAt: null }, { markedForDowngrade: true }] },
@@ -1199,8 +1480,9 @@ class FlowService {
     }));
   }
 
-  // Confirm the user's 10-flow selection. Trashes everything else.
-  async confirmSelection(userId, selectedIds) {
+  // Confirm the user's flow selection. Trashes everything else.
+  // teamPicker=true → team-subscription picker: keep up to 50 team flows.
+  async confirmSelection(userId, selectedIds, teamPicker = false) {
     if (!Array.isArray(selectedIds)) {
       throw new AppError(
         "selectedFlowIds must be an array",
@@ -1208,14 +1490,22 @@ class FlowService {
         "VALIDATION_ERROR",
       );
     }
-    if (selectedIds.length > 10) {
-      throw new AppError("You can keep at most 10 flows", 400, "TOO_MANY");
+    const maxKeep = teamPicker ? 50 : 10;
+    if (selectedIds.length > maxKeep) {
+      throw new AppError(
+        `You can keep at most ${maxKeep} flows`,
+        400,
+        "TOO_MANY",
+      );
     }
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { isInFlowPickerPhase: true },
+      select: { isInFlowPickerPhase: true, isInTeamPickerPhase: true },
     });
-    if (!user?.isInFlowPickerPhase) {
+    const inPhase = teamPicker
+      ? user?.isInTeamPickerPhase
+      : user?.isInFlowPickerPhase;
+    if (!inPhase) {
       throw new AppError(
         "Not in flow-picker phase",
         400,
@@ -1236,8 +1526,11 @@ class FlowService {
       );
     }
 
+    const scopeOr = teamPicker
+      ? [{ teamId: null, appContext: "team" }]
+      : await personalFlowTeamOr(userId);
     const allPersonal = await prisma.flow.findMany({
-      where: { ownerId: userId, OR: await personalFlowTeamOr(userId) },
+      where: { ownerId: userId, OR: scopeOr },
       select: { id: true, deletedAt: true },
     });
     const selectedSet = new Set(selectedIds);
@@ -1259,10 +1552,15 @@ class FlowService {
       }),
       prisma.user.update({
         where: { id: userId },
-        data: {
-          isInFlowPickerPhase: false,
-          proFlowLimit: 10,
-        },
+        data: teamPicker
+          ? {
+              isInTeamPickerPhase: false,
+              teamFlowLimit: 50,
+            }
+          : {
+              isInFlowPickerPhase: false,
+              proFlowLimit: 10,
+            },
       }),
     ]);
 
@@ -1274,19 +1572,53 @@ class FlowService {
   }
 
   // Pack-status snapshot used by the frontend banner.
-  async getPackStatus(userId) {
+  async getPackStatus(userId, teamId = null) {
+    // §5: if the caller is a member inside a paid tenant, resolve limits from
+    // the tenant owner (same logic as getEntitlements inheritance).
+    let resolvedUserId = userId;
+    if (teamId) {
+      try {
+        const team = await prisma.team.findFirst({
+          where: { id: teamId, deletedAt: null },
+          select: { teamOwnerId: true },
+        });
+        if (team && team.teamOwnerId !== userId) {
+          resolvedUserId = team.teamOwnerId;
+        }
+      } catch {
+        /* fall back to caller */
+      }
+    }
+
     const user = await prisma.user.findUnique({
-      where: { id: userId },
+      where: { id: resolvedUserId },
       select: {
         proFlowLimit: true,
         proAdditionalFlowsPurchased: true,
         proUnlimitedFlows: true,
+        flowAddonStatus: true,
+        flowAddonPlan: true,
         activeFlowPackId: true,
         flowPackExpiresAt: true,
         isInFlowPickerPhase: true,
+        isInTeamPickerPhase: true,
+        teamFlowLimit: true,
+        teamUnlimitedFlows: true,
+        subscription: { select: { status: true, productType: true } },
       },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    // §5 B5: if the resolved user has an active team subscription, treat them
+    // as having unlimited team flows — even if the DB flag wasn't backfilled.
+    // "cancelling" = cancel-at-period-end (Stripe); user retains full access
+    // until the period ends, so it counts the same as "active".
+    const hasActiveTeamSub =
+      (user.subscription?.status === "active" ||
+        user.subscription?.status === "cancelling") &&
+      (user.subscription?.productType?.includes("team") ||
+        user.subscription?.productType?.includes("Team"));
+    const effectiveTeamUnlimited = user.teamUnlimitedFlows || hasActiveTeamSub;
 
     const activePack = user.activeFlowPackId
       ? await prisma.proFlowPurchase.findUnique({
@@ -1294,17 +1626,29 @@ class FlowService {
         })
       : null;
 
+    // When a specific team context is active (Pro app), count only flows in
+    // that team — matches exactly what the user sees in the flow list.
+    // Without a teamId (free/personal context), fall back to personalFlowTeamOr
+    // so legacy personal flows (teamId=null) are still counted.
     const flowCount = await prisma.flow.count({
       where: {
-        ownerId: userId,
+        ownerId: resolvedUserId,
         deletedAt: null,
-        OR: await personalFlowTeamOr(userId),
+        ...(teamId
+          ? { teamId }
+          : { OR: await personalFlowTeamOr(resolvedUserId) }),
       },
     });
 
-    const limit = user.proUnlimitedFlows
-      ? -1
-      : user.proFlowLimit + user.proAdditionalFlowsPurchased;
+    const isAddonUnlimited =
+      user.flowAddonStatus === "active" && user.flowAddonPlan === "unlimited";
+    const limit =
+      user.proUnlimitedFlows || isAddonUnlimited
+        ? -1
+        : user.flowAddonStatus === "active" &&
+            user.flowAddonPlan === "standard_100"
+          ? 100
+          : user.proFlowLimit + user.proAdditionalFlowsPurchased;
 
     let daysUntilExpiry = null;
     if (user.flowPackExpiresAt) {
@@ -1324,6 +1668,9 @@ class FlowService {
       flowCount,
       flowLimit: limit,
       isInPickerPhase: !!user.isInFlowPickerPhase,
+      isInTeamPickerPhase: user.isInTeamPickerPhase || false,
+      teamFlowLimit: user.teamFlowLimit || 50,
+      teamUnlimitedFlows: effectiveTeamUnlimited,
       daysUntilExpiry,
     };
   }

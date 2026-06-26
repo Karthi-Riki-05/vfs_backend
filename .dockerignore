@@ -1,3 +1,9 @@
 node_modules
 npm-debug.log*
 uploads/chat/*
+backups/
+coverage/
+logs/
+.git
+.github
+tmpclaude*

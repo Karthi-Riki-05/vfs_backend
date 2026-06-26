@@ -111,6 +111,17 @@ const removeMemberSchema = z.object({
   }),
 });
 
+const editMessageSchema = z.object({
+  params: z.object({ messageId: z.string().min(1) }),
+  body: z.object({
+    content: z.string().min(1).max(10000),
+  }),
+});
+
+const deleteMessageSchema = z.object({
+  params: z.object({ messageId: z.string().min(1) }),
+});
+
 module.exports = {
   createChatGroupSchema,
   sendMessageSchema,
@@ -121,6 +132,8 @@ module.exports = {
   addMembersSchema,
   updateGroupSchema,
   removeMemberSchema,
+  editMessageSchema,
+  deleteMessageSchema,
   ALLOWED_FILE_TYPES,
   MAX_FILE_SIZE,
 };

@@ -34,6 +34,16 @@ const removeMemberSchema = z.object({
   }),
 });
 
+const updateMemberRoleSchema = z.object({
+  params: z.object({
+    id: z.string().min(1),
+    uid: z.string().min(1),
+  }),
+  body: z.object({
+    role: z.enum(["ADMIN", "MEMBER"]),
+  }),
+});
+
 const inviteSchema = z.object({
   body: z
     .object({
@@ -82,14 +92,20 @@ const acceptQuerySchema = z.object({
   }),
 });
 
+const cancelInviteSchema = z.object({
+  params: z.object({ id: z.string().min(1) }),
+});
+
 module.exports = {
   createTeamSchema,
   updateTeamSchema,
   addMemberSchema,
   removeMemberSchema,
+  updateMemberRoleSchema,
   inviteSchema,
   idParamSchema,
   getTeamsQuerySchema,
   invitesQuerySchema,
   acceptQuerySchema,
+  cancelInviteSchema,
 };

@@ -48,6 +48,7 @@ class MobileAuthController {
         image: true,
         password: true,
         userStatus: true,
+        suspendedAt: true,
         currentVersion: true,
         hasPro: true,
         proFlowLimit: true,
@@ -69,6 +70,13 @@ class MobileAuthController {
         401,
         "USER_DEACTIVATED",
       );
+    }
+
+    // BUG-007: suspended accounts cannot log in (parity with web login,
+    // socialLogin, and the authenticate middleware).
+    if (user.suspendedAt !== null && user.suspendedAt !== undefined) {
+      logger.warn(`[mobile] login blocked — suspended: ${user.id}`);
+      throw new AppError("Account is inactive", 401, "ACCOUNT_INACTIVE");
     }
 
     const valid = await argon2.verify(user.password, password);
@@ -120,7 +128,12 @@ class MobileAuthController {
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
-      select: { id: true, refreshToken: true, userStatus: true },
+      select: {
+        id: true,
+        refreshToken: true,
+        userStatus: true,
+        suspendedAt: true,
+      },
     });
 
     if (!user || user.refreshToken !== refreshToken) {
@@ -137,6 +150,12 @@ class MobileAuthController {
         401,
         "USER_DEACTIVATED",
       );
+    }
+
+    // BUG-007: a suspended account cannot mint fresh access tokens via refresh.
+    if (user.suspendedAt !== null && user.suspendedAt !== undefined) {
+      logger.warn(`[mobile] refresh blocked — suspended: ${user.id}`);
+      throw new AppError("Account is inactive", 401, "ACCOUNT_INACTIVE");
     }
 
     const accessToken = signAccessToken(user.id);
@@ -158,20 +177,46 @@ class MobileAuthController {
     let email, name, image;
 
     if (provider === "google") {
-      const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-      const ticket = await client.verifyIdToken({
-        idToken,
-        audience: process.env.GOOGLE_CLIENT_ID,
-      });
-      const payload = ticket.getPayload();
+      let payload;
+      try {
+        const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+        const ticket = await client.verifyIdToken({
+          idToken,
+          audience: process.env.GOOGLE_CLIENT_ID,
+        });
+        payload = ticket.getPayload();
+      } catch (err) {
+        // Issue 1: malformed/invalid/expired token → 401, never a 500 with a
+        // leaked library message.
+        logger.warn(`[mobile] google idToken verify failed: ${err.message}`);
+        throw new AppError("Invalid or expired token", 401, "INVALID_TOKEN");
+      }
+      // Issue 2: Google asserts whether the email is verified. An unverified
+      // provider email must NOT be trusted as an identity key (account-takeover
+      // vector — see bug-006).
+      if (payload.email_verified !== true) {
+        throw new AppError(
+          "Email not verified by provider",
+          401,
+          "SOCIAL_EMAIL_NOT_VERIFIED",
+        );
+      }
       email = payload.email;
       name = payload.name;
       image = payload.picture;
     } else if (provider === "apple") {
-      const applePayload = await appleSignin.verifyIdToken(idToken, {
-        audience: process.env.APPLE_CLIENT_ID,
-        ignoreExpiration: false,
-      });
+      let applePayload;
+      try {
+        applePayload = await appleSignin.verifyIdToken(idToken, {
+          audience: process.env.APPLE_CLIENT_ID,
+          ignoreExpiration: false,
+        });
+      } catch (err) {
+        // Issue 1: same hardening for Apple — Apple signature-verifies the
+        // token, so a failure here means the token is invalid/expired.
+        logger.warn(`[mobile] apple idToken verify failed: ${err.message}`);
+        throw new AppError("Invalid or expired token", 401, "INVALID_TOKEN");
+      }
       email = applePayload.email;
       name = req.body.name || null;
       image = null;
@@ -196,6 +241,10 @@ class MobileAuthController {
           name: name || email.split("@")[0],
           image: image || null,
           role: "Viewer",
+          // Issue 4: the provider has verified this email (Google
+          // email_verified===true, or Apple signature-verified), so the new
+          // account is email-verified — consistent with the credentials gate.
+          emailVerified: new Date(),
         },
       });
       logger.info(`[mobile] social user created via ${provider}: ${user.id}`);
@@ -217,6 +266,13 @@ class MobileAuthController {
         401,
         "USER_DEACTIVATED",
       );
+    }
+
+    // Issue 3: suspended accounts cannot log in via social either (parity with
+    // credentials login and the authenticate middleware).
+    if (user.suspendedAt !== null && user.suspendedAt !== undefined) {
+      logger.warn(`[mobile] social login blocked — suspended: ${user.id}`);
+      throw new AppError("Account is inactive", 401, "ACCOUNT_INACTIVE");
     }
 
     const accessToken = signAccessToken(user.id);

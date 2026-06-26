@@ -8,10 +8,12 @@ class TeamController {
   getTeams = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const activeTeamId = req.headers["x-team-context"] || null;
     const result = await teamService.getTeams(
       req.user.id,
       req.query,
       appContext,
+      activeTeamId,
     );
     res.json({ success: true, data: result });
   });
@@ -58,17 +60,8 @@ class TeamController {
   });
 
   addMember = asyncHandler(async (req, res) => {
-    // Enforce team member limit from subscription
-    const teamMemberLimit = req.subscription?.teamMemberLimit || 5;
-    const currentCount = await teamService.getMemberCount(req.params.id);
-    if (currentCount >= teamMemberLimit) {
-      throw new AppError(
-        `Team member limit reached (${teamMemberLimit}). Please upgrade your plan to add more members.`,
-        403,
-        "MEMBER_LIMIT_REACHED",
-      );
-    }
-
+    // Seat-limit enforcement is canonical in teamService.addMember (keyed off
+    // the team owner's subscription.usersCount).
     const member = await teamService.addMember(
       req.params.id,
       req.user.id,
@@ -84,6 +77,16 @@ class TeamController {
       success: true,
       data: { message: "Member removed successfully" },
     });
+  });
+
+  updateMemberRole = asyncHandler(async (req, res) => {
+    const member = await teamService.updateMemberRole(
+      req.params.id,
+      req.params.uid,
+      req.user.id,
+      req.body.role,
+    );
+    res.json({ success: true, data: member });
   });
 
   invite = asyncHandler(async (req, res) => {
@@ -136,6 +139,14 @@ class TeamController {
     res.json({ success: true, data: invites });
   });
 
+  cancelInvite = asyncHandler(async (req, res) => {
+    await teamService.cancelInvite(req.params.id, req.user.id);
+    res.json({
+      success: true,
+      data: { message: "Invite cancelled successfully" },
+    });
+  });
+
   // List the AI-billing contexts the user can switch between: their personal
   // pool plus every team they belong to (or own). Each entry carries its live
   // AI-credit balance, resolved through the SAME billing logic the deduction
@@ -144,16 +155,30 @@ class TeamController {
   // NOT expose or scope any flow/chat data (DATA-LOSS-001).
   getMyContexts = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const personalCtx =
-      req.headers["x-app-context"] || req.user.currentVersion || "team";
-
     // Determine which app is calling via X-Team-Context. When the header
     // carries a proTeamId, we're in pro app context; otherwise (no header or
     // a team-app teamId) we're in team/personal context. We do NOT fall back
     // to currentVersion because it can be stale (e.g. a user with
     // currentVersion='pro' opening the team app with no active team context).
     const activeTeamId = req.headers["x-team-context"] || null;
-    let callingIsPro = false;
+
+    // Guard: x-app-context="team" from the team app must be validated against
+    // a real subscription. A free user opening ?app=team has no team plan — fall
+    // back to their actual plan so we don't create/show 300 team credits for them.
+    let personalCtx =
+      req.headers["x-app-context"] || req.user.currentVersion || "free";
+    if (personalCtx === "team" && !activeTeamId) {
+      const ownsTeamPlan = await prisma.subscription.findFirst({
+        where: {
+          userId,
+          status: { in: ["active", "trialing"] },
+          plan: { tier: { gte: 2 } },
+        },
+        select: { id: true },
+      });
+      if (!ownsTeamPlan) personalCtx = req.user.currentVersion || "free";
+    }
+    let callingIsPro = req.headers["x-app-context"] === "pro";
     if (activeTeamId) {
       const activeTeam = await prisma.team.findFirst({
         where: { id: activeTeamId },

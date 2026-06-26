@@ -3,6 +3,9 @@ const router = express.Router();
 const teamController = require("../controllers/team.controller");
 const { authenticate } = require("../middleware/auth.middleware");
 const { checkTeamAccess } = require("../middleware/checkTeamAccess");
+const {
+  requireTeamCreateEntitlement,
+} = require("../middleware/requireEntitlement");
 const validate = require("../middleware/validate");
 const { inviteLimiter } = require("../middleware/rateLimiter");
 const {
@@ -10,11 +13,13 @@ const {
   updateTeamSchema,
   addMemberSchema,
   removeMemberSchema,
+  updateMemberRoleSchema,
   inviteSchema,
   idParamSchema,
   getTeamsQuerySchema,
   invitesQuerySchema,
   acceptQuerySchema,
+  cancelInviteSchema,
 } = require("../validators/team.validator");
 
 router.use(authenticate);
@@ -81,7 +86,7 @@ router.get("/my-contexts", teamController.getMyContexts);
  */
 router.post(
   "/",
-  checkTeamAccess,
+  requireTeamCreateEntitlement,
   validate(createTeamSchema),
   teamController.createTeam,
 );
@@ -140,6 +145,34 @@ router.get(
   "/invites",
   validate(invitesQuerySchema),
   teamController.listPendingInvites,
+);
+
+/**
+ * @swagger
+ * /api/v1/teams/invites/{id}:
+ *   delete:
+ *     summary: Cancel a pending team invite (owner only)
+ *     tags: [Teams]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Invite cancelled
+ *       403:
+ *         description: Not the team owner
+ *       404:
+ *         description: Invite not found
+ */
+router.delete(
+  "/invites/:id",
+  validate(cancelInviteSchema),
+  teamController.cancelInvite,
 );
 
 /**
@@ -326,6 +359,26 @@ router.delete(
   "/:id/members/:uid",
   validate(removeMemberSchema),
   teamController.removeMember,
+);
+
+/**
+ * @swagger
+ * /api/v1/teams/{id}/members/{uid}/role:
+ *   put:
+ *     summary: Update a team member's role (owner only — ADMIN/MEMBER)
+ *     tags: [Teams]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Member role updated
+ *       403:
+ *         description: Not the team owner
+ */
+router.put(
+  "/:id/members/:uid/role",
+  validate(updateMemberRoleSchema),
+  teamController.updateMemberRole,
 );
 
 module.exports = router;

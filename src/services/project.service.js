@@ -12,8 +12,26 @@ class ProjectService {
       createdBy: userId,
       deletedAt: null,
     };
-    if (teamId) where.teamId = teamId;
-    else where.appContext = appContext;
+    if (teamId) {
+      // Mirror flow.service: own team-app team = personal context, include
+      // NULL-teamId projects created before the team existed (upgrade fix).
+      const isOwnTeamAppTeam = await prisma.team.findFirst({
+        where: {
+          id: teamId,
+          teamOwnerId: userId,
+          appContext: { in: ["team", "free"] },
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (isOwnTeamAppTeam) {
+        where.OR = [{ teamId: null }, { teamId }];
+      } else {
+        where.teamId = teamId;
+      }
+    } else {
+      where.appContext = appContext;
+    }
 
     if (search) {
       where.name = { contains: search, mode: "insensitive" };

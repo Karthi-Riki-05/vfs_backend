@@ -25,12 +25,6 @@ router.post(
   validate(generateDiagramSchema),
   aiController.generateDiagram,
 );
-router.post(
-  "/generate-diagram-from-document",
-  aiLimiter,
-  docUpload.single("document"),
-  aiController.generateDiagramFromDocument,
-);
 
 // User context for AI
 router.get("/context", aiController.getContext);

@@ -198,9 +198,8 @@ class SubscriptionService {
     return customer.id;
   }
 
-  async createCheckoutSession(userId, { plan, teamMembers }) {
+  async createCheckoutSession(userId, { plan, teamMembers, paymentMethodId }) {
     const stripe = getStripe();
-
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
 
@@ -242,6 +241,92 @@ class SubscriptionService {
           },
           quantity: teamMembers,
         };
+
+    // If user chose a saved card, create the subscription directly — no redirect.
+    if (paymentMethodId) {
+      // Attach the chosen card as the customer's default invoice payment method.
+      await stripe.customers.update(customerId, {
+        invoice_settings: { default_payment_method: paymentMethodId },
+      });
+
+      const stripePriceId = priceId;
+      if (!stripePriceId) {
+        // Fallback: no price ID configured — must go through hosted checkout
+      } else {
+        const subscription = await stripe.subscriptions.create({
+          customer: customerId,
+          items: [{ price: stripePriceId, quantity: teamMembers }],
+          default_payment_method: paymentMethodId,
+          metadata: { userId, plan, teamMembers: String(teamMembers) },
+          expand: ["latest_invoice.payment_intent"],
+        });
+
+        // Persist the new subscription immediately (webhook may lag).
+        const periodEnd = subscription.current_period_end
+          ? new Date(subscription.current_period_end * 1000)
+          : null;
+        const newStatus =
+          subscription.status === "active" ? "active" : "pending";
+
+        // Reuse the planId from the existing subscription record if present;
+        // otherwise look up (or create) a plan row matching the selected plan.
+        let planIdForCreate = existingSub?.planId;
+        if (!planIdForCreate) {
+          let dbPlan = await prisma.plan.findFirst({
+            where: {
+              name: plan === "yearly" ? "Team Yearly" : "Team Monthly",
+            },
+          });
+          if (!dbPlan) {
+            dbPlan = await prisma.plan.create({
+              data: {
+                name: plan === "yearly" ? "Team Yearly" : "Team Monthly",
+                duration: plan,
+                price: 0,
+                status: "active",
+                tier: 2,
+                appType: "enterprise",
+              },
+            });
+          }
+          planIdForCreate = dbPlan.id;
+        }
+
+        await prisma.subscription.upsert({
+          where: { userId },
+          update: {
+            status: newStatus,
+            paymentId: subscription.id,
+            usersCount: teamMembers,
+            productType: plan === "yearly" ? "team_yearly" : "team_monthly",
+            startedAt: new Date(),
+            expiresAt: periodEnd,
+            appType: "enterprise",
+            scheduledPlanType: null,
+            scheduledTeamMembers: null,
+            scheduledActivationDate: null,
+          },
+          create: {
+            userId,
+            planId: planIdForCreate,
+            status: newStatus,
+            paymentId: subscription.id,
+            usersCount: teamMembers,
+            productType: plan === "yearly" ? "team_yearly" : "team_monthly",
+            startedAt: new Date(),
+            expiresAt: periodEnd,
+            appType: "enterprise",
+          },
+        });
+
+        return {
+          subscriptionId: subscription.id,
+          status: subscription.status,
+          directCharge: true,
+          successUrl: `${baseUrl}/dashboard/subscription?subscribed=1`,
+        };
+      }
+    }
 
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
@@ -530,6 +615,29 @@ class SubscriptionService {
           },
           proration_behavior: "create_prorations",
         });
+
+        // Record the credit in transaction_logs so billing history shows it.
+        await prisma.transactionLog
+          .create({
+            data: {
+              userId,
+              chargeId: subscription.paymentId,
+              txnId: `reduce_${subscription.paymentId}_${currentQuantity}_to_${teamMembers}`,
+              amountCharged: 0,
+              currency: getStripeCurrency(),
+              status: "credit",
+              paymentMethod: "stripe_credit",
+              appType: "enterprise",
+              appContext: "team",
+              purchaseType: "team_subscription",
+            },
+          })
+          .catch((err) => {
+            if (err.code !== "P2002")
+              logger.warn(
+                `[changePlan] reduce-seats transactionLog write failed: ${err.message}`,
+              );
+          });
       }
 
       const price = (teamMembers * PRICING[plan].perUser) / 100;
@@ -860,6 +968,7 @@ class SubscriptionService {
         ? updatedSub.latest_invoice
         : updatedSub.latest_invoice?.id;
 
+    let paidInvoice = null;
     if (latestInvoiceId) {
       let invoice = await stripe.invoices.retrieve(latestInvoiceId);
       if (invoice.status === "open" && (invoice.amount_due ?? 0) > 0) {
@@ -882,6 +991,7 @@ class SubscriptionService {
           "Payment for the additional seats was not completed. Seat count was not changed.",
         );
       }
+      paidInvoice = invoice;
     }
 
     const price = (teamMembers * PRICING[plan].perUser) / 100;
@@ -889,6 +999,34 @@ class SubscriptionService {
       where: { userId },
       data: { usersCount: teamMembers, price },
     });
+
+    // Record the prorated charge in transaction_logs so billing history shows it.
+    if (latestInvoiceId) {
+      await prisma.transactionLog
+        .create({
+          data: {
+            userId,
+            chargeId:
+              (typeof paidInvoice?.payment_intent === "string"
+                ? paidInvoice.payment_intent
+                : paidInvoice?.payment_intent?.id) || latestInvoiceId,
+            txnId: latestInvoiceId,
+            amountCharged: paidInvoice?.amount_paid ?? 0,
+            currency: paidInvoice?.currency || getStripeCurrency(),
+            status: "success",
+            paymentMethod: "card",
+            appType: "enterprise",
+            appContext: "team",
+            purchaseType: "team_subscription",
+          },
+        })
+        .catch((err) => {
+          if (err.code !== "P2002")
+            logger.error(
+              `[_upgradeSeatsOffSession] transactionLog write failed: ${err.message}`,
+            );
+        });
+    }
 
     return {
       type: "updated",
@@ -1202,6 +1340,7 @@ class SubscriptionService {
         data: {
           hasPro: true,
           currentVersion: "team",
+          teamUnlimitedFlows: true,
         },
       }),
       // Grant seat-scaled team AI credits scoped to team appContext.

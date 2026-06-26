@@ -66,6 +66,9 @@ router.post(
  */
 router.get("/", validate(getFlowsQuerySchema), flowController.getAllFlows);
 
+// §5 GAP-02: owner master view — all flows in the tenant, including member-created
+router.get("/master-view", flowController.getMasterViewFlows);
+
 router.get("/favorites", flowController.getFavorites);
 router.get("/trash", flowController.getTrash);
 // Empty trash — must be declared BEFORE the `/:id` matchers below, otherwise

@@ -6,29 +6,50 @@ const notificationService = require("./notification.service");
 const logger = require("../utils/logger");
 
 class TeamService {
-  async getTeams(userId, options = {}, appContext = "team") {
+  async getTeams(
+    userId,
+    options = {},
+    appContext = "team",
+    activeTeamId = null,
+  ) {
     const { page = 1, limit = 20 } = options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // App-isolation: Pro app and Team app are separate workspaces. When the
-    // caller is inside Pro (currentVersion='pro'), they must ONLY see teams
-    // they created in the Pro workspace (team.appContext='pro'). Team-app
-    // teams (appContext='free'|'team') stay invisible from inside Pro and
-    // vice-versa. Keep legacy behavior for non-Pro contexts: show every
-    // team the user belongs to.
-    const where = {
-      deletedAt: null,
-      OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
-    };
+    const where = { deletedAt: null };
+
+    if (activeTeamId) {
+      // Team workspace context: show teams owned by the workspace owner where
+      // this user is a member. This lets mr5 see mry's teams only when mr5
+      // has explicitly switched into mry's workspace via the profile switcher.
+      const activeTeam = await prisma.team.findFirst({
+        where: { id: activeTeamId, deletedAt: null },
+        select: { teamOwnerId: true },
+      });
+      if (activeTeam && activeTeam.teamOwnerId !== userId) {
+        // Member context: only show teams within the workspace owner's tenant
+        // where the current user is also a member.
+        where.teamOwnerId = activeTeam.teamOwnerId;
+        where.members = { some: { userId } };
+      } else {
+        // Owner switched to their own team context — show their own teams.
+        where.teamOwnerId = userId;
+      }
+    } else {
+      // Personal workspace (no X-Team-Context): only show teams this user owns.
+      // Teams the user was invited into belong to another owner's workspace and
+      // must not bleed into the user's personal context.
+      where.teamOwnerId = userId;
+    }
+
+    // App-isolation: Pro workspace shows only Pro-context teams; Team workspace
+    // shows only non-Pro teams.
     if (appContext === "pro") {
       where.appContext = "pro";
     } else {
       where.appContext = { not: "pro" };
     }
     // Hide system/workspace teams auto-created during subscription.
-    // Include teams where verifyTeam is NULL (user-created before this field existed)
-    // or any value other than "system".
     where.AND = [
       { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
     ];
@@ -190,11 +211,21 @@ class TeamService {
     });
     const isProOwner = !!(owner?.hasPro && owner?.proPurchasedAt);
 
-    // Check member limit (skip for Pro lifetime owners)
-    if (!isProOwner && team.teamMem > 0) {
+    // Check member limit (skip for Pro lifetime owners). Seat limit is the
+    // owner's purchased subscription seat count (usersCount), defaulting to 5.
+    if (!isProOwner) {
+      const ownerSub = await prisma.subscription.findFirst({
+        where: { userId: team.teamOwnerId, status: "active" },
+        select: { usersCount: true },
+      });
+      const seatLimit = ownerSub?.usersCount || 5;
       const memberCount = await prisma.teamMember.count({ where: { teamId } });
-      if (memberCount >= team.teamMem) {
-        throw new AppError("Team member limit reached", 400, "MEMBER_LIMIT");
+      if (memberCount >= seatLimit) {
+        throw new AppError(
+          `Team member limit reached (${seatLimit}). Upgrade your plan for more seats.`,
+          403,
+          "MEMBER_LIMIT_REACHED",
+        );
       }
     }
 
@@ -334,6 +365,50 @@ class TeamService {
         logger.error(`[Team] removal email failed: ${err.message}`);
       }
     }
+  }
+
+  /**
+   * Owner-only role assignment. The team owner may promote a member to ADMIN
+   * or demote back to MEMBER. OWNER is NOT assignable here (ownership transfer
+   * is a separate concern), and the owner cannot change their own role.
+   */
+  async updateMemberRole(teamId, targetUserId, requestingUserId, role) {
+    // Team must exist (404), then owner-only authorization (403) — mirrors the
+    // removeMember ownership model rather than the membership-based gate.
+    const team = await prisma.team.findUnique({ where: { id: teamId } });
+    if (!team) throw new AppError("Team not found", 404, "NOT_FOUND");
+    if (team.teamOwnerId !== requestingUserId) {
+      throw new AppError(
+        "Only the team owner can change member roles",
+        403,
+        "FORBIDDEN",
+      );
+    }
+
+    // Only ADMIN/MEMBER are assignable via this endpoint.
+    if (role !== "ADMIN" && role !== "MEMBER") {
+      throw new AppError(
+        "Role must be 'ADMIN' or 'MEMBER'",
+        400,
+        "BAD_REQUEST",
+      );
+    }
+
+    // Owner cannot change their own role.
+    if (targetUserId === requestingUserId) {
+      throw new AppError("Cannot change your own role", 400, "BAD_REQUEST");
+    }
+
+    const member = await prisma.teamMember.findFirst({
+      where: { teamId, userId: targetUserId },
+    });
+    if (!member)
+      throw new AppError("Member not found in team", 404, "NOT_FOUND");
+
+    return prisma.teamMember.update({
+      where: { id: member.id },
+      data: { role },
+    });
   }
 
   /**
@@ -783,6 +858,38 @@ class TeamService {
       where: { teamId, status: "pending", expiresAt: { gt: new Date() } },
       orderBy: { createdAt: "desc" },
     });
+  }
+
+  async cancelInvite(inviteId, userId) {
+    // Invite must exist (404), then owner-only authorization (403) — mirrors the
+    // ownership model used by updateMemberRole/deleteTeam.
+    const invite = await prisma.teamInvite.findUnique({
+      where: { id: inviteId },
+    });
+    if (!invite) throw new AppError("Invite not found", 404, "NOT_FOUND");
+
+    const team = await prisma.team.findUnique({
+      where: { id: invite.teamId },
+    });
+    if (!team) throw new AppError("Team not found", 404, "NOT_FOUND");
+    if (team.teamOwnerId !== userId) {
+      throw new AppError(
+        "Only the team owner can cancel invites",
+        403,
+        "FORBIDDEN",
+      );
+    }
+
+    if (invite.status !== "pending") {
+      throw new AppError(
+        "Only pending invites can be cancelled",
+        400,
+        "BAD_REQUEST",
+      );
+    }
+
+    await prisma.teamInvite.delete({ where: { id: inviteId } });
+    return { id: inviteId };
   }
 }
 

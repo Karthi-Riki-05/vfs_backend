@@ -5,6 +5,10 @@ const path = require("path");
 const chatController = require("../controllers/chat.controller");
 const { authenticate } = require("../middleware/auth.middleware");
 const { checkTeamAccess } = require("../middleware/checkTeamAccess");
+const {
+  requireTeamChatEntitlement,
+} = require("../middleware/requireEntitlement");
+const { chatMessageLimiter } = require("../middleware/rateLimiter");
 const validate = require("../middleware/validate");
 const {
   createChatGroupSchema,
@@ -16,6 +20,8 @@ const {
   addMembersSchema,
   updateGroupSchema,
   removeMemberSchema,
+  editMessageSchema,
+  deleteMessageSchema,
   ALLOWED_FILE_TYPES,
   MAX_FILE_SIZE,
 } = require("../validators/chat.validator");
@@ -39,6 +45,15 @@ const upload = multer({
 });
 
 router.use(authenticate);
+
+// Server-side entitlement gate: chat is a team feature. Every chat route
+// requires team-chat access (Pro App, active team workspace, or membership of
+// any team) EXCEPT file download/preview — those are guarded by per-file
+// membership checks in the controller and may be opened via shared links.
+router.use((req, res, next) => {
+  if (req.path.includes("/files/")) return next();
+  return requireTeamChatEntitlement(req, res, next);
+});
 
 /**
  * @swagger
@@ -107,6 +122,7 @@ router.get(
  */
 router.post(
   "/groups/:id/messages",
+  chatMessageLimiter,
   validate(sendMessageSchema),
   chatController.sendMessage,
 );
@@ -225,6 +241,53 @@ router.put(
   "/messages/:id/read",
   validate(markReadSchema),
   chatController.markRead,
+);
+
+/**
+ * @swagger
+ * /api/v1/chat/messages/{messageId}:
+ *   put:
+ *     summary: Edit a message (sender only)
+ *     tags: [Chat]
+ *     security:
+ *       - BearerAuth: []
+ */
+router.put(
+  "/messages/:messageId",
+  requireTeamChatEntitlement,
+  validate(editMessageSchema),
+  chatController.editMessage,
+);
+
+/**
+ * @swagger
+ * /api/v1/chat/messages/{messageId}:
+ *   delete:
+ *     summary: Soft-delete a message (sender only)
+ *     tags: [Chat]
+ *     security:
+ *       - BearerAuth: []
+ */
+router.delete(
+  "/messages/:messageId",
+  requireTeamChatEntitlement,
+  validate(deleteMessageSchema),
+  chatController.deleteMessage,
+);
+
+/**
+ * @swagger
+ * /api/v1/chat/messages/{messageId}/reactions:
+ *   post:
+ *     summary: Toggle an emoji reaction on a message
+ *     tags: [Chat]
+ *     security:
+ *       - BearerAuth: []
+ */
+router.post(
+  "/messages/:messageId/reactions",
+  requireTeamChatEntitlement,
+  chatController.toggleReaction,
 );
 
 /**

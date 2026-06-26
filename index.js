@@ -38,6 +38,7 @@ const aiCreditRoutes = require("./src/routes/aiCredit.routes");
 const pricingRoutes = require("./src/routes/pricing.routes");
 const dashboardRoutes = require("./src/routes/dashboard.routes");
 const entitlementsRoutes = require("./src/routes/entitlements.routes");
+const accountRoutes = require("./src/routes/account.routes");
 
 // Validate required env vars at startup
 const requiredEnvVars = ["NEXTAUTH_SECRET"];
@@ -175,6 +176,7 @@ app.use("/api/v1/ai", aiCreditRoutes);
 app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/dashboard", dashboardRoutes);
 app.use("/api/v1/entitlements", entitlementsRoutes);
+app.use("/api/v1/account", accountRoutes);
 app.use("/api/v1/notifications", require("./src/routes/notification.routes"));
 app.use("/api/notifications", require("./src/routes/notification.routes"));
 app.use("/api/v1/auth/mobile", require("./src/routes/mobile.auth.routes"));
@@ -204,6 +206,7 @@ app.use("/api/ai", aiCreditRoutes);
 app.use("/api/pricing", pricingRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/entitlements", entitlementsRoutes);
+app.use("/api/account", accountRoutes);
 
 // DISABLED: Legacy Gemini 1.5-flash route at /api/v1/ai/generate-diagram
 // (and alias /api/ai/generate-diagram) — returned {nodes, edges} JSON
@@ -264,7 +267,13 @@ if (process.env.NODE_ENV !== "test") {
       async () => {
         try {
           const summary = await flowPackExpiry.runDailyCheck();
-          logger.info(`[Cron] Flow-pack expiry: ${JSON.stringify(summary)}`);
+          // EXP-011-B: enforce flow-addon past_due grace expiry in the same
+          // sweep. Previously only the HTTP /check-flow-pack-expiry route
+          // called this, so without an external scheduler it never ran.
+          const pastDue = await flowPackExpiry.checkPastDueGrace();
+          logger.info(
+            `[Cron] Flow-pack expiry: ${JSON.stringify(summary)} pastDue: ${JSON.stringify(pastDue)}`,
+          );
         } catch (err) {
           logger.error("[Cron] Flow-pack expiry failed:", err);
         }

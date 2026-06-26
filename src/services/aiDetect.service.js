@@ -397,9 +397,32 @@ Simple ASCII labels only. No special characters.`;
   );
 }
 
+/**
+ * Tier-aware diagram generation from extracted DOCUMENT text (PDF/Word).
+ * Mirrors generateDiagramXml's routing — Free → Gemini, Pro/Team → Claude
+ * (with Claude→Gemini fallback, retry, sanitize/validate) — so the document
+ * upload path no longer hardcodes Gemini or bypasses the tier router.
+ *
+ * @param {string} extractedText raw text pulled from the uploaded document
+ * @param {object|string|null} user req.user object, userId string, or null
+ * @returns {Promise<{xml: string, model: string}>}
+ */
+async function generateDiagramXmlFromText(extractedText, user = null) {
+  // Frame the document text as a diagram-generation request, then delegate to
+  // generateDiagramXml so tier resolution, provider routing, retry, fallback,
+  // sanitisation and validation are all shared (single source of truth).
+  const userMessage =
+    `Create a Value Stream Mapping (VSM) diagram from this process document. ` +
+    `Use the document content to identify the process steps and their order.\n\n` +
+    `Document content:\n${(extractedText || "").substring(0, 3000)}`;
+
+  return generateDiagramXml(userMessage, user);
+}
+
 module.exports = {
   isDiagramRequest,
   generateDiagramXml,
+  generateDiagramXmlFromText,
   sanitizeXml,
   validateXml,
 };

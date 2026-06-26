@@ -239,6 +239,8 @@ async function downgradeUser(pack, summary) {
       proUnlimitedFlows: false,
       proAdditionalFlowsPurchased: 0,
       proFlowLimit: 10,
+      teamFlowLimit: 50,
+      teamUnlimitedFlows: false,
     },
   });
 
@@ -344,6 +346,8 @@ async function checkPastDueGrace() {
         data: {
           proFlowLimit: 10,
           proUnlimitedFlows: false,
+          teamFlowLimit: 50,
+          teamUnlimitedFlows: false,
           flowAddonGracePeriodEnd: null,
         },
       });

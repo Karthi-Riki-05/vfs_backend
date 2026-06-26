@@ -1,5 +1,6 @@
 "use strict";
 
+const { timingSafeEqual } = require("crypto");
 const { prisma } = require("../lib/prisma");
 const { grantProCredits } = require("../lib/grantProCredits");
 const asyncHandler = require("../utils/asyncHandler");
@@ -19,9 +20,29 @@ const PRODUCT_MAP = {
 class RevenueCatController {
   handleWebhook = asyncHandler(async (req, res) => {
     const authHeader = req.headers.authorization;
-    const expected = "Bearer " + process.env.REVENUECAT_WEBHOOK_SECRET;
 
-    if (!authHeader || authHeader !== expected) {
+    // FIX 1 (BUG-013): fail closed. If the secret is unset, the old code
+    // compared against the literal string "Bearer undefined", so an attacker
+    // sending `Authorization: Bearer undefined` would pass. Never accept when
+    // unconfigured.
+    const secret = process.env.REVENUECAT_WEBHOOK_SECRET;
+    if (!secret || secret.trim() === "") {
+      logger.error("REVENUECAT_WEBHOOK_SECRET is not set");
+      return res.status(503).json({
+        success: false,
+        error: { code: "CONFIG_ERROR", message: "Webhook not configured" },
+      });
+    }
+
+    // FIX 2 (BUG-013): constant-time comparison to avoid leaking the secret
+    // via response timing. Length check first because timingSafeEqual throws
+    // on length mismatch.
+    const expected = Buffer.from("Bearer " + secret);
+    const actual = Buffer.from(authHeader || "");
+    if (
+      expected.length !== actual.length ||
+      !timingSafeEqual(expected, actual)
+    ) {
       return res.status(401).json({
         success: false,
         error: { code: "UNAUTHORIZED", message: "Invalid webhook secret" },

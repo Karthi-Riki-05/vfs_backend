@@ -196,6 +196,21 @@ exports.oauthSync = asyncHandler(async (req, res) => {
     });
   }
 
+  // Mirror validateUser: OAuth users with an active team subscription must get
+  // team access immediately, not only after a session refresh. See bug-004.
+  // "cancelling" = cancel_at_period_end set — user keeps access until expiresAt.
+  const teamSub = await prisma.subscription.findFirst({
+    where: {
+      userId: user.id,
+      productType: { in: ["team_monthly", "team_yearly"] },
+      status: { in: ["active", "cancelling"] },
+    },
+    select: { id: true, expiresAt: true },
+  });
+  const hasTeamAccess =
+    !!teamSub &&
+    (!teamSub.expiresAt || new Date(teamSub.expiresAt) > new Date());
+
   res.json({
     success: true,
     data: {
@@ -205,6 +220,7 @@ exports.oauthSync = asyncHandler(async (req, res) => {
       role: user.role,
       hasPro: user.hasPro,
       currentVersion: user.currentVersion,
+      hasTeamAccess,
     },
   });
 });
@@ -252,7 +268,7 @@ exports.validateUser = asyncHandler(async (req, res) => {
   if (!user.emailVerified) {
     logger.warn(`Login blocked — email not verified: ${user.id}`);
     throw new AppError(
-      "Please verify your email before logging in. Check your inbox for the confirmation link.",
+      "Please verify your email before logging in. Check your inbox for the 6-digit verification code.",
       403,
       "EMAIL_NOT_VERIFIED",
     );
@@ -280,7 +296,7 @@ exports.validateUser = asyncHandler(async (req, res) => {
     where: {
       userId: user.id,
       productType: { in: ["team_monthly", "team_yearly"] },
-      status: "active",
+      status: { in: ["active", "cancelling"] },
     },
     select: { id: true, expiresAt: true },
   });

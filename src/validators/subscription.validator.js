@@ -14,6 +14,7 @@ const createCheckoutSchema = z.object({
     teamMembers: z.number().refine((val) => TEAM_MEMBER_OPTIONS.includes(val), {
       message: "Team members must be one of: 5, 10, 15, 20, 25, 50, 75, 100",
     }),
+    paymentMethodId: z.string().optional(),
   }),
 });
 

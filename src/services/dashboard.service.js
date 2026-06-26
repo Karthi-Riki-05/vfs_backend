@@ -61,7 +61,7 @@ class DashboardService {
         // count all of the caller's shares regardless of app mode — share
         // counts must never be hidden by the active context (DATA-LOSS-001).
         prisma.flowShare.count({ where: { sharedById: userId } }),
-        this._getOwnedTeamMemberCount(userId),
+        this._getOwnedTeamMemberCount(userId, teamId, appContext),
       ]);
 
     return { totalFlows, editedThisMonth, sharedFlows, teamMembers };
@@ -182,20 +182,61 @@ class DashboardService {
     }));
   }
 
-  // "Team Members" stat = distinct members of the team this user OWNS
-  // (excludes self). A user who has only JOINED teams owns none → 0.
-  async _getOwnedTeamMemberCount(userId) {
-    const ownTeam = await prisma.team.findFirst({
-      where: { teamOwnerId: userId, deletedAt: null },
+  // "Team Members" stat = distinct non-self members in the active team bucket.
+  //
+  // With teamId (explicit workspace context): count members of that specific
+  // team, verifying the caller is a member or owner first.
+  //
+  // Without teamId (overview / no active context): aggregate unique members
+  // across ALL non-system owned teams (scoped by appContext so pro teams are
+  // excluded when viewing the team dashboard and vice-versa). This prevents
+  // the old findFirst fallback from landing on a system team (1 member = self
+  // only) and incorrectly returning 0.
+  async _getOwnedTeamMemberCount(userId, teamId = null, appContext = null) {
+    if (teamId) {
+      const [membership, ownedTeam] = await Promise.all([
+        prisma.teamMember.findFirst({
+          where: { teamId, userId },
+          select: { id: true },
+        }),
+        prisma.team.findFirst({
+          where: { id: teamId, teamOwnerId: userId, deletedAt: null },
+          select: { id: true },
+        }),
+      ]);
+      if (!membership && !ownedTeam) return 0;
+
+      const members = await prisma.teamMember.findMany({
+        where: { teamId, userId: { not: userId } },
+        select: { userId: true },
+      });
+      return new Set(members.map((m) => m.userId)).size;
+    }
+
+    // No active team: aggregate across all non-system owned teams,
+    // filtered by appContext so the count matches the dashboard's app mode.
+    const teamWhere = {
+      teamOwnerId: userId,
+      deletedAt: null,
+      AND: [{ OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] }],
+    };
+    if (appContext === "pro") {
+      teamWhere.appContext = "pro";
+    } else if (appContext && appContext !== "free") {
+      teamWhere.appContext = { not: "pro" };
+    }
+
+    const ownedTeams = await prisma.team.findMany({
+      where: teamWhere,
       select: { id: true },
     });
-    if (!ownTeam) return 0;
+    if (!ownedTeams.length) return 0;
 
+    const teamIds = ownedTeams.map((t) => t.id);
     const members = await prisma.teamMember.findMany({
-      where: { teamId: ownTeam.id, userId: { not: userId } },
+      where: { teamId: { in: teamIds }, userId: { not: userId } },
       select: { userId: true },
     });
-
     return new Set(members.map((m) => m.userId)).size;
   }
 }

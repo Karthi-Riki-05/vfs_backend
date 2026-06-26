@@ -2,6 +2,47 @@ const { prisma } = require("./prisma");
 const logger = require("../utils/logger");
 
 /**
+ * On team-subscription expiry, a user reverts to the 50-flow team limit.
+ * If they hold more than 50 team flows (appContext='team', teamId=null), the
+ * excess (oldest by updatedAt) is marked for downgrade and the user enters the
+ * team-picker phase so they can choose which 50 to keep. With <=50 flows there
+ * is nothing at risk — just drop the unlimited flag.
+ */
+async function applyTeamFlowPicker(userId) {
+  const TEAM_FLOW_LIMIT = 50;
+  const teamFlows = await prisma.flow.findMany({
+    where: {
+      ownerId: userId,
+      appContext: "team",
+      teamId: null,
+      deletedAt: null,
+    },
+    select: { id: true, updatedAt: true },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  if (teamFlows.length > TEAM_FLOW_LIMIT) {
+    const excessIds = teamFlows.slice(TEAM_FLOW_LIMIT).map((f) => f.id);
+    await prisma.flow.updateMany({
+      where: { id: { in: excessIds } },
+      data: { markedForDowngrade: true },
+    });
+    await prisma.user.update({
+      where: { id: userId },
+      data: { isInTeamPickerPhase: true },
+    });
+    logger.info(
+      `[downgradeUser] ${userId}: ${excessIds.length} team flows marked for downgrade, team-picker phase started`,
+    );
+  } else {
+    await prisma.user.update({
+      where: { id: userId },
+      data: { teamUnlimitedFlows: false },
+    });
+  }
+}
+
+/**
  * Downgrades a user when their Team subscription expires or is cancelled.
  *
  * Behaviour:
@@ -56,6 +97,9 @@ async function downgradeUser(userId, options = {}) {
       data: { planCredits: 0 },
     });
 
+    // Team access revoked → revert to 50-flow team limit, picker if over.
+    await applyTeamFlowPicker(userId);
+
     logger.info(
       `[downgradeUser] ${userId}: team access removed, Pro preserved (${reason})`,
     );
@@ -76,6 +120,8 @@ async function downgradeUser(userId, options = {}) {
       currentVersion: "free",
       proUnlimitedFlows: false,
       proFlowLimit: 10,
+      teamFlowLimit: 50,
+      teamUnlimitedFlows: false,
     },
   });
 
@@ -100,6 +146,9 @@ async function downgradeUser(userId, options = {}) {
       planResetsAt: null,
     },
   });
+
+  // Team access revoked → revert to 50-flow team limit, picker if over.
+  await applyTeamFlowPicker(userId);
 
   logger.info(
     `[downgradeUser] ${userId}: fully downgraded to free (${reason})`,

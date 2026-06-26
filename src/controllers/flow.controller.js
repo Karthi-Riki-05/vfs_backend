@@ -3,29 +3,43 @@ const asyncHandler = require("../utils/asyncHandler");
 const { prisma } = require("../lib/prisma");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { docUpload } = require("../middleware/docUpload");
-
-let _vsmGenAI = null;
-function getVsmGenAI() {
-  if (!_vsmGenAI) {
-    _vsmGenAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  }
-  return _vsmGenAI;
-}
+const aiCreditService = require("../services/aiCredit.service");
+const aiDetectService = require("../services/aiDetect.service");
+const { resolveAppContextForBilling } = require("./aiCredit.controller");
 
 class FlowController {
   getAllFlows = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const { search, page, limit, nonEmpty } = req.query;
+    const {
+      search,
+      page,
+      limit,
+      nonEmpty,
+      sort,
+      sortDirection,
+      isFavorite,
+      projectId,
+    } = req.query;
     // teamId may arrive as a query param or via the X-Team-Context header
     // set by the frontend axios interceptor.
     const teamId = req.query.teamId || req.headers["x-team-context"] || null;
     const result = await flowService.getAllFlows(
       userId,
-      { search, page, limit, nonEmpty, teamId },
+      {
+        search,
+        page,
+        limit,
+        nonEmpty,
+        teamId,
+        sort,
+        sortDirection,
+        // Query params arrive as strings — normalize to a real boolean.
+        isFavorite: isFavorite === "true",
+        projectId,
+      },
       appContext,
     );
     const shared = await flowService.getSharedFlows(
@@ -34,6 +48,26 @@ class FlowController {
       teamId || null,
     );
     res.json({ success: true, data: { ...result, shared } });
+  });
+
+  getMasterViewFlows = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const teamId = req.headers["x-team-context"] || null;
+    // Require a team context — without it there is nothing to show.
+    if (!teamId) {
+      return res.json({ success: true, data: { flows: [], total: 0 } });
+    }
+    // Verify caller OWNS the team — non-owners get an empty list, not a 403,
+    // to avoid leaking team existence.
+    const team = await prisma.team.findFirst({
+      where: { id: teamId, teamOwnerId: userId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!team) {
+      return res.json({ success: true, data: { flows: [], total: 0 } });
+    }
+    const flows = await flowService.getOwnerMasterFlows(userId, teamId);
+    res.json({ success: true, data: { flows, total: flows.length } });
   });
 
   getFlowById = asyncHandler(async (req, res) => {
@@ -301,49 +335,36 @@ class FlowController {
         });
       }
 
-      const systemPrompt = `You are a Value Stream Mapping (VSM) expert that outputs strictly valid mxGraph XML for draw.io.
-
-HARD RULES — follow exactly or the diagram will fail to render:
-1. Wrap everything in <mxGraphModel><root>...</root></mxGraphModel>.
-2. Always include these two cells first, unchanged:
-     <mxCell id="0"/>
-     <mxCell id="1" parent="0"/>
-3. Every shape (process step) MUST be a vertex cell with this exact structure:
-     <mxCell id="N" value="Step name" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-       <mxGeometry x="X" y="Y" width="160" height="60" as="geometry"/>
-     </mxCell>
-   - x/y/width/height MUST live INSIDE a <mxGeometry .../> child with as="geometry". NEVER put x/y on the mxCell tag itself.
-4. Every connection MUST be an edge cell with this exact structure:
-     <mxCell id="N" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="SRC_ID" target="TGT_ID">
-       <mxGeometry relative="1" as="geometry"/>
-     </mxCell>
-5. Numeric ids start at 2 and increment. Source/target must reference real shape ids.
-6. Maximum 10 process steps. Layout horizontally: x = 80, 280, 480, 680, 880, 1080, ...; y = 200 for all.
-7. Output ONLY the raw XML. No markdown, no backticks, no commentary.`;
-
-      const userPrompt = `Create a VSM diagram from this process document:\n\n${extractedText.substring(0, 3000)}`;
-
-      const model = getVsmGenAI().getGenerativeModel({
-        model: "gemini-2.0-flash",
-        systemInstruction: systemPrompt,
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 2000,
-        },
-      });
-      const completion = await model.generateContent(userPrompt);
-      let xml = completion.response.text().trim() || "";
-
-      // Strip markdown fences if the model wrapped the XML in ```xml ... ```
-      xml = xml
-        .replace(/^```(?:xml|html)?\s*/i, "")
-        .replace(/```\s*$/i, "")
-        .trim();
-
-      // If the model returned only loose <mxCell> tags, wrap them
-      if (xml && !xml.includes("<mxGraphModel") && xml.includes("<mxCell")) {
-        xml = `<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>${xml}</root></mxGraphModel>`;
+      // Resolve billing context (shared with aiCredit.controller) and ensure
+      // the user has at least one diagram credit BEFORE spending an AI call.
+      const teamId = req.headers["x-team-context"] || null;
+      const appContext = await resolveAppContextForBilling(
+        req.user.id,
+        req.headers["x-app-context"],
+        teamId,
+        req.user.currentVersion,
+      );
+      if (
+        !(await aiCreditService.hasCredits(req.user.id, appContext, teamId))
+      ) {
+        return res.status(402).json({
+          success: false,
+          error: {
+            code: "INSUFFICIENT_CREDITS",
+            message: "You have used all your diagram credits.",
+          },
+        });
       }
+
+      // Tier-aware generation: Free → Gemini, Pro/Team → Claude. Provider
+      // routing, retry, fallback and XML sanitisation all live in
+      // aiDetect.service (single source of truth) — no hardcoded Gemini here.
+      const { xml: generatedXml, model } =
+        await aiDetectService.generateDiagramXmlFromText(
+          extractedText,
+          req.user,
+        );
+      let xml = generatedXml;
 
       if (!xml || !xml.includes("<mxGraphModel")) {
         return res.status(500).json({
@@ -374,6 +395,17 @@ HARD RULES — follow exactly or the diagram will fail to render:
       xml = xml.replace(
         /<mxCell\s+parent="[^"]*"\s+id="0"(\s*\/?>)/g,
         '<mxCell id="0"$1',
+      );
+
+      // Charge exactly one credit, only after a successful generation. If
+      // generation had failed it would have thrown above (asyncHandler →
+      // error response) before reaching here, so nothing is over-charged.
+      await aiCreditService.deductCredit(
+        req.user.id,
+        "diagram_generation",
+        model,
+        appContext,
+        teamId,
       );
 
       res.json({ success: true, data: { xml } });
@@ -439,41 +471,19 @@ HARD RULES — follow exactly or the diagram will fail to render:
   });
 
   restoreFlowVersion = asyncHandler(async (req, res) => {
-    const { id: flowId, versionId } = req.params;
-    const userId = req.user.id;
-
-    const flow = await prisma.flow.findFirst({
-      where: { id: flowId, ownerId: userId },
-    });
-    if (!flow) {
-      return res.status(403).json({
-        success: false,
-        error: { message: "Access denied or flow not found" },
-      });
-    }
-
-    const version = await prisma.flowVersion.findFirst({
-      where: { id: versionId, flowId },
-    });
-    if (!version) {
-      return res
-        .status(404)
-        .json({ success: false, error: { message: "Version not found" } });
-    }
-
-    await prisma.flow.update({
-      where: { id: flowId },
-      data: { diagramData: version.xml, updatedAt: new Date() },
-    });
-
-    res.json({
-      success: true,
-      data: { message: "Flow restored to selected version" },
-    });
+    const result = await flowService.restoreFlowVersion(
+      req.params.id,
+      req.params.versionId,
+      req.user.id,
+    );
+    res.json({ success: true, data: result });
   });
 
   pickerList = asyncHandler(async (req, res) => {
-    const flows = await flowService.getPickerList(req.user.id);
+    const flows = await flowService.getPickerList(
+      req.user.id,
+      req.query.teamPicker === "true",
+    );
     res.json({ success: true, data: flows });
   });
 
@@ -481,12 +491,14 @@ HARD RULES — follow exactly or the diagram will fail to render:
     const result = await flowService.confirmSelection(
       req.user.id,
       req.body?.selectedFlowIds || [],
+      !!req.body?.teamPicker,
     );
     res.json({ success: true, data: result });
   });
 
   packStatus = asyncHandler(async (req, res) => {
-    const status = await flowService.getPackStatus(req.user.id);
+    const teamId = req.headers["x-team-context"] || null;
+    const status = await flowService.getPackStatus(req.user.id, teamId);
     res.json({ success: true, data: status });
   });
 }

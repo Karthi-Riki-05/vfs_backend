@@ -18,7 +18,11 @@ class UserController {
     // the source of truth.
     const [activeSub, dbUser, ownsAnyTeam] = await Promise.all([
       prisma.subscription.findFirst({
-        where: { userId, status: "active", deletedAt: null },
+        where: {
+          userId,
+          status: { in: ["active", "cancelling"] },
+          deletedAt: null,
+        },
         select: {
           productType: true,
           status: true,

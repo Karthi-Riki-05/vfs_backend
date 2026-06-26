@@ -74,6 +74,7 @@ class ProController {
     const result = await proService.createFlowAddonSubscriptionCheckout(
       req.user.id,
       req.body.plan,
+      req.body.paymentMethodId || null,
     );
     res.json({ success: true, data: result });
   });

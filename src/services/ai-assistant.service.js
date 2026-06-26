@@ -857,79 +857,6 @@ class AiAssistantService {
     }
   }
 
-  async generateDiagramFromDocument(userId, documentText, fileName) {
-    // Verify consent
-    const consent = await prisma.aiConsent.findUnique({ where: { userId } });
-    if (!consent || !consent.consented || consent.revokedAt) {
-      throw new AppError(
-        "Please accept the AI data processing terms to use this feature.",
-        403,
-        "CONSENT_REQUIRED",
-      );
-    }
-
-    if (!process.env.GEMINI_API_KEY) {
-      throw new AppError("AI service not configured", 500, "AI_NOT_CONFIGURED");
-    }
-
-    const _t0 = Date.now();
-    try {
-      const userPrompt = `Analyze this document and generate the most appropriate draw.io diagram.\n\nDocument name: ${fileName}\nDocument content:\n---\n${documentText.substring(0, 8000)}\n---\n\nDetermine what type of diagram best represents this document (flowchart, process map, org chart, ER diagram, VSM, etc.) and generate it.\nInclude all key entities, processes, and relationships from the document.`;
-      const genAI = getGeminiAiClient();
-      const model = genAI.getGenerativeModel({
-        model: CHAT_MODEL,
-        systemInstruction: DIAGRAM_SYSTEM_PROMPT,
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.3,
-          maxOutputTokens: 4000,
-        },
-      });
-      const result = await model.generateContent(userPrompt);
-      const parsed = JSON.parse(result.response.text());
-      logAiRequest({
-        userId,
-        model: CHAT_MODEL,
-        endpoint: "ai-assistant.generateDiagramFromDocument",
-        success: true,
-        durationMs: Date.now() - _t0,
-      });
-
-      return {
-        intent: "generate_diagram_from_document",
-        message: parsed.message || `Generated diagram from "${fileName}".`,
-        xml: parsed.xml || null,
-        fileName,
-        templateName: this._extractTemplateName(parsed.message || fileName),
-      };
-    } catch (error) {
-      logger.error("Document diagram generation error", {
-        error: error.message,
-        userId,
-      });
-      logAiRequest({
-        userId,
-        model: CHAT_MODEL,
-        endpoint: "ai-assistant.generateDiagramFromDocument",
-        success: false,
-        durationMs: Date.now() - _t0,
-        error: error.message,
-      });
-      if (error.status === 429) {
-        throw new AppError(
-          "AI rate limit exceeded. Please try again later.",
-          429,
-          "AI_RATE_LIMIT",
-        );
-      }
-      throw new AppError(
-        "Failed to generate diagram from document.",
-        500,
-        "AI_ERROR",
-      );
-    }
-  }
-
   _extractTemplateName(text) {
     if (!text) return "AI Generated Flow";
     const patterns = [
@@ -1327,7 +1254,9 @@ class AiAssistantService {
   }
 
   async deleteAllData(userId) {
-    // Delete all messages via cascade, then conversations, then consent
+    // GDPR erasure: messages (via conversation) → conversations → consent,
+    // plus the credit audit trail (usage) and balances so no AI-derived
+    // personal data survives the request.
     await prisma.$transaction([
       prisma.aiMessage.deleteMany({
         where: { conversation: { userId } },
@@ -1336,6 +1265,12 @@ class AiAssistantService {
         where: { userId },
       }),
       prisma.aiConsent.deleteMany({
+        where: { userId },
+      }),
+      prisma.aiCreditUsage.deleteMany({
+        where: { userId },
+      }),
+      prisma.aiCreditBalance.deleteMany({
         where: { userId },
       }),
     ]);

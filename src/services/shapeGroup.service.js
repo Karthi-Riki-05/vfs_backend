@@ -3,10 +3,28 @@ const AppError = require("../utils/AppError");
 
 class ShapeGroupService {
   async getAllGroups(userId, appContext = "team", teamId = null) {
-    // teamId scopes to a specific workspace; otherwise filter by appContext
-    // so Team-app groups stay invisible in Pro app and vice versa.
+    // Mirror flow.service._workspaceScope: if teamId belongs to the user's OWN
+    // team-app team, include NULL-teamId groups created before the team existed
+    // (upgrade data-loss fix). Joined teams stay strict (teamId only).
+    let whereExtra;
+    if (teamId) {
+      const isOwnTeamAppTeam = await prisma.team.findFirst({
+        where: {
+          id: teamId,
+          teamOwnerId: userId,
+          appContext: { in: ["team", "free"] },
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      whereExtra = isOwnTeamAppTeam
+        ? { OR: [{ teamId: null }, { teamId }] }
+        : { teamId };
+    } else {
+      whereExtra = { appContext };
+    }
     return await prisma.shapeGroup.findMany({
-      where: { userId, ...(teamId ? { teamId } : { appContext }) },
+      where: { userId, ...whereExtra },
       orderBy: { createdAt: "desc" },
       include: { _count: { select: { shapes: true } } },
     });

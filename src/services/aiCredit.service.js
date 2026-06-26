@@ -36,7 +36,7 @@ async function resolveBillingUser(
     const ownsTeamPlan = await prisma.subscription.findFirst({
       where: {
         userId,
-        status: { in: ["active", "trialing"] },
+        status: { in: ["active", "trialing", "cancelling"] },
         plan: { tier: { gte: 2 } },
       },
       select: { id: true },

@@ -27,6 +27,7 @@ const updateFlowSchema = z.object({
     isFavorite: z.boolean().optional(),
     thumbnail: z.string().max(500000).optional(),
     projectId: z.string().optional().nullable(),
+    createVersion: z.boolean().optional(), // FEAT-002: manual-save snapshot flag
   }),
 });
 
@@ -56,7 +57,13 @@ const getFlowsQuerySchema = z.object({
       .pipe(z.number().int().min(1).max(100))
       .optional(),
     nonEmpty: z.enum(["true", "false"]).optional(),
-    sort: z.string().max(32).optional(),
+    sort: z
+      .enum(["updatedAt", "name", "createdAt"])
+      .optional()
+      .default("updatedAt"),
+    sortDirection: z.enum(["asc", "desc"]).optional().default("desc"),
+    isFavorite: z.enum(["true", "false"]).optional(),
+    projectId: z.string().max(128).optional(),
     teamId: z.string().max(128).optional(),
   }),
 });

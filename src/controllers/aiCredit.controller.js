@@ -19,7 +19,7 @@ async function resolveAppContextForBilling(
     const ownsTeamPlan = await prisma.subscription.findFirst({
       where: {
         userId,
-        status: { in: ["active", "trialing"] },
+        status: { in: ["active", "trialing", "cancelling"] },
         plan: { tier: { gte: 2 } },
       },
       select: { id: true },
@@ -471,105 +471,6 @@ class AiCreditController {
     });
   });
 
-  generateFromDoc = asyncHandler(async (req, res) => {
-    const userId = req.user.id;
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
-    const appContext = await resolveAppContextForBilling(
-      userId,
-      req.headers["x-app-context"],
-      teamId,
-      req.user.currentVersion,
-    );
-    const confirmed =
-      req.body?.confirmed === true ||
-      req.body?.confirmed === "true" ||
-      req.body?.confirmed === "1";
-
-    if (!req.file) {
-      throw new AppError("No file uploaded", 400, "VALIDATION_ERROR");
-    }
-    if (!req.file.size || req.file.size <= 0) {
-      throw new AppError("Empty file uploaded", 400, "EMPTY_FILE");
-    }
-    if (!confirmed) {
-      throw new AppError(
-        "User confirmation required before generating diagram",
-        400,
-        "CONFIRMATION_REQUIRED",
-      );
-    }
-
-    if (!(await aiCreditService.hasCredits(userId, appContext, teamId))) {
-      const balance = await aiCreditService.getBalance(
-        userId,
-        appContext,
-        teamId,
-      );
-      return res.status(402).json({
-        success: false,
-        error: {
-          code: "INSUFFICIENT_CREDITS",
-          message: "You have used all your diagram credits for this month.",
-          balance,
-        },
-      });
-    }
-
-    const mime = req.file.mimetype;
-    let extractedText = "";
-    if (mime === "application/pdf") {
-      const pdfParse = require("pdf-parse");
-      const parsed = await pdfParse(req.file.buffer);
-      extractedText = parsed.text;
-    } else if (
-      mime ===
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-      mime === "application/msword"
-    ) {
-      const mammoth = require("mammoth");
-      const result = await mammoth.extractRawText({ buffer: req.file.buffer });
-      extractedText = result.value;
-    } else {
-      throw new AppError(
-        "Only PDF and Word files are supported",
-        400,
-        "UNSUPPORTED_FILE_TYPE",
-      );
-    }
-
-    if (!extractedText || extractedText.trim().length < 20) {
-      throw new AppError(
-        "Could not extract meaningful text from document",
-        400,
-        "EMPTY_DOCUMENT",
-      );
-    }
-
-    const prompt = `Create a VSM diagram from this document:\n\n${extractedText.substring(0, 3000)}`;
-    const { xml, model } = await aiDetectService.generateDiagramXml(
-      prompt,
-      req.user,
-    );
-    const result = await aiCreditService.deductCredit(
-      userId,
-      "doc_to_vsm",
-      model,
-      appContext,
-      teamId,
-    );
-
-    res.json({
-      success: true,
-      data: {
-        xml,
-        model,
-        creditsUsed: 1,
-        remainingCredits: result.remaining,
-        balance: result.balance,
-      },
-    });
-  });
-
   handleAddonPurchase = asyncHandler(async (req, res) => {
     const { credits, packType, source } = req.body || {};
     const userId = req.user.id;
@@ -705,6 +606,8 @@ class AiCreditController {
         appContext,
         ...(teamId ? { teamId } : {}),
       },
+      // BUG-PAY-002: save card for future charges after one-time payment
+      payment_intent_data: { setup_future_usage: "off_session" },
       // Stripe Adaptive Pricing (account-level setting) converts to local currency
       // session_id lets the dashboard call /ai/addon/verify as a fallback
       // when the webhook can't reach the backend (e.g. local dev).
@@ -864,3 +767,7 @@ class AiCreditController {
 }
 
 module.exports = new AiCreditController();
+// Shared billing-context resolver — also consumed by flow.controller's document
+// generation path so both deduct against the same workspace pool (single source
+// of truth; do NOT duplicate this logic — see DATA-LOSS-001).
+module.exports.resolveAppContextForBilling = resolveAppContextForBilling;

@@ -85,6 +85,25 @@ class ChatService {
       if (!allowed) {
         throw new AppError("Not a member of this team", 403, "FORBIDDEN");
       }
+
+      // ── Team chat dedup ──────────────────────────────────────────────────
+      // If a team conversation already exists for this teamId, return it and
+      // add the requesting user as a member (idempotent). This prevents
+      // duplicate ChatGroup records when multiple users each click "open team
+      // chat" before the other's sidebar has refreshed — the extras would
+      // otherwise spill into the Group tab (bug: ghost groups).
+      const existingTeamGroup = await prisma.chatGroup.findFirst({
+        where: { teamId: data.teamId, deletedAt: null },
+        orderBy: { createdAt: "asc" }, // oldest = the canonical group
+      });
+      if (existingTeamGroup) {
+        // Ensure the requesting user is in the existing group.
+        await prisma.chatGroupUser.createMany({
+          data: [{ userId, groupId: existingTeamGroup.id }],
+          skipDuplicates: true,
+        });
+        return existingTeamGroup;
+      }
     }
 
     // Resolve memberEmails → user ids (unknown emails silently skipped).
@@ -162,6 +181,76 @@ class ChatService {
       data: memberIds.map((id) => ({ userId: id, groupId: group.id })),
       skipDuplicates: true,
     });
+
+    // For named groups (not DMs): create a "Group created" system message so
+    // members see activity when they first open the group, and notify all
+    // non-creator members via their personal socket room so their sidebar
+    // refreshes immediately without a page reload.
+    if (!isDmCreate) {
+      try {
+        const creator = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { name: true, email: true },
+        });
+        const creatorName = creator?.name || creator?.email || "Someone";
+        const groupTitle = group.title || "the group";
+
+        const sysMsg = await prisma.chatMessage.create({
+          data: {
+            message: `${creatorName} created the group "${groupTitle}"`,
+            groupId: group.id,
+            userId,
+            type: "text",
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        });
+
+        // Create unread receipt for every member except the creator
+        const otherMembers = memberIds.filter((id) => id !== userId);
+        if (otherMembers.length > 0) {
+          await prisma.chatMessageUser.createMany({
+            data: otherMembers.map((receiverId) => ({
+              msgId: sysMsg.id,
+              senderId: userId,
+              receiverId,
+              groupId: group.id,
+              isRead: false,
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        // Notify all members (including creator) via personal rooms so their
+        // sidebar refreshes and badge updates immediately.
+        const { getIO } = require("../socket");
+        const io = getIO();
+        if (io) {
+          for (const memberId of memberIds) {
+            io.to(`user:${memberId}`).emit("group:created", {
+              groupId: group.id,
+              groupTitle: group.title,
+              createdBy: userId,
+            });
+            // Refresh unread count for non-creator members
+            if (memberId !== userId) {
+              const memberUnread = await prisma.chatMessageUser.count({
+                where: { receiverId: memberId, isRead: false },
+              });
+              io.to(`user:${memberId}`).emit("notification:unread-count", {
+                totalUnread: memberUnread,
+                groupId: group.id,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(
+          "Failed to send group creation notification:",
+          err.message,
+        );
+      }
+    }
 
     return group;
   }
@@ -282,15 +371,26 @@ class ChatService {
           groupId,
         });
 
-        // Emit unread count update to each offline/other member
-        for (const member of members) {
-          const unreadCount = await prisma.chatMessageUser.count({
-            where: { receiverId: member.userId, isRead: false },
+        // Emit unread count update to each other member. Fetch every member's
+        // total unread in ONE grouped query instead of N per-member counts.
+        if (members.length > 0) {
+          const grouped = await prisma.chatMessageUser.groupBy({
+            by: ["receiverId"],
+            where: {
+              receiverId: { in: members.map((m) => m.userId) },
+              isRead: false,
+            },
+            _count: { _all: true },
           });
-          io.to(`user:${member.userId}`).emit("notification:unread-count", {
-            totalUnread: unreadCount,
-            groupId,
-          });
+          const unreadByUser = new Map(
+            grouped.map((g) => [g.receiverId, g._count._all]),
+          );
+          for (const member of members) {
+            io.to(`user:${member.userId}`).emit("notification:unread-count", {
+              totalUnread: unreadByUser.get(member.userId) || 0,
+              groupId,
+            });
+          }
         }
       }
     } catch (err) {
@@ -317,6 +417,133 @@ class ChatService {
     );
 
     return message;
+  }
+
+  async editMessage(messageId, userId, content) {
+    const existing = await prisma.chatMessage.findUnique({
+      where: { id: messageId },
+    });
+    if (!existing) throw new AppError("Message not found", 404, "NOT_FOUND");
+    if (existing.userId !== userId)
+      throw new AppError(
+        "You can only edit your own messages",
+        403,
+        "FORBIDDEN",
+      );
+    if (existing.deletedAt)
+      throw new AppError(
+        "Cannot edit a deleted message",
+        400,
+        "MESSAGE_DELETED",
+      );
+
+    // No dedicated `editedAt` column — reuse `updatedAt` and surface it as
+    // `editedAt` in the API/socket payload.
+    const now = new Date();
+    const updated = await prisma.chatMessage.update({
+      where: { id: messageId },
+      data: { message: content, updatedAt: now },
+      include: {
+        user: { select: { id: true, name: true, email: true, image: true } },
+        files: true,
+      },
+    });
+
+    try {
+      const { getIO } = require("../socket");
+      const io = getIO();
+      if (io) {
+        io.to(`chat:${updated.groupId}`).emit("message:edited", {
+          messageId,
+          content,
+          editedAt: now,
+          groupId: updated.groupId,
+        });
+      }
+    } catch (err) {
+      logger.error("Socket emit error:", err.message);
+    }
+
+    return { ...updated, editedAt: now };
+  }
+
+  async deleteMessage(messageId, userId) {
+    const existing = await prisma.chatMessage.findUnique({
+      where: { id: messageId },
+    });
+    if (!existing) throw new AppError("Message not found", 404, "NOT_FOUND");
+    if (existing.userId !== userId)
+      throw new AppError(
+        "You can only delete your own messages",
+        403,
+        "FORBIDDEN",
+      );
+
+    const now = new Date();
+    const updated = await prisma.chatMessage.update({
+      where: { id: messageId },
+      data: { deletedAt: now, message: "This message was deleted" },
+    });
+
+    try {
+      const { getIO } = require("../socket");
+      const io = getIO();
+      if (io) {
+        io.to(`chat:${updated.groupId}`).emit("message:deleted", {
+          messageId,
+          groupId: updated.groupId,
+        });
+      }
+    } catch (err) {
+      logger.error("Socket emit error:", err.message);
+    }
+
+    return { id: messageId, deleted: true };
+  }
+
+  async toggleReaction(messageId, userId, emoji) {
+    if (!emoji || typeof emoji !== "string")
+      throw new AppError("Emoji is required", 400, "VALIDATION_ERROR");
+
+    const msg = await prisma.chatMessage.findUnique({
+      where: { id: messageId },
+      select: { id: true, groupId: true },
+    });
+    if (!msg) throw new AppError("Message not found", 404, "NOT_FOUND");
+
+    const existing = await prisma.messageReaction.findUnique({
+      where: {
+        messageId_userId_emoji: { messageId, userId, emoji },
+      },
+    });
+
+    let action;
+    if (existing) {
+      await prisma.messageReaction.delete({ where: { id: existing.id } });
+      action = "remove";
+    } else {
+      await prisma.messageReaction.create({
+        data: { messageId, userId, emoji },
+      });
+      action = "add";
+    }
+
+    try {
+      const { getIO } = require("../socket");
+      const io = getIO();
+      if (io) {
+        io.to(`chat:${msg.groupId}`).emit("message:reaction", {
+          messageId,
+          emoji,
+          userId,
+          action,
+        });
+      }
+    } catch (err) {
+      logger.error("Socket emit error:", err.message);
+    }
+
+    return { messageId, emoji, userId, action };
   }
 
   async _notifyOfflineChatMembers({
@@ -553,28 +780,55 @@ class ChatService {
       data: { lastReadAt: new Date() },
     });
 
-    // Emit read receipt via socket
+    // Emit read receipt + push refreshed unread total (scoped to this group's
+    // app context) so Pro and Team badges never bleed into each other.
     try {
       const { getIO } = require("../socket");
       const io = getIO();
       if (io) {
+        // Resolve the group's appContext so the emitted total is scoped correctly.
+        const grp = await prisma.chatGroup.findUnique({
+          where: { id: groupId },
+          select: { appContext: true },
+        });
+        const grpAppContext = grp?.appContext || "team";
+        const appCtxFilter =
+          grpAppContext === "pro"
+            ? { appContext: "pro" }
+            : { appContext: { not: "pro" } };
+
         io.to(`chat:${groupId}`).emit("message:read", { groupId, userId });
+
+        const newTotal = await prisma.chatMessageUser.count({
+          where: { receiverId: userId, isRead: false, group: appCtxFilter },
+        });
+        io.to(`user:${userId}`).emit("notification:unread-count", {
+          totalUnread: newTotal,
+          groupId,
+          appContext: grpAppContext,
+        });
       }
     } catch (err) {
       logger.error("Socket emit error:", err.message);
     }
   }
 
-  async getUnreadCounts(userId) {
+  async getUnreadCounts(userId, appContext = "team") {
+    // Scope to the requested app context — Pro and Team badges must not mix.
+    const appCtxFilter =
+      appContext === "pro"
+        ? { appContext: "pro" }
+        : { appContext: { not: "pro" } };
+
     // Total unread
     const totalUnread = await prisma.chatMessageUser.count({
-      where: { receiverId: userId, isRead: false },
+      where: { receiverId: userId, isRead: false, group: appCtxFilter },
     });
 
     // Per-group unread
     const groupCounts = await prisma.chatMessageUser.groupBy({
       by: ["groupId"],
-      where: { receiverId: userId, isRead: false },
+      where: { receiverId: userId, isRead: false, group: appCtxFilter },
       _count: { id: true },
     });
 
