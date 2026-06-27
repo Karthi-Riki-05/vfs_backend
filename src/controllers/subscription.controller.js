@@ -203,6 +203,7 @@ class SubscriptionController {
   createPortalSession = asyncHandler(async (req, res) => {
     const result = await subscriptionService.createCustomerPortalSession(
       req.user.id,
+      req.body?.returnPath,
     );
     res.json({ success: true, data: result });
   });

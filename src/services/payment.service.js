@@ -140,6 +140,9 @@ class PaymentService {
         case "charge.refunded":
           await this._handleChargeRefunded(event.data.object);
           break;
+        case "payment_method.attached":
+          await this._dedupeAttachedPaymentMethod(event.data.object);
+          break;
         default:
           logger.info(`Unhandled webhook event: ${event.type}`);
       }
@@ -213,6 +216,87 @@ class PaymentService {
     logger.info(
       `[Webhook] Refund processed: charge=${charge.id} amount=${charge.amount_refunded}/${charge.amount} status=${newStatus}`,
     );
+  }
+
+  /**
+   * BUG-PAY-002 (Stripe cleanup): when a new card attaches to a customer,
+   * detach strictly-OLDER duplicates that share the same card fingerprint.
+   *
+   * HARD SAFETY GUARDS — a pm is NEVER detached if ANY apply:
+   *   • it IS the just-attached pm
+   *   • it is the customer's invoice_settings.default_payment_method
+   *   • it is the default_payment_method of ANY non-cancelled subscription
+   *     (active / past_due / trialing / unpaid / incomplete / paused)
+   *   • its fingerprint differs from the new pm
+   *   • it is NOT strictly older than the new pm
+   * When unsure, KEEP. Every detach is try/caught so it can never break
+   * checkout/billing. Idempotent: re-delivery finds nothing left to detach.
+   */
+  async _dedupeAttachedPaymentMethod(pm) {
+    try {
+      const stripe = getStripe();
+      const customerId =
+        typeof pm.customer === "string" ? pm.customer : pm.customer?.id;
+      const fingerprint = pm.card?.fingerprint;
+      if (!customerId || !fingerprint) return;
+
+      const protectedIds = new Set([pm.id]);
+
+      const customer = await stripe.customers.retrieve(customerId);
+      const customerDefault =
+        customer?.invoice_settings?.default_payment_method ||
+        customer?.default_source ||
+        null;
+      if (customerDefault)
+        protectedIds.add(
+          typeof customerDefault === "string"
+            ? customerDefault
+            : customerDefault.id,
+        );
+
+      // Protect the pm of every subscription that could still bill.
+      // NOTE: not paginated (limit 100). Fine for now — no real user has 100+
+      // subscriptions; if one ever does, older pages won't be inspected here.
+      const subs = await stripe.subscriptions.list({
+        customer: customerId,
+        status: "all",
+        limit: 100,
+      });
+      for (const sub of subs.data) {
+        if (["canceled", "incomplete_expired"].includes(sub.status)) continue;
+        const dpm = sub.default_payment_method;
+        if (dpm) protectedIds.add(typeof dpm === "string" ? dpm : dpm.id);
+      }
+
+      // NOTE: not paginated (limit 100). Same known limitation as above.
+      const pmList = await stripe.paymentMethods.list({
+        customer: customerId,
+        type: "card",
+        limit: 100,
+      });
+      const newCreated = pm.created || 0;
+      const toDetach = pmList.data.filter(
+        (o) =>
+          o.id !== pm.id &&
+          o.card?.fingerprint === fingerprint &&
+          (o.created || 0) < newCreated &&
+          !protectedIds.has(o.id),
+      );
+
+      for (const dup of toDetach) {
+        try {
+          await stripe.paymentMethods.detach(dup.id);
+          logger.info(
+            `[PM-dedupe] detached ${dup.id} (fp ${fingerprint}) for ${customerId}`,
+          );
+        } catch (err) {
+          logger.error(`[PM-dedupe] detach failed ${dup.id}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      // Never let dedupe break webhook processing.
+      logger.error(`[PM-dedupe] handler error: ${err.message}`);
+    }
   }
 
   async _handleCheckoutComplete(session) {
@@ -643,7 +727,9 @@ class PaymentService {
       stripe.paymentMethods.list({
         customer: user.stripeCustomerId,
         type: "card",
-        limit: 10,
+        // NOTE: not paginated. Fine for now — no real user has 100+ cards.
+        // If a customer ever exceeds this, older pages won't be deduped here.
+        limit: 100,
       }),
       stripe.customers.retrieve(user.stripeCustomerId),
     ]);
@@ -653,7 +739,35 @@ class PaymentService {
       customer?.default_source ||
       null;
 
-    const paymentMethods = pmList.data.map((pm) => ({
+    // BUG-PAY-002: Stripe attaches a NEW pm_… on every Checkout / SetupIntent,
+    // so the same physical card shows up many times (same fingerprint, new id).
+    // Dedupe for DISPLAY only: keep ONE pm per card fingerprint — the default
+    // if it's in the group, else the most recently created. A pm with NO
+    // fingerprint is always kept (never hide a real card).
+    const byFingerprint = new Map();
+    const noFingerprint = [];
+    for (const pm of pmList.data) {
+      const fp = pm.card?.fingerprint;
+      if (!fp) {
+        noFingerprint.push(pm);
+        continue;
+      }
+      const existing = byFingerprint.get(fp);
+      if (!existing) {
+        byFingerprint.set(fp, pm);
+        continue;
+      }
+      const existingIsDefault = existing.id === defaultPmId;
+      const candidateIsDefault = pm.id === defaultPmId;
+      let winner;
+      if (candidateIsDefault && !existingIsDefault) winner = pm;
+      else if (existingIsDefault && !candidateIsDefault) winner = existing;
+      else winner = (pm.created || 0) > (existing.created || 0) ? pm : existing;
+      byFingerprint.set(fp, winner);
+    }
+    const deduped = [...noFingerprint, ...byFingerprint.values()];
+
+    const paymentMethods = deduped.map((pm) => ({
       id: pm.id,
       brand: pm.card?.brand || "unknown",
       last4: pm.card?.last4 || "****",

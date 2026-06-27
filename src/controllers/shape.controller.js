@@ -108,6 +108,11 @@ class ShapeController {
     res.json({ success: true, data: associations });
   });
 
+  copyShape = asyncHandler(async (req, res) => {
+    const copy = await shapeService.copyShape(req.user.id, req.params.id);
+    res.status(201).json({ success: true, data: copy });
+  });
+
   bulkDelete = asyncHandler(async (req, res) => {
     const result = await shapeService.bulkDelete(
       req.body.shapeIds,

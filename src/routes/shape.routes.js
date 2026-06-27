@@ -109,6 +109,30 @@ router.delete(
 
 /**
  * @swagger
+ * /api/v1/shapes/{id}/copy:
+ *   post:
+ *     summary: Duplicate a shape owned by the requesting user
+ *     tags: [Shapes]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       201:
+ *         description: Duplicate shape created
+ *       403:
+ *         description: Not the owner of this shape
+ *       404:
+ *         description: Shape not found
+ */
+router.post("/:id/copy", validate(idParamSchema), shapeController.copyShape);
+
+/**
+ * @swagger
  * /api/v1/shapes/{shapeId}/associate-team:
  *   post:
  *     summary: Associate a shape with a team (adds it to the team shape library)

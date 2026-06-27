@@ -431,6 +431,38 @@ class ShapeService {
     }));
   }
 
+  async copyShape(userId, shapeId) {
+    const source = await prisma.shape.findFirst({
+      where: { id: shapeId, deletedAt: null },
+    });
+
+    if (!source) throw new AppError("Shape not found", 404, "NOT_FOUND");
+    if (source.ownerId !== userId)
+      throw new AppError("Not the owner of this shape", 403, "FORBIDDEN");
+
+    const copy = await prisma.shape.create({
+      data: {
+        name: source.name + " (Copy)",
+        type: source.type,
+        content: source.content,
+        textAlignment: source.textAlignment,
+        ratioLock: source.ratioLock,
+        shapeType: source.shapeType,
+        groupId: source.groupId,
+        category: source.category,
+        xmlContent: source.xmlContent,
+        thumbnail: source.thumbnail,
+        isPublic: false,
+        ownerId: userId,
+        teamId: source.teamId,
+        appContext: source.appContext,
+        // associations are NOT copied — the duplicate starts unassociated
+      },
+    });
+
+    return copy;
+  }
+
   async bulkDelete(shapeIds, userId) {
     // Only the caller's own shapes are touched — unknown / foreign ids are
     // silently skipped so deleting a mixed diagram never 403s midway.

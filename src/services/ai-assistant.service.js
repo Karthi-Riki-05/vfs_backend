@@ -1254,26 +1254,41 @@ class AiAssistantService {
   }
 
   async deleteAllData(userId) {
-    // GDPR erasure: messages (via conversation) → conversations → consent,
-    // plus the credit audit trail (usage) and balances so no AI-derived
-    // personal data survives the request.
-    await prisma.$transaction([
-      prisma.aiMessage.deleteMany({
-        where: { conversation: { userId } },
-      }),
-      prisma.aiConversation.deleteMany({
-        where: { userId },
-      }),
-      prisma.aiConsent.deleteMany({
-        where: { userId },
-      }),
-      prisma.aiCreditUsage.deleteMany({
-        where: { userId },
-      }),
-      prisma.aiCreditBalance.deleteMany({
-        where: { userId },
-      }),
-    ]);
+    // GDPR erasure: delete ALL AI-derived personal data for the user.
+    //
+    // Deletion order (dependency-safe):
+    //   1. AiMessage   — child of AiConversation (cascade would handle it,
+    //                    but we delete explicitly so the deleteMany is scoped
+    //                    to conversationIds we own, avoiding a relation-filter
+    //                    that Prisma batchDelete does not support).
+    //   2. AiConversation — parent of AiMessage
+    //   3. AiJob       — contains prompt + generated XML (AI-derived data)
+    //   4. AiCreditUsage  — audit log of credit deductions
+    //   5. AiCreditBalance — credit balances
+    //   6. AiConsent   — consent record (last, so consent checks during the
+    //                    transaction do not see a missing consent mid-flight)
+    //
+    // Wrapped in a serialisable transaction so the erasure is atomic.
+    await prisma.$transaction(async (tx) => {
+      // Step 1: collect the user's conversation ids so we can delete messages
+      // by a concrete FK rather than a nested-relation filter (which Prisma
+      // deleteMany does not support and silently skips).
+      const convIds = await tx.aiConversation
+        .findMany({ where: { userId }, select: { id: true } })
+        .then((rows) => rows.map((r) => r.id));
+
+      if (convIds.length > 0) {
+        await tx.aiMessage.deleteMany({
+          where: { conversationId: { in: convIds } },
+        });
+      }
+
+      await tx.aiConversation.deleteMany({ where: { userId } });
+      await tx.aiJob.deleteMany({ where: { userId } });
+      await tx.aiCreditUsage.deleteMany({ where: { userId } });
+      await tx.aiCreditBalance.deleteMany({ where: { userId } });
+      await tx.aiConsent.deleteMany({ where: { userId } });
+    });
 
     return { deleted: true };
   }

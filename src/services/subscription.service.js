@@ -1752,7 +1752,7 @@ class SubscriptionService {
     };
   }
 
-  async createCustomerPortalSession(userId) {
+  async createCustomerPortalSession(userId, returnPath) {
     const stripe = getStripe();
 
     const user = await prisma.user.findUnique({
@@ -1778,9 +1778,19 @@ class SubscriptionService {
       process.env.APP_URL ||
       "http://localhost:3002";
 
+    // Open-redirect guard: only honour a same-site relative path (starts with a
+    // single "/", not "//" which browsers treat as protocol-relative). Anything
+    // else falls back to the subscription page.
+    const safePath =
+      typeof returnPath === "string" &&
+      returnPath.startsWith("/") &&
+      !returnPath.startsWith("//")
+        ? returnPath
+        : "/dashboard/subscription";
+
     const session = await stripe.billingPortal.sessions.create({
       customer: user.stripeCustomerId,
-      return_url: `${baseUrl}/dashboard/subscription`,
+      return_url: `${baseUrl}${safePath}`,
     });
 
     return { url: session.url };
