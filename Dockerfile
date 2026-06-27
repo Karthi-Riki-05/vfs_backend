@@ -2,21 +2,21 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
-
 # curl is needed for the HEALTHCHECK instruction below
 RUN apk add --no-cache openssl libc6-compat curl
 
+# Create non-root user before any COPY so --chown works without a large chown -R
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+COPY --chown=appuser:appgroup package*.json ./
+
 RUN npm install
 
-COPY . .
+COPY --chown=appuser:appgroup . .
 
 # Generate Prisma Client
 RUN npx prisma generate
 
-# Non-root user — reduces blast radius if the container is compromised
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
-    && chown -R appuser:appgroup /app
 USER appuser
 
 EXPOSE 5000
