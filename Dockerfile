@@ -17,6 +17,9 @@ COPY --chown=appuser:appgroup . .
 # Generate Prisma Client
 RUN npx prisma generate
 
+# Create logs directory with correct ownership before switching to non-root user
+RUN mkdir -p /app/logs && chown appuser:appgroup /app/logs
+
 USER appuser
 
 EXPOSE 5000
