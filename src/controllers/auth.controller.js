@@ -156,6 +156,7 @@ exports.oauthSync = asyncHandler(async (req, res) => {
         email,
         image: image || null,
         role: "Viewer",
+        emailVerified: new Date(),
       },
     });
     logger.info(`OAuth user created via ${provider}: ${user.id}`);
