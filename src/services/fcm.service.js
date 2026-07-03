@@ -69,10 +69,19 @@ async function sendPushNotification(fcmToken, title, body, data = {}) {
   }
 }
 
-// Fan out across EVERY active device registered to the user.
-async function sendToUser(userId, title, body, data = {}) {
+// Fan out across every active device registered to the user. When
+// `appContext` ("pro" | "team") is given, devices are narrowed to that app
+// PLUS any legacy device registered before the appContext column existed
+// (appContext: null) — fail-open so no existing user silently stops getting
+// push after the migration. Omitting appContext preserves the old
+// send-to-every-device behaviour for callers that haven't been updated yet.
+async function sendToUser(userId, title, body, data = {}, appContext = null) {
+  const where = { userId, fcmToken: { not: null }, deletedAt: null };
+  if (appContext) {
+    where.OR = [{ appContext: null }, { appContext }];
+  }
   const devices = await prisma.firebaseUser.findMany({
-    where: { userId, fcmToken: { not: null }, deletedAt: null },
+    where,
     select: { fcmToken: true },
   });
   if (devices.length === 0) return { success: false, error: "No FCM token" };

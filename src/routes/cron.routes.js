@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const flowService = require("../services/flow.service");
 const subscriptionService = require("../services/subscription.service");
+const notificationService = require("../services/notification.service");
 const asyncHandler = require("../utils/asyncHandler");
 const logger = require("../utils/logger");
 
@@ -92,6 +93,21 @@ router.post(
     logger.info(
       `Cron expire-subscriptions: scanned=${result.scanned} expired=${result.expired} downgraded=${result.downgraded}`,
     );
+    res.json({ success: true, data: result });
+  }),
+);
+
+/**
+ * POST /api/v1/cron/prune-notifications
+ * Permanently deletes READ notifications older than 30 days (bug-024).
+ * Unread notifications are never touched by age alone.
+ */
+router.post(
+  "/prune-notifications",
+  asyncHandler(async (req, res) => {
+    if (!requireCronSecret(req, res)) return;
+    const result = await notificationService.pruneReadNotifications(30);
+    logger.info(`Cron prune-notifications: deleted=${result.count}`);
     res.json({ success: true, data: result });
   }),
 );

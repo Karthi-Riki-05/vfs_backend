@@ -1,4 +1,6 @@
 const notificationService = require("../services/notification.service");
+const notificationPreferenceService = require("../services/notificationPreference.service");
+const notificationQuietHoursService = require("../services/notificationQuietHours.service");
 const notificationTestService = require("../services/notificationTest.service");
 const asyncHandler = require("../utils/asyncHandler");
 
@@ -70,6 +72,45 @@ class NotificationController {
     const result = await notificationService.deleteNotification(
       req.params.id,
       req.user.id,
+    );
+    res.json({ success: true, data: result });
+  });
+
+  // Per-category channel preferences (bug-019), scoped to the caller's
+  // active app — same X-App-Context convention as everywhere else.
+  getPreferences = asyncHandler(async (req, res) => {
+    const { appContext } = resolveContext(req);
+    const items = await notificationPreferenceService.getPreferences(
+      req.user.id,
+      appContext,
+    );
+    res.json({ success: true, data: items });
+  });
+
+  updatePreference = asyncHandler(async (req, res) => {
+    const { appContext } = resolveContext(req);
+    const { category, inApp, push, email } = req.body || {};
+    const result = await notificationPreferenceService.setPreference(
+      req.user.id,
+      { category, appContext, inApp, push, email },
+    );
+    res.json({ success: true, data: result });
+  });
+
+  // Quiet-hours window (bug-022). One global schedule per user — not scoped
+  // by app, unlike preferences (see notificationQuietHours.service.js).
+  getQuietHours = asyncHandler(async (req, res) => {
+    const result = await notificationQuietHoursService.getQuietHours(
+      req.user.id,
+    );
+    res.json({ success: true, data: result });
+  });
+
+  updateQuietHours = asyncHandler(async (req, res) => {
+    const { enabled, startHour, endHour, timezone } = req.body || {};
+    const result = await notificationQuietHoursService.setQuietHours(
+      req.user.id,
+      { enabled, startHour, endHour, timezone },
     );
     res.json({ success: true, data: result });
   });

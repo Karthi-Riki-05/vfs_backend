@@ -13,6 +13,8 @@ const {
   shareFlowSchema,
   updateShareSchema,
   shareIdParamSchema,
+  resolveLockSchema,
+  markModalShownSchema,
 } = require("../validators/flow.validator");
 
 // All flow routes are protected
@@ -81,6 +83,21 @@ router.get("/share/members", flowController.getAvailableShareMembers);
 router.get("/picker-list", flowController.pickerList);
 router.post("/confirm-selection", flowController.confirmSelection);
 router.get("/pack-status", flowController.packStatus);
+
+// Over-limit lock lifecycle (app-context isolated: pro / team)
+router.get("/lock-state", flowController.getLockState);
+router.post(
+  "/mark-modal-shown",
+  validate(markModalShownSchema),
+  flowController.markModalShown,
+);
+router.get("/limit-flows-picker", flowController.getFlowsForPicker);
+router.post(
+  "/resolve-lock",
+  validate(resolveLockSchema),
+  flowController.resolveOverLimit,
+);
+router.post("/check-expiry", flowController.checkExpiry);
 
 /**
  * @swagger

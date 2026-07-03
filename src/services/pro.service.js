@@ -13,6 +13,59 @@ const FLOW_PRICING = {
   unlimited: 2000, // $20.00/month — Unlimited
 };
 
+// Stripe moved `current_period_end` off the top-level Subscription object
+// onto each SubscriptionItem in newer API versions. Read the item-level
+// field first and fall back to the (deprecated) top-level one so this keeps
+// working regardless of which API version the account is pinned to.
+function getSubscriptionPeriodEnd(subscription) {
+  return (
+    subscription?.items?.data?.[0]?.current_period_end ??
+    subscription?.current_period_end ??
+    null
+  );
+}
+
+const FLOW_ADDON_PLAN_LABEL = {
+  standard_100: "Standard — 100 Flows",
+  unlimited: "Unlimited Flows",
+};
+const FLOW_ADDON_PLAN_PRICE_USD = {
+  standard_100: 10,
+  unlimited: 20,
+};
+
+// Audit trail of flow-addon status transitions (subscribed → active →
+// past_due → cancelled → resubscribed → ...). Reuses SubscriptionHistory —
+// no schema change — so it shows up in the existing Billing page
+// "Subscription History" section automatically. See bug-035.
+async function logFlowAddonHistory(
+  userId,
+  { plan, status, reason, startedAt, expiresAt },
+) {
+  try {
+    await prisma.subscriptionHistory.create({
+      data: {
+        userId,
+        planName: FLOW_ADDON_PLAN_LABEL[plan] || "Flow Add-on",
+        productType: "flow_addon",
+        status,
+        price: FLOW_ADDON_PLAN_PRICE_USD[plan] ?? 0,
+        currency: "usd",
+        isRecurring: true,
+        source: "stripe",
+        startedAt: startedAt || new Date(),
+        expiresAt: expiresAt || null,
+        archivedReason: reason,
+        appContext: "pro",
+      },
+    });
+  } catch (err) {
+    logger.warn(
+      `[logFlowAddonHistory] failed for user ${userId} (${reason}): ${err.message}`,
+    );
+  }
+}
+
 class ProService {
   /**
    * Grant Pro from the mobile app (Flutter WebView), with NO Stripe charge.
@@ -159,6 +212,7 @@ class ProService {
         stripeCustomerId: true,
         flowAddonStatus: true,
         flowAddonPlan: true,
+        flowAddonCurrentPeriodEnd: true,
       },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
@@ -190,25 +244,57 @@ class ProService {
       });
     }
 
+    // Flow pack addon is active only when status=active AND period end is in the future.
+    // proUnlimitedFlows is set alongside the addon purchase — honour it only while
+    // the addon is still live (avoids stale unlimited access after pack expiry).
+    const isAddonActive =
+      user.flowAddonStatus === "active" &&
+      (!user.flowAddonCurrentPeriodEnd ||
+        new Date(user.flowAddonCurrentPeriodEnd) > new Date());
     const isAddonUnlimited =
-      user.flowAddonStatus === "active" && user.flowAddonPlan === "unlimited";
-    const isUnlimited = user.proUnlimitedFlows || isAddonUnlimited;
+      isAddonActive && user.flowAddonPlan === "unlimited";
+    const isUnlimited =
+      (user.proUnlimitedFlows && isAddonActive) || isAddonUnlimited;
     const maxFlows =
-      user.flowAddonStatus === "active" && user.flowAddonPlan === "standard_100"
+      isAddonActive && user.flowAddonPlan === "standard_100"
         ? 100
         : (user.proFlowLimit ?? 0) + (user.proAdditionalFlowsPurchased ?? 0);
+
+    // One-time flow-pack purchase history (lifecycle: active/grace/expired/renewed).
+    // Only queried when the user has ever purchased Pro — free users can't have rows.
+    const flowPackPurchases = user.hasPro
+      ? await prisma.proFlowPurchase.findMany({
+          where: { userId },
+          orderBy: { createdAt: "desc" },
+          select: {
+            id: true,
+            flowCount: true,
+            amountCents: true,
+            packType: true,
+            isUnlimited: true,
+            status: true,
+            expiresAt: true,
+            gracePeriodEndsAt: true,
+            createdAt: true,
+          },
+        })
+      : [];
 
     return {
       currentApp: user.currentVersion || "free",
       hasPro: user.hasPro,
       proPurchasedAt: user.proPurchasedAt,
       isUnlimited,
+      flowAddonStatus: user.flowAddonStatus || null,
+      flowAddonPlan: user.flowAddonPlan || null,
+      flowAddonCurrentPeriodEnd: user.flowAddonCurrentPeriodEnd || null,
       proFlows: {
         used: proFlowsUsed,
         max: isUnlimited ? -1 : maxFlows,
         baseLimit: user.proFlowLimit ?? 0,
         extraPurchased: user.proAdditionalFlowsPurchased ?? 0,
       },
+      flowPackPurchases,
     };
   }
 
@@ -845,6 +931,16 @@ class ProService {
     }
     await prisma.user.update({ where: { id: userId }, data: userUpdate });
 
+    // Clear the over-limit lock so the flows page unlocks immediately.
+    await prisma.flowLimit.updateMany({
+      where: { userId, appType: "individual" },
+      data: {
+        overLimitLocked: false,
+        overLimitModalShown: false,
+        updatedAt: new Date(),
+      },
+    });
+
     // Auto-restore flows that were trashed by a prior expiry. Only flows
     // still soft-deleted (deletedAt set) and flagged markedForDowngrade
     // are eligible. Hard-purged trash is unrecoverable.
@@ -1017,6 +1113,29 @@ class ProService {
       );
     }
 
+    // "cancelling" still has a live Stripe subscription until period end —
+    // falling through to the new-subscription paths below would create a
+    // SECOND addon sub (double billing) and orphan the old one (bug-048).
+    // Route to the existing sub instead: upgrade applies in place (and
+    // clears the pending cancel, bug-049); re-picking the same plan is an
+    // unambiguous "I'm staying" → reactivate (mirror of Team bug-045).
+    if (user.flowAddonStatus === "cancelling" && user.flowAddonStripeSubId) {
+      if (
+        user.flowAddonPlan === "standard_100" &&
+        requestedPlan === "unlimited"
+      ) {
+        return await this.upgradeFlowAddon(userId, user);
+      }
+      if (user.flowAddonPlan === requestedPlan) {
+        return await this.reactivateFlowAddon(userId);
+      }
+      throw new AppError(
+        "To downgrade, let your current plan end and resubscribe after",
+        400,
+        "DOWNGRADE_NOT_ALLOWED",
+      );
+    }
+
     const stripe = getStripe();
     let customerId = user.stripeCustomerId;
     if (!customerId) {
@@ -1066,7 +1185,18 @@ class ProService {
         off_session: true,
         payment_behavior: "error_if_incomplete",
         metadata: { purchaseType: "flow_addon", userId, plan: addonPlan },
+        expand: ["latest_invoice", "items.data"],
       });
+
+      const latestInvoice =
+        typeof subscription.latest_invoice === "object" &&
+        subscription.latest_invoice !== null
+          ? subscription.latest_invoice
+          : null;
+      const amountCharged = latestInvoice?.amount_paid ?? 0;
+      const chargeId =
+        typeof latestInvoice?.charge === "string" ? latestInvoice.charge : null;
+      const periodEnd = getSubscriptionPeriodEnd(subscription);
 
       await prisma.user.update({
         where: { id: userId },
@@ -1074,8 +1204,62 @@ class ProService {
           flowAddonStatus: "active",
           flowAddonPlan: addonPlan,
           flowAddonStripeSubId: subscription.id,
+          isInFlowPickerPhase: false,
+          // bug-037: mirror handleFlowAddonCheckoutWebhook's userUpdateData —
+          // without these, proUnlimitedFlows/proFlowLimit never reflect the
+          // addon, so any code reading them directly (e.g. flow.service.js
+          // getPackStatus) sees a false "not unlimited" / stale base limit.
+          ...(addonPlan === "standard_100"
+            ? { proFlowLimit: 100, proUnlimitedFlows: false }
+            : { proUnlimitedFlows: true }),
+          ...(periodEnd
+            ? { flowAddonCurrentPeriodEnd: new Date(periodEnd * 1000) }
+            : {}),
         },
       });
+
+      // Auto-restore flows flagged by a prior cancellation/expiry, and clear
+      // the over-limit lock so the flows page unlocks immediately — same
+      // side effects as handleFlowAddonCheckoutWebhook (see bug-036: this
+      // direct-charge path was missing both, leaving the flows page locked
+      // after a saved-card purchase).
+      await prisma.flow.updateMany({
+        where: { ownerId: userId, markedForDowngrade: true },
+        data: { markedForDowngrade: false, deletedAt: null },
+      });
+      await prisma.flowLimit.updateMany({
+        where: { userId, appType: "individual" },
+        data: {
+          overLimitLocked: false,
+          overLimitModalShown: false,
+          totCount: addonPlan === "standard_100" ? 100 : null,
+          updatedAt: new Date(),
+        },
+      });
+
+      await prisma.transactionLog.create({
+        data: {
+          userId,
+          chargeId: chargeId || subscription.id,
+          txnId: subscription.id,
+          amountCharged,
+          currency: subscription.currency || getStripeCurrency(),
+          status: "success",
+          paymentMethod: "card",
+          appType: "individual",
+          appContext: "pro",
+          purchaseType: "flow_addon",
+        },
+      });
+
+      await logFlowAddonHistory(userId, {
+        plan: addonPlan,
+        status: "active",
+        reason: "subscribed",
+        startedAt: new Date(),
+        expiresAt: periodEnd ? new Date(periodEnd * 1000) : null,
+      });
+
       return { subscribed: true };
     }
 
@@ -1119,6 +1303,11 @@ class ProService {
       );
     }
 
+    // Paying to upgrade while a cancel is pending is an unambiguous "I'm
+    // staying" — clear the cancel in the same update, or the paid upgrade
+    // silently dies at period end (bug-049, mirror of Team bug-042).
+    const wasCancelling = user.flowAddonStatus === "cancelling";
+
     const stripe = getStripe();
     const stripeSub = await stripe.subscriptions.retrieve(
       user.flowAddonStripeSubId,
@@ -1129,22 +1318,31 @@ class ProService {
         items: [{ id: stripeSub.items.data[0].id, price: priceId }],
         proration_behavior: "create_prorations",
         metadata: { purchaseType: "flow_addon", userId, plan: "unlimited" },
+        ...(wasCancelling ? { cancel_at_period_end: false } : {}),
       },
     );
 
+    const upgradePeriodEnd = getSubscriptionPeriodEnd(updatedSub);
     await prisma.user.update({
       where: { id: userId },
       data: {
         flowAddonPlan: "unlimited",
         proUnlimitedFlows: true,
-        ...(updatedSub.current_period_end
+        ...(wasCancelling ? { flowAddonStatus: "active" } : {}),
+        ...(upgradePeriodEnd
           ? {
-              flowAddonCurrentPeriodEnd: new Date(
-                updatedSub.current_period_end * 1000,
-              ),
+              flowAddonCurrentPeriodEnd: new Date(upgradePeriodEnd * 1000),
             }
           : {}),
       },
+    });
+
+    await logFlowAddonHistory(userId, {
+      plan: "unlimited",
+      status: "active",
+      reason: "upgraded",
+      startedAt: new Date(),
+      expiresAt: upgradePeriodEnd ? new Date(upgradePeriodEnd * 1000) : null,
     });
 
     logger.info(
@@ -1235,10 +1433,10 @@ class ProService {
       try {
         const stripeSub = await stripe.subscriptions.retrieve(
           session.subscription,
+          { expand: ["items.data"] },
         );
-        periodEnd = stripeSub.current_period_end
-          ? new Date(stripeSub.current_period_end * 1000)
-          : null;
+        const rawPeriodEnd = getSubscriptionPeriodEnd(stripeSub);
+        periodEnd = rawPeriodEnd ? new Date(rawPeriodEnd * 1000) : null;
       } catch (err) {
         logger.warn(
           `[handleFlowAddonCheckoutWebhook] Failed to retrieve sub: ${err.message}`,
@@ -1276,6 +1474,17 @@ class ProService {
       });
       restored = restoreResult.count;
 
+      // Clear the over-limit lock so the flows page unlocks immediately.
+      await tx.flowLimit.updateMany({
+        where: { userId, appType: "individual" },
+        data: {
+          overLimitLocked: false,
+          overLimitModalShown: false,
+          totCount: addonPlan === "standard_100" ? 100 : null,
+          updatedAt: new Date(),
+        },
+      });
+
       await tx.transactionLog.create({
         data: {
           userId,
@@ -1288,6 +1497,7 @@ class ProService {
           paymentMethod: session.payment_method_types?.[0] || "card",
           appType: "individual",
           appContext: "pro",
+          purchaseType: "flow_addon",
         },
       });
     });
@@ -1297,6 +1507,15 @@ class ProService {
         `[handleFlowAddonCheckoutWebhook] Restored ${restored} downgrade-flagged flows for user ${userId}`,
       );
     }
+
+    await logFlowAddonHistory(userId, {
+      plan: addonPlan,
+      status: "active",
+      reason: "subscribed",
+      startedAt: new Date(),
+      expiresAt: periodEnd,
+    });
+
     logger.info(
       `[handleFlowAddonCheckoutWebhook] Activated ${addonPlan} for user ${userId}`,
     );
@@ -1340,12 +1559,20 @@ class ProService {
           "Your flow add-on payment failed. Update your payment method within 3 days to keep your flows.",
           "/dashboard/subscription",
           { plan: current?.flowAddonPlan },
+          "pro", // flow add-on is a personal Pro-tier entitlement — not team-scoped
+          null,
         );
       } catch (err) {
         logger.warn(
           `[handleFlowAddonSubscriptionUpdated] past_due notify failed: ${err.message}`,
         );
       }
+      await logFlowAddonHistory(userId, {
+        plan: current?.flowAddonPlan,
+        status: "past_due",
+        reason: "payment_failed",
+        expiresAt: currentPeriodEnd ? new Date(currentPeriodEnd * 1000) : null,
+      });
       logger.info(
         `[handleFlowAddonSubscriptionUpdated] user=${userId} past_due — 3-day grace started`,
       );
@@ -1370,6 +1597,12 @@ class ProService {
             : {}),
         },
       });
+      await logFlowAddonHistory(userId, {
+        plan: current.flowAddonPlan,
+        status: "active",
+        reason: "recovered",
+        expiresAt: currentPeriodEnd ? new Date(currentPeriodEnd * 1000) : null,
+      });
       logger.info(
         `[handleFlowAddonSubscriptionUpdated] user=${userId} recovered from past_due — entitlements restored`,
       );
@@ -1386,6 +1619,16 @@ class ProService {
           : {}),
       },
     });
+    // Generic status transitions not covered above (e.g. Stripe reporting
+    // "canceled" via customer.subscription.updated before .deleted fires).
+    if (addonStatus !== current?.flowAddonStatus) {
+      await logFlowAddonHistory(userId, {
+        plan: current?.flowAddonPlan,
+        status: addonStatus,
+        reason: addonStatus,
+        expiresAt: currentPeriodEnd ? new Date(currentPeriodEnd * 1000) : null,
+      });
+    }
     logger.info(
       `[handleFlowAddonSubscriptionUpdated] user=${userId} status=${addonStatus}`,
     );
@@ -1394,7 +1637,7 @@ class ProService {
   async handleFlowAddonSubscriptionDeleted(userId) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, email: true, name: true },
+      select: { id: true, email: true, name: true, flowAddonPlan: true },
     });
     if (!user) return;
 
@@ -1443,6 +1686,12 @@ class ProService {
       }
     });
 
+    await logFlowAddonHistory(userId, {
+      plan: user.flowAddonPlan,
+      status: "cancelled",
+      reason: "cancelled",
+    });
+
     logger.info(
       `[handleFlowAddonSubscriptionDeleted] Reverted flow limits for user ${user.id}`,
     );
@@ -1477,7 +1726,11 @@ class ProService {
   async cancelFlowAddon(userId) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { flowAddonStripeSubId: true, flowAddonStatus: true },
+      select: {
+        flowAddonStripeSubId: true,
+        flowAddonStatus: true,
+        flowAddonPlan: true,
+      },
     });
     if (!user?.flowAddonStripeSubId || user.flowAddonStatus !== "active") {
       throw new AppError(
@@ -1498,9 +1751,65 @@ class ProService {
       data: { flowAddonStatus: "cancelling" },
     });
 
+    await logFlowAddonHistory(userId, {
+      plan: user.flowAddonPlan,
+      status: "cancelling",
+      reason: "cancel_requested",
+    });
+
     return {
       message:
         "Flow add-on will cancel at the end of the current billing period",
+    };
+  }
+
+  // Undo a pending cancel before period end (bug-047) — mirror of the Team
+  // plan's reactivateSubscription. No charge; the addon simply resumes
+  // renewing as normal.
+  async reactivateFlowAddon(userId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        flowAddonStripeSubId: true,
+        flowAddonStatus: true,
+        flowAddonPlan: true,
+      },
+    });
+    if (!user?.flowAddonStripeSubId) {
+      throw new AppError(
+        "No flow add-on subscription to reactivate",
+        400,
+        "NO_ADDON_SUB",
+      );
+    }
+    if (user.flowAddonStatus !== "cancelling") {
+      throw new AppError(
+        "Flow add-on is not in cancelling state",
+        400,
+        "NOT_CANCELLING",
+      );
+    }
+
+    const stripe = getStripe();
+    await stripe.subscriptions.update(user.flowAddonStripeSubId, {
+      cancel_at_period_end: false,
+    });
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { flowAddonStatus: "active" },
+    });
+
+    await logFlowAddonHistory(userId, {
+      plan: user.flowAddonPlan,
+      status: "active",
+      reason: "reactivated",
+    });
+
+    logger.info(`[reactivateFlowAddon] user=${userId} addon reactivated`);
+    return {
+      reactivated: true,
+      message: "Flow add-on reactivated — it will renew as normal",
     };
   }
 
@@ -1575,11 +1884,15 @@ class ProService {
       },
     });
 
+    const isAddonActive =
+      user.flowAddonStatus === "active" &&
+      (!user.flowAddonCurrentPeriodEnd ||
+        new Date(user.flowAddonCurrentPeriodEnd) > new Date());
     const isAddonUnlimited =
-      user.flowAddonStatus === "active" && user.flowAddonPlan === "unlimited";
+      isAddonActive && user.flowAddonPlan === "unlimited";
     const effectiveUnlimited = user.proUnlimitedFlows || isAddonUnlimited;
     const effectiveLimit =
-      user.flowAddonStatus === "active" && user.flowAddonPlan === "standard_100"
+      isAddonActive && user.flowAddonPlan === "standard_100"
         ? 100
         : user.proFlowLimit + user.proAdditionalFlowsPurchased;
     const totalFlows = effectiveUnlimited ? -1 : effectiveLimit;
@@ -1617,3 +1930,5 @@ class ProService {
 }
 
 module.exports = new ProService();
+module.exports.getSubscriptionPeriodEnd = getSubscriptionPeriodEnd;
+module.exports.logFlowAddonHistory = logFlowAddonHistory;

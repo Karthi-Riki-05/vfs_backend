@@ -8,14 +8,34 @@ const { prisma } = require("../lib/prisma");
 const logger = require("../utils/logger");
 const { sendEmail, emailTemplates } = require("../utils/email");
 const notificationService = require("./notification.service");
+const notificationPreference = require("./notificationPreference.service");
 const push = require("./push.service");
 const { personalFlowTeamOr } = require("../lib/personalFlowScope");
+const { logFlowAddonHistory } = require("./pro.service");
 
 function pushSafe(userId, notification) {
   // Fire-and-forget: never let a missing FCM token break the cron.
+  // Flow packs/add-ons are a personal Pro-tier entitlement (see bug-017) —
+  // scope the push to Pro-registered devices (+ legacy untagged ones) so it
+  // doesn't also buzz the Team app on the same phone/account.
   push
-    .sendPushToUser(userId, notification)
+    .sendPushToUser(userId, notification, "pro")
     .catch((err) => logger.warn(`[push] flow-pack notify: ${err.message}`));
+}
+
+// bug-028: first real caller of the email channel through the bug-019
+// preference matrix. Flow-pack/add-on categories are all disableable and
+// already appContext:"pro"-scoped (bug-017) — a natural fit for a
+// per-category email opt-out. Fail-open internally (isChannelEnabled never
+// throws), so this never silently blocks a real email due to a
+// preference-system bug.
+async function emailAllowed(userId, category) {
+  return notificationPreference.isChannelEnabled(
+    userId,
+    category,
+    "email",
+    "pro",
+  );
 }
 
 const DAY = 24 * 3600 * 1000;
@@ -89,7 +109,11 @@ async function runDailyCheck() {
       where: { id: p.id },
       data: { status: "grace" },
     });
-    if (p.user?.email && emailTemplates.flowPackGrace) {
+    if (
+      p.user?.email &&
+      emailTemplates.flowPackGrace &&
+      (await emailAllowed(p.userId, "flow_pack_grace"))
+    ) {
       const tpl = emailTemplates.flowPackGrace(
         p.user,
         PACK_LABEL(p),
@@ -104,6 +128,8 @@ async function runDailyCheck() {
       `Renew before ${p.gracePeriodEndsAt.toLocaleDateString()} to keep all flows.`,
       "/dashboard/subscription",
       { packId: p.id },
+      "pro", // ProFlowPurchase is a personal Pro-tier entitlement — not team-scoped
+      null,
     );
     pushSafe(p.userId, {
       title: "Flow pack expired",
@@ -123,6 +149,69 @@ async function runDailyCheck() {
   });
   for (const p of expired) {
     await downgradeUser(p, summary);
+  }
+
+  // STEP E2 — sweep recurring flow-addon subscriptions whose period has ended
+  // but status is still 'active' (webhook missed / manual DB change).
+  // Stripe webhooks normally flip status to 'cancelled' — this is a safety net.
+  const expiredAddonUsers = await prisma.user.findMany({
+    where: {
+      flowAddonStatus: "active",
+      flowAddonCurrentPeriodEnd: { lte: now },
+    },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      flowAddonPlan: true,
+      flowAddonStripeSubId: true,
+    },
+  });
+  for (const u of expiredAddonUsers) {
+    try {
+      const planBeforeReset = u.flowAddonPlan;
+      await prisma.user.update({
+        where: { id: u.id },
+        data: {
+          flowAddonStatus: "cancelled",
+          // bug-034: clear the stale plan field on cancellation (mirrors
+          // handleFlowAddonSubscriptionDeleted) — otherwise the UI keeps
+          // reading a leftover "unlimited"/"standard_100" indefinitely.
+          flowAddonPlan: null,
+          proFlowLimit: 10,
+          proUnlimitedFlows: false,
+          proAdditionalFlowsPurchased: 0,
+        },
+      });
+      await logFlowAddonHistory(u.id, {
+        plan: planBeforeReset,
+        status: "expired",
+        reason: "expired",
+      });
+      await notificationService.createNotification(
+        u.id,
+        "flow_addon_expired",
+        "Flow add-on expired",
+        "Your flow add-on subscription has ended. You're back on 10 flows. Renew anytime.",
+        "/dashboard/subscription",
+        { plan: planBeforeReset },
+        "pro", // flow add-on is a personal Pro-tier entitlement — not team-scoped
+        null,
+      );
+      pushSafe(u.id, {
+        title: "Flow add-on expired",
+        body: "Your flow pack subscription ended. Renew to restore your limit.",
+        data: { type: "flow_addon", url: "/dashboard/subscription" },
+      });
+      logger.info(
+        `[flowPackExpiry] addon-sweep: user=${u.id} status→cancelled (period ended ${u.flowAddonCurrentPeriodEnd})`,
+      );
+      summary.expiredNoPicker++;
+    } catch (err) {
+      logger.error(
+        `[flowPackExpiry] addon-sweep failed user=${u.id}: ${err.message}`,
+      );
+    }
   }
 
   // STEP F — hard purge flows that have been in trash for 30+ days
@@ -165,7 +254,7 @@ async function notifyWindow({
     include: { user: { select: { id: true, email: true, name: true } } },
   });
   for (const p of packs) {
-    if (p.user?.email && template) {
+    if (p.user?.email && template && (await emailAllowed(p.userId, type))) {
       const tpl = template(p.user, PACK_LABEL(p), p.expiresAt);
       sendEmail({ to: p.user.email, ...tpl }).catch(() => {});
     }
@@ -176,6 +265,8 @@ async function notifyWindow({
       `Your ${PACK_LABEL(p)} expires on ${p.expiresAt.toLocaleDateString()}.`,
       "/dashboard/subscription",
       { packId: p.id, expiresAt: p.expiresAt },
+      "pro", // ProFlowPurchase is a personal Pro-tier entitlement — not team-scoped
+      null,
     );
     pushSafe(
       p.userId,
@@ -267,6 +358,8 @@ async function downgradeUser(pack, summary) {
       "You're back on the free plan with 10 flows. Renew anytime.",
       "/dashboard/subscription",
       { packId: pack.id },
+      "pro", // ProFlowPurchase is a personal Pro-tier entitlement — not team-scoped
+      null,
     );
     pushSafe(userId, {
       title: "Flow pack expired",
@@ -303,7 +396,11 @@ async function downgradeUser(pack, summary) {
     where: { id: userId },
     select: { email: true, name: true },
   });
-  if (u?.email && emailTemplates.flowPickerRequired) {
+  if (
+    u?.email &&
+    emailTemplates.flowPickerRequired &&
+    (await emailAllowed(userId, "flow_picker_required"))
+  ) {
     const tpl = emailTemplates.flowPickerRequired(u, flows.length);
     sendEmail({ to: u.email, ...tpl }).catch(() => {});
   }
@@ -314,6 +411,8 @@ async function downgradeUser(pack, summary) {
     `Your flow pack expired and you have ${flows.length} flows. Pick 10 to keep — the rest move to trash for 30 days.`,
     "/dashboard/flows",
     { packId: pack.id, flowCount: flows.length },
+    "pro", // ProFlowPurchase is a personal Pro-tier entitlement — not team-scoped
+    null,
   );
   pushSafe(userId, push.builders.flowPackExpired());
   summary.expiredWithPicker++;
@@ -385,6 +484,8 @@ async function checkPastDueGrace() {
         "Your flow add-on payment couldn't be collected. You're back on the base 10 flows. Update your payment method to restore your pack.",
         "/dashboard/subscription",
         { plan: user.flowAddonPlan },
+        "pro", // flow add-on is a personal Pro-tier entitlement — not team-scoped
+        null,
       );
       pushSafe(user.id, {
         title: "Flow pack reduced",
@@ -404,4 +505,182 @@ async function checkPastDueGrace() {
   return summary;
 }
 
-module.exports = { runDailyCheck, checkPastDueGrace };
+/**
+ * Called on every login / app-load for the user's current appContext.
+ * Checks whether the flow pack / addon has expired and enforces the downgrade
+ * in real-time so users don't have to wait for the daily cron.
+ *
+ * Returns a status object the frontend can use to show expiry details.
+ */
+async function checkAndApplyExpiry(userId, appContext) {
+  const now = new Date();
+  const result = {
+    checked: true,
+    appContext,
+    expired: false,
+    downgraded: false,
+    plan: null,
+    daysLeft: null,
+    flowCount: null,
+    limit: null,
+  };
+
+  if (appContext === "pro" || appContext === "individual") {
+    // ── Pro / addon subscription ────────────────────────────────────────────
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        flowAddonStatus: true,
+        flowAddonPlan: true,
+        flowAddonCurrentPeriodEnd: true,
+        proFlowLimit: true,
+        proUnlimitedFlows: true,
+        proAdditionalFlowsPurchased: true,
+      },
+    });
+    if (!user) return result;
+
+    result.plan = user.flowAddonPlan;
+
+    const addonActive =
+      user.flowAddonStatus === "active" &&
+      user.flowAddonCurrentPeriodEnd &&
+      new Date(user.flowAddonCurrentPeriodEnd) > now;
+
+    if (user.flowAddonStatus === "active" && user.flowAddonCurrentPeriodEnd) {
+      const msLeft =
+        new Date(user.flowAddonCurrentPeriodEnd).getTime() - now.getTime();
+      result.daysLeft = Math.max(0, Math.ceil(msLeft / (24 * 3600 * 1000)));
+    }
+
+    // Expired — addon was active but period has passed
+    if (
+      user.flowAddonStatus === "active" &&
+      user.flowAddonCurrentPeriodEnd &&
+      new Date(user.flowAddonCurrentPeriodEnd) <= now
+    ) {
+      result.expired = true;
+      const planBeforeReset = user.flowAddonPlan;
+
+      // Apply the same downgrade as STEP E2 in the daily cron
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          flowAddonStatus: "cancelled",
+          // bug-037: clear the stale plan field on cancellation (mirrors
+          // handleFlowAddonSubscriptionDeleted and the daily cron sweep) —
+          // otherwise the UI keeps reading a leftover plan indefinitely.
+          flowAddonPlan: null,
+          proFlowLimit: 10,
+          proUnlimitedFlows: false,
+          proAdditionalFlowsPurchased: 0,
+        },
+      });
+      await logFlowAddonHistory(userId, {
+        plan: planBeforeReset,
+        status: "expired",
+        reason: "expired",
+      });
+
+      // Count current flows to decide if the user is now over the new limit (10)
+      const { personalFlowTeamOr } = require("../lib/personalFlowScope");
+      const scopeOr = await personalFlowTeamOr(userId);
+      const flowCount = await prisma.flow.count({
+        where: { ownerId: userId, deletedAt: null, OR: scopeOr },
+      });
+      const overLimit = flowCount > 10;
+
+      // Set lock if user is over the new limit so the flows page shows the modal
+      const updated = await prisma.flowLimit.updateMany({
+        where: { userId, appType: "individual" },
+        data: {
+          overLimitLocked: overLimit,
+          overLimitModalShown: false,
+          totCount: 10,
+          flowUsed: flowCount,
+          updatedAt: now,
+        },
+      });
+      if (updated.count === 0) {
+        await prisma.flowLimit.create({
+          data: {
+            userId,
+            appType: "individual",
+            overLimitLocked: overLimit,
+            overLimitModalShown: false,
+            totCount: 10,
+            flowUsed: flowCount,
+          },
+        });
+      }
+
+      result.downgraded = true;
+      result.limit = 10;
+      result.daysLeft = 0;
+      result.flowCount = flowCount;
+      result.overLimit = overLimit;
+
+      logger.info(
+        `[checkAndApplyExpiry] pro addon expired on login: user=${userId} plan=${user.flowAddonPlan}`,
+      );
+
+      await notificationService
+        .createNotification(
+          userId,
+          "flow_addon_expired",
+          "Flow add-on expired",
+          "Your flow add-on has ended. You're back on 10 flows. Renew anytime.",
+          "/dashboard/subscription",
+          { plan: user.flowAddonPlan },
+          "pro", // flow add-on is a personal Pro-tier entitlement — not team-scoped
+          null,
+        )
+        .catch(() => {});
+    } else if (addonActive) {
+      result.limit =
+        user.flowAddonPlan === "standard_100"
+          ? 100
+          : user.proUnlimitedFlows
+            ? null
+            : user.proFlowLimit + (user.proAdditionalFlowsPurchased || 0);
+    } else {
+      result.limit = user.proFlowLimit || 10;
+    }
+  } else {
+    // ── Team context ────────────────────────────────────────────────────────
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        teamUnlimitedFlows: true,
+        teamFlowLimit: true,
+        subscription: {
+          select: { status: true, expiresAt: true, productType: true },
+        },
+      },
+    });
+    if (!user) return result;
+
+    const sub = user.subscription;
+    if (sub) {
+      result.plan = sub.productType;
+      if (sub.expiresAt) {
+        const msLeft = new Date(sub.expiresAt).getTime() - now.getTime();
+        result.daysLeft = Math.max(0, Math.ceil(msLeft / (24 * 3600 * 1000)));
+      }
+      if (
+        (sub.status === "active" || sub.status === "cancelling") &&
+        sub.expiresAt &&
+        new Date(sub.expiresAt) <= now
+      ) {
+        result.expired = true;
+        // Team subscription expiry is handled by expire-subscriptions cron;
+        // we just report it here — don't duplicate the downgrade logic.
+      }
+    }
+    result.limit = user.teamUnlimitedFlows ? null : user.teamFlowLimit || 50;
+  }
+
+  return result;
+}
+
+module.exports = { runDailyCheck, checkPastDueGrace, checkAndApplyExpiry };

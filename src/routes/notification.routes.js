@@ -10,6 +10,18 @@ const {
 
 router.get("/", authenticate, notificationController.list);
 router.get("/count", authenticate, notificationController.count);
+router.get("/preferences", authenticate, notificationController.getPreferences);
+router.put(
+  "/preferences",
+  authenticate,
+  notificationController.updatePreference,
+);
+router.get("/quiet-hours", authenticate, notificationController.getQuietHours);
+router.put(
+  "/quiet-hours",
+  authenticate,
+  notificationController.updateQuietHours,
+);
 router.put("/read-all", authenticate, notificationController.markAllRead);
 router.put("/:id/read", authenticate, notificationController.markRead);
 // Literal /delete-all MUST precede /:id so the param route doesn't swallow it.

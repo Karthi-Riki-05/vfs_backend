@@ -507,6 +507,37 @@ class PaymentService {
       return;
     }
 
+    // Flow add-on renewal: not tracked via the Subscription table (it lives
+    // on User.flowAddonStripeSubId), so it needs its own branch here. The
+    // initial subscribe invoice is already logged (different txnId) by
+    // handleFlowAddonCheckoutWebhook / createFlowAddonCheckout — only log
+    // recurring renewal cycles, not the first invoice.
+    const addonUser = await prisma.user.findFirst({
+      where: { flowAddonStripeSubId: invoice.subscription },
+      select: { id: true },
+    });
+    if (addonUser) {
+      if (invoice.billing_reason === "subscription_create") return;
+      await prisma.transactionLog.create({
+        data: {
+          userId: addonUser.id,
+          txnId: invoice.id,
+          chargeId: invoice.payment_intent || invoice.id,
+          amountCharged: invoice.amount_paid || 0,
+          currency: invoice.currency || "usd",
+          status: "success",
+          paymentMethod: "card",
+          appType: "individual",
+          appContext: "pro",
+          purchaseType: "flow_addon",
+        },
+      });
+      logger.info(
+        `[payment._handleInvoicePaid] Flow add-on renewed: user=${addonUser.id} invoice=${invoice.id}`,
+      );
+      return;
+    }
+
     const sub = await prisma.subscription.findFirst({
       where: { paymentId: invoice.subscription },
     });
@@ -631,7 +662,7 @@ class PaymentService {
       return await proService.handleFlowAddonSubscriptionUpdated(
         addonUser.id,
         subscription.status,
-        subscription.current_period_end,
+        proService.getSubscriptionPeriodEnd(subscription),
       );
     }
 

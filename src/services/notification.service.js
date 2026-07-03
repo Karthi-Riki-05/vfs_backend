@@ -1,6 +1,35 @@
 const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
+const notificationPreference = require("./notificationPreference.service");
+
+// bug-029: `Notification.type` is a free-form Prisma String, not a real
+// enum — converting it would need a migration + backfill + touching every
+// call site at once, too risky for a cosmetic-drift concern. This is a
+// warn-only typo catcher instead: built from an actual grep of every
+// literal `type` string passed to createNotification across the codebase
+// (not from documentation, which this session repeatedly showed drifts from
+// reality). Never blocks creation — logging a warning is the only effect.
+const KNOWN_TYPES = new Set([
+  "SECURITY_ALERT",
+  "flow_addon_expired",
+  "flow_addon_grace_expired",
+  "flow_addon_payment_failed",
+  "flow_pack_expired",
+  "flow_pack_grace",
+  "flow_pack_7day",
+  "flow_pack_3day",
+  "flow_pack_1day",
+  "flow_picker_required",
+  "flow_updated",
+  "subscription_activated",
+  "subscription_cancelled",
+  "subscription_expired",
+  "team_invite",
+  "team_invite_declined",
+  "team_member_joined",
+  "team_member_removed",
+]);
 
 /**
  * Push a freshly-created notification to the user's live socket session(s).
@@ -101,6 +130,22 @@ async function createNotification(
   appContext = "team",
   teamId = null,
 ) {
+  // bug-029: warn-only typo catcher — never blocks creation.
+  if (!KNOWN_TYPES.has(type)) {
+    logger.warn(
+      `[Notification] unrecognized type "${type}" — check for a typo or add it to KNOWN_TYPES in notification.service.js`,
+    );
+  }
+
+  // bug-019: per-category opt-out. Fail-open (defaults to enabled) so a
+  // preference-lookup problem can never silently drop a real notification —
+  // isChannelEnabled already fails open internally; the .catch here is
+  // belt-and-suspenders for this specific call site.
+  const enabled = await notificationPreference
+    .isChannelEnabled(userId, type, "inApp", appContext)
+    .catch(() => true);
+  if (!enabled) return null;
+
   const notification = await prisma.notification.create({
     data: {
       userId,
@@ -199,6 +244,23 @@ async function deleteAllNotifications(
   return { count: deleted.count };
 }
 
+/**
+ * Cron-driven cleanup (bug-024): permanently deletes READ notifications
+ * older than `days` (default 30), across every user and workspace — this is
+ * unscoped by design, unlike every other function in this file, because a
+ * cleanup sweep has no single caller's workspace boundary to respect.
+ *
+ * Only prunes `isRead: true` rows — a notification the user hasn't seen yet
+ * is never deleted by age alone, regardless of how old it is.
+ */
+async function pruneReadNotifications(days = 30) {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const deleted = await prisma.notification.deleteMany({
+    where: { isRead: true, createdAt: { lt: cutoff } },
+  });
+  return { count: deleted.count };
+}
+
 module.exports = {
   createNotification,
   getUserNotifications,
@@ -207,4 +269,5 @@ module.exports = {
   getUnreadCount,
   deleteNotification,
   deleteAllNotifications,
+  pruneReadNotifications,
 };

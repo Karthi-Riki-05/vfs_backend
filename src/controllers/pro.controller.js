@@ -84,6 +84,11 @@ class ProController {
     res.json({ success: true, data: result });
   });
 
+  reactivateFlowAddon = asyncHandler(async (req, res) => {
+    const result = await proService.reactivateFlowAddon(req.user.id);
+    res.json({ success: true, data: result });
+  });
+
   getFlowAddonStatus = asyncHandler(async (req, res) => {
     const result = await proService.getFlowAddonStatus(req.user.id);
     res.json({ success: true, data: result });

@@ -294,6 +294,8 @@ model User {
   projects             Project[]
   proFlowPurchases     ProFlowPurchase[]
   notifications        Notification[]
+  notificationPreferences NotificationPreference[]
+  notificationQuietHours  NotificationQuietHours?
   teamInvitesSent      TeamInvite[]          @relation("TeamInviteSender")
   teamInvitesAccepted  TeamInvite[]          @relation("TeamInviteAcceptor")
   flowSharesGiven      FlowShare[]           @relation("FlowShareSharedBy")
@@ -385,12 +387,19 @@ model FirebaseUser {
   fcmPassword String?   @map("fcm_password")
   fcmUserId   String?   @map("fcm_user_id")
   fcmToken    String?   @map("fcm_token") @db.Text
+  // Which app registered this device: "pro" or "team" only — there is no
+  // "free" value here (a free user is simply a team-context user with no
+  // active subscription). NULL = registered before this column existed;
+  // treated as "send regardless of context" (fail-open) by fcm.service so no
+  // existing device silently stops receiving push after this migration.
+  appContext  UserVersion? @map("app_context")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime? @map("updated_at")
   deletedAt   DateTime? @map("deleted_at")
 
   @@unique([userId, fcmToken])
   @@index([userId])
+  @@index([userId, appContext])
   @@map("firebase_users")
 }
 
@@ -764,17 +773,19 @@ model FlowGroupUser {
 // ============================================================
 
 model FlowLimit {
-  id           String    @id @default(cuid())
-  legacyId     Int?      @map("legacy_id")
-  legacySource String?   @map("legacy_source")
-  userId       String    @map("user_id")
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  totCount     Int?      @map("tot_count") // Total allowed flows
-  flowUsed     Int?      @map("flow_used") // Currently used
-  flowIds      String?   @map("flow_ids") // Comma-separated flow IDs
-  appType      AppType   @map("app_type")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime? @map("updated_at")
+  id                  String    @id @default(cuid())
+  legacyId            Int?      @map("legacy_id")
+  legacySource        String?   @map("legacy_source")
+  userId              String    @map("user_id")
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  totCount            Int?      @map("tot_count") // Total allowed flows
+  flowUsed            Int?      @map("flow_used") // Currently used
+  flowIds             String?   @map("flow_ids") // Comma-separated flow IDs
+  appType             AppType   @map("app_type")
+  overLimitLocked     Boolean   @default(false) @map("over_limit_locked") // All flows locked when true
+  overLimitModalShown Boolean   @default(false) @map("over_limit_modal_shown") // One-time modal per cycle
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime? @map("updated_at")
 
   @@index([userId])
   @@map("flow_limits")
@@ -1506,6 +1517,68 @@ model Notification {
   @@index([teamId])
   @@index([createdAt])
   @@map("notifications")
+}
+
+// Per-user, per-category, per-app notification channel toggles (bug-019).
+// Scoped by appContext ("pro" | "team" only — no "free") so a user can have
+// different preferences in each app, matching how Notification rows and FCM
+// tokens are already scoped. A MISSING row means "use the default" (true for
+// every channel) — this is what makes shipping this table a zero-behaviour-
+// change migration: nobody is silently opted out of anything they were
+// already receiving.
+//
+// `email` is NOT YET enforced anywhere — utils/email.js is a separate
+// dispatcher (see docs/email.md) with no read of this table yet. The column
+// exists so the schema doesn't need a second migration when that's wired up.
+//
+// Non-disableable (transactional/security) categories never consult this
+// table at all — see NON_DISABLEABLE_CATEGORIES in
+// notificationPreference.service.js — so there is intentionally no DB-level
+// constraint stopping one from being inserted; enforcement is at the API
+// layer (rejects the write) to keep the app-context migration story simple.
+model NotificationPreference {
+  id         String      @id @default(cuid())
+  userId     String      @map("user_id")
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category   String
+  appContext UserVersion @map("app_context")
+  inApp      Boolean     @default(true) @map("in_app")
+  push       Boolean     @default(true) @map("push")
+  email      Boolean     @default(true) @map("email")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime    @updatedAt @map("updated_at")
+
+  @@unique([userId, category, appContext])
+  @@index([userId])
+  @@map("notification_preferences")
+}
+
+// Per-user quiet-hours window (bug-022). One row per user — quiet hours are
+// a single global schedule, not per-app like NotificationPreference, since
+// "don't buzz my phone at night" doesn't meaningfully differ between the Pro
+// and Team apps on the same device.
+//
+// `timezone` is USER-DECLARED, not auto-detected — there is no existing
+// client-side flow (web or mobile) that reports the device's IANA timezone
+// anywhere in this codebase. The user sets it explicitly via the same
+// endpoint that sets startHour/endHour (same pattern as picking a timezone
+// in any settings page). Defaults to "UTC" until the user chooses otherwise.
+//
+// startHour/endHour support the overnight wraparound case (e.g. 22 → 8):
+// enforcement logic in notificationQuietHours.service.js handles the wrap,
+// not the schema.
+model NotificationQuietHours {
+  id        String   @id @default(cuid())
+  userId    String   @unique @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  enabled   Boolean  @default(false)
+  startHour Int      @default(22) @map("start_hour")
+  endHour   Int      @default(8) @map("end_hour")
+  timezone  String   @default("UTC")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("notification_quiet_hours")
 }
 
 // ============================================================

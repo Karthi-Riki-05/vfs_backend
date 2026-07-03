@@ -49,6 +49,21 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
+// bug-021: DEV_MAIL_OVERRIDE silently redirects EVERY outbound email to one
+// address (see utils/email.js#resolveRecipient). If it's ever left set in
+// production — a copy-pasted .env, a leftover staging value — every user's
+// OTP/password-reset/billing email would silently go to that one inbox
+// instead of the real recipient. Fail loud at boot rather than misroute
+// mail silently.
+if (process.env.NODE_ENV === "production" && process.env.DEV_MAIL_OVERRIDE) {
+  logger.error(
+    "DEV_MAIL_OVERRIDE is set in a production environment — refusing to start. " +
+      "This would silently redirect every outbound email to one address. " +
+      "Unset DEV_MAIL_OVERRIDE to boot in production.",
+  );
+  process.exit(1);
+}
+
 const app = express();
 
 // Trust X-Forwarded-Proto from CloudFront/Nginx (HTTPS terminated at load balancer)
@@ -299,6 +314,24 @@ if (process.env.NODE_ENV !== "test") {
       { timezone: "UTC" },
     );
     logger.info("[Cron] Subscription expiry scheduled (0 8 * * * UTC)");
+
+    // Daily notification cleanup at 03:00 UTC (bug-024). Deletes READ
+    // notifications older than 30 days; unread ones are never touched by
+    // age alone. Bounds table growth (see docs/notifications-technical.md §5.5).
+    const notificationService = require("./src/services/notification.service");
+    cron.schedule(
+      "0 3 * * *",
+      async () => {
+        try {
+          const result = await notificationService.pruneReadNotifications(30);
+          logger.info(`[Cron] Notification cleanup: deleted=${result.count}`);
+        } catch (err) {
+          logger.error("[Cron] Notification cleanup failed:", err);
+        }
+      },
+      { timezone: "UTC" },
+    );
+    logger.info("[Cron] Notification cleanup scheduled (0 3 * * * UTC)");
   } catch (err) {
     logger.warn(`[Cron] Failed to schedule AI credit reset: ${err.message}`);
   }

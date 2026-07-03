@@ -250,6 +250,24 @@ class FlowService {
     // Set inside the teamId block once the team row is fetched.
     let resolvedOwnerId = userId;
 
+    // Over-limit lock check: if this user's FlowLimit for the active appContext
+    // has overLimitLocked=true, block creation entirely until resolved via
+    // upgrade or /dashboard/limitflows. Each app context is a separate record.
+    if (appContext === "pro" || appContext === "team") {
+      const dbAppType = appContext === "pro" ? "individual" : "enterprise";
+      const limitRecord = await prisma.flowLimit.findFirst({
+        where: { userId, appType: dbAppType },
+        select: { overLimitLocked: true },
+      });
+      if (limitRecord?.overLimitLocked) {
+        throw new AppError(
+          "Your flows are locked because you exceeded your plan limit. Upgrade or limit your flows to continue.",
+          403,
+          "FLOW_LOCKED",
+        );
+      }
+    }
+
     // Pro users have a personal Pro workspace backed by their own Pro team.
     // When no explicit team context is supplied, route the flow into that Pro
     // team so Pro flows carry a teamId (isolated from free flows) and an
@@ -283,6 +301,9 @@ class FlowService {
               proUnlimitedFlows: true,
               proFlowLimit: true,
               proAdditionalFlowsPurchased: true,
+              flowAddonStatus: true,
+              flowAddonPlan: true,
+              flowAddonCurrentPeriodEnd: true,
             },
           },
         },
@@ -315,20 +336,28 @@ class FlowService {
       // and membership was already verified above — so this signal is
       // server-trusted (see checkTeamAccess APP_CONTEXT_MISMATCH guard).
       if (workspaceAppContext !== "team" && !team.owner.proUnlimitedFlows) {
-        // Base allowance plus one-time flow packs (System A) — keeps
-        // enforcement in sync with getPackStatus/getProSubscriptionStatus.
-        const effectiveLimit =
-          (team.owner.proFlowLimit || 10) +
-          (team.owner.proAdditionalFlowsPurchased || 0);
-        const count = await prisma.flow.count({
-          where: { teamId, deletedAt: null },
-        });
-        if (count >= effectiveLimit) {
-          throw new AppError(
-            `Team flow limit reached (${effectiveLimit}). Upgrade the team plan to create more flows.`,
-            403,
-            "FLOW_LIMIT_REACHED",
-          );
+        const addonActive =
+          team.owner.flowAddonStatus === "active" &&
+          (!team.owner.flowAddonCurrentPeriodEnd ||
+            new Date(team.owner.flowAddonCurrentPeriodEnd) > new Date());
+        const isAddonUnlimited =
+          addonActive && team.owner.flowAddonPlan === "unlimited";
+        if (!isAddonUnlimited) {
+          const effectiveLimit =
+            addonActive && team.owner.flowAddonPlan === "standard_100"
+              ? 100
+              : (team.owner.proFlowLimit || 10) +
+                (team.owner.proAdditionalFlowsPurchased || 0);
+          const count = await prisma.flow.count({
+            where: { teamId, deletedAt: null },
+          });
+          if (count >= effectiveLimit) {
+            throw new AppError(
+              `Flow limit reached (${effectiveLimit}). Upgrade your plan to create more flows.`,
+              403,
+              "FLOW_LIMIT_REACHED",
+            );
+          }
         }
       }
     } else {
@@ -341,24 +370,29 @@ class FlowService {
           proAdditionalFlowsPurchased: true,
           teamFlowLimit: true,
           teamUnlimitedFlows: true,
+          flowAddonStatus: true,
+          flowAddonPlan: true,
+          flowAddonCurrentPeriodEnd: true,
         },
       });
       if (user) {
-        // Workspace-context-aware effective limit (FEAT-001). A null limit
-        // means unlimited → skip enforcement entirely.
-        //   • Team context  → use the user's team-flow allowance.
-        //   • Pro/other     → existing Pro allowance + flow-pack logic
-        //                      (unchanged).
+        const addonActive =
+          user.flowAddonStatus === "active" &&
+          (!user.flowAddonCurrentPeriodEnd ||
+            new Date(user.flowAddonCurrentPeriodEnd) > new Date());
+        const isAddonUnlimited =
+          addonActive && user.flowAddonPlan === "unlimited";
         let effectiveLimit = null;
         if (appContext === "team") {
           if (!user.teamUnlimitedFlows) {
             effectiveLimit = user.teamFlowLimit || 50;
           }
-        } else if (!user.proUnlimitedFlows) {
-          // Base allowance plus one-time flow packs (System A) — keeps
-          // enforcement in sync with getPackStatus/getProSubscriptionStatus.
+        } else if (!user.proUnlimitedFlows && !isAddonUnlimited) {
           effectiveLimit =
-            (user.proFlowLimit || 10) + (user.proAdditionalFlowsPurchased || 0);
+            addonActive && user.flowAddonPlan === "standard_100"
+              ? 100
+              : (user.proFlowLimit || 10) +
+                (user.proAdditionalFlowsPurchased || 0);
         }
         if (effectiveLimit !== null) {
           // Count ALL personal flows against the limit, not just the current
@@ -750,7 +784,13 @@ class FlowService {
         ...(await this._workspaceScope(userId, appContext, teamId)),
       },
       orderBy: { updatedAt: "desc" },
-      select: { id: true, name: true, thumbnail: true },
+      select: {
+        id: true,
+        name: true,
+        thumbnail: true,
+        updatedAt: true,
+        markedForDowngrade: true,
+      },
     });
   }
 
@@ -1137,6 +1177,32 @@ class FlowService {
       where: { id, deletedAt: null },
     });
     if (!flow) return null;
+
+    // Over-limit lock check: block ALL callers (owner, shared, team members)
+    // when the flow owner has overLimitLocked=true for the relevant appContext.
+    // Super-admin bypasses this check for support purposes.
+    const requesterForLock = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (requesterForLock?.role !== "super_admin") {
+      const lockAppType = appContext || flow.appContext;
+      if (lockAppType === "pro" || lockAppType === "team") {
+        const dbLockAppType =
+          lockAppType === "pro" ? "individual" : "enterprise";
+        const limitRecord = await prisma.flowLimit.findFirst({
+          where: { userId: flow.ownerId, appType: dbLockAppType },
+          select: { overLimitLocked: true },
+        });
+        if (limitRecord?.overLimitLocked) {
+          throw new AppError(
+            "This flow is locked because the owner exceeded their plan limit.",
+            403,
+            "FLOW_LOCKED",
+          );
+        }
+      }
+    }
 
     // Owner path — enforce appContext workspace scope when context is known.
     // A Pro flow cannot be opened from a Team context and vice-versa.
@@ -1572,7 +1638,7 @@ class FlowService {
   }
 
   // Pack-status snapshot used by the frontend banner.
-  async getPackStatus(userId, teamId = null) {
+  async getPackStatus(userId, teamId = null, appContext = "team") {
     // §5: if the caller is a member inside a paid tenant, resolve limits from
     // the tenant owner (same logic as getEntitlements inheritance).
     let resolvedUserId = userId;
@@ -1598,6 +1664,7 @@ class FlowService {
         proUnlimitedFlows: true,
         flowAddonStatus: true,
         flowAddonPlan: true,
+        flowAddonCurrentPeriodEnd: true,
         activeFlowPackId: true,
         flowPackExpiresAt: true,
         isInFlowPickerPhase: true,
@@ -1626,27 +1693,45 @@ class FlowService {
         })
       : null;
 
-    // When a specific team context is active (Pro app), count only flows in
-    // that team — matches exactly what the user sees in the flow list.
-    // Without a teamId (free/personal context), fall back to personalFlowTeamOr
-    // so legacy personal flows (teamId=null) are still counted.
+    // Count only flows that belong to the active context:
+    // - Explicit team context (teamId set): flows in that specific team only.
+    // - Pro app, no explicit team: count only flows inside the user's Pro
+    //   team (appContext='pro'). Matches getAppStatus exactly.
+    // - Team app, no explicit team (personal bucket): count flows inside the
+    //   user's OWN team-context team, not their Pro team. bug-039: this
+    //   branch previously always resolved the Pro team regardless of caller
+    //   context, so the Team dashboard's flow banner showed the Pro flow
+    //   count (wrong numerator) against the Team flow limit (correct
+    //   denominator) — a meaningless fraction.
+    // Both fall back to teamId=null (personal/pre-team-setup flows) if the
+    // user has no team of that context yet.
+    let flowScope;
+    if (teamId) {
+      flowScope = { teamId };
+    } else {
+      const ownTeam = await prisma.team.findFirst({
+        where: {
+          teamOwnerId: resolvedUserId,
+          deletedAt: null,
+          appContext: appContext === "pro" ? "pro" : "team",
+        },
+        select: { id: true },
+      });
+      flowScope = { teamId: ownTeam ? ownTeam.id : null };
+    }
     const flowCount = await prisma.flow.count({
-      where: {
-        ownerId: resolvedUserId,
-        deletedAt: null,
-        ...(teamId
-          ? { teamId }
-          : { OR: await personalFlowTeamOr(resolvedUserId) }),
-      },
+      where: { ownerId: resolvedUserId, deletedAt: null, ...flowScope },
     });
 
-    const isAddonUnlimited =
-      user.flowAddonStatus === "active" && user.flowAddonPlan === "unlimited";
+    const addonActive =
+      user.flowAddonStatus === "active" &&
+      (!user.flowAddonCurrentPeriodEnd ||
+        new Date(user.flowAddonCurrentPeriodEnd) > new Date());
+    const isAddonUnlimited = addonActive && user.flowAddonPlan === "unlimited";
     const limit =
       user.proUnlimitedFlows || isAddonUnlimited
         ? -1
-        : user.flowAddonStatus === "active" &&
-            user.flowAddonPlan === "standard_100"
+        : addonActive && user.flowAddonPlan === "standard_100"
           ? 100
           : user.proFlowLimit + user.proAdditionalFlowsPurchased;
 
@@ -1661,7 +1746,10 @@ class FlowService {
     return {
       activePackId: user.activeFlowPackId,
       packType: activePack?.packType || null,
-      isUnlimited: !!user.proUnlimitedFlows,
+      // bug-037: must match the same OR-logic used for `limit` below —
+      // proUnlimitedFlows alone missed users whose unlimited status comes
+      // from an active flow-addon subscription rather than the flag itself.
+      isUnlimited: !!user.proUnlimitedFlows || isAddonUnlimited,
       expiresAt: user.flowPackExpiresAt,
       gracePeriodEndsAt: activePack?.gracePeriodEndsAt || null,
       status: activePack?.status || null,

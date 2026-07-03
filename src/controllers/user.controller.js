@@ -35,8 +35,12 @@ class UserController {
         where: { id: userId },
         select: { currentVersion: true, hasPro: true },
       }),
+      // bug-033: every user has an implicit "team" shell row per app context
+      // (free/pro/team) to scope flows uniformly — owning a free- or
+      // pro-context row is NOT evidence of a paid Team plan. Only a genuine
+      // appContext="team" row counts here.
       prisma.team.findFirst({
-        where: { teamOwnerId: userId, deletedAt: null },
+        where: { teamOwnerId: userId, deletedAt: null, appContext: "team" },
         select: { id: true, appContext: true },
       }),
     ]);

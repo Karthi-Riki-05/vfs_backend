@@ -90,6 +90,11 @@ router.post(
   proController.createFlowAddonCheckout,
 );
 router.post("/flow-addon/cancel", authenticate, proController.cancelFlowAddon);
+router.post(
+  "/flow-addon/reactivate",
+  authenticate,
+  proController.reactivateFlowAddon,
+);
 router.get(
   "/flow-addon/status",
   authenticate,

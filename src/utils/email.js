@@ -14,6 +14,19 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// Escapes a user-supplied value before it's interpolated into an HTML email
+// body (bug-020). Never apply this to the plain-text fallback — that isn't
+// HTML-rendered, so escaping would show literal "&amp;" etc. to the reader.
+function escapeHtml(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 /**
  * In local dev, overrides the recipient so all emails go to the dev address.
  * Logs the original intended recipient for debugging.
@@ -38,6 +51,9 @@ async function sendTeamInviteEmail({
   const appName = isPro ? "ValueChart Pro" : "ValueChart";
   const brandColor = isPro ? "#D97706" : "#3CB371";
   const brandBadge = isPro ? " Pro" : "";
+  const safeTeamName = escapeHtml(teamName || "their team");
+  const safeInviterName = escapeHtml(inviterName || "A team member");
+  const safeInviterEmail = inviterEmail ? escapeHtml(inviterEmail) : "";
 
   const mailOptions = {
     from:
@@ -74,8 +90,8 @@ async function sendTeamInviteEmail({
                 You've been invited to join a team!
               </h2>
               <p style="color:#555555; text-align:center; font-size:16px; line-height:1.6; margin:0 0 32px 0;">
-                <strong>${inviterName || "A team member"}</strong>${inviterEmail ? ` (${inviterEmail})` : ""} has invited you to join
-                the team <strong>"${teamName || "their team"}"</strong> on ${appName}.
+                <strong>${safeInviterName}</strong>${safeInviterEmail ? ` (${safeInviterEmail})` : ""} has invited you to join
+                the team <strong>"${safeTeamName}"</strong> on ${appName}.
               </p>
               <div style="background-color:#f8f9fa; border-radius:8px; padding:20px; margin-bottom:32px; border-left:4px solid ${brandColor};">
                 <table width="100%" cellpadding="0" cellspacing="0">
@@ -83,13 +99,13 @@ async function sendTeamInviteEmail({
                     <td style="color:#888888; font-size:13px; padding-bottom:8px;">TEAM</td>
                   </tr>
                   <tr>
-                    <td style="color:#1a1a1a; font-size:18px; font-weight:600; padding-bottom:12px;">${teamName || "Unnamed Team"}</td>
+                    <td style="color:#1a1a1a; font-size:18px; font-weight:600; padding-bottom:12px;">${escapeHtml(teamName || "Unnamed Team")}</td>
                   </tr>
                   <tr>
                     <td style="color:#888888; font-size:13px; padding-bottom:4px;">INVITED BY</td>
                   </tr>
                   <tr>
-                    <td style="color:#1a1a1a; font-size:15px;">${inviterName || "A team member"}</td>
+                    <td style="color:#1a1a1a; font-size:15px;">${safeInviterName}</td>
                   </tr>
                 </table>
               </div>
@@ -166,6 +182,8 @@ async function sendFlowShareEmail({
     permission === "edit"
       ? "You can view <strong>and edit</strong> this flow."
       : "You can <strong>view</strong> this flow (read-only).";
+  const safeSharerName = escapeHtml(sharerName || "Someone");
+  const safeFlowName = escapeHtml(flowName || "Untitled Flow");
 
   const mailOptions = {
     from:
@@ -198,7 +216,7 @@ async function sendFlowShareEmail({
                 A flow has been shared with you
               </h2>
               <p style="color:#555555; text-align:center; font-size:16px; line-height:1.6; margin:0 0 32px 0;">
-                <strong>${sharerName || "Someone"}</strong> shared a flow with you on ${appName}.
+                <strong>${safeSharerName}</strong> shared a flow with you on ${appName}.
               </p>
               <div style="background-color:#f8f9fa; border-radius:8px; padding:20px; margin-bottom:32px; border-left:4px solid ${brandColor};">
                 <table width="100%" cellpadding="0" cellspacing="0">
@@ -206,7 +224,7 @@ async function sendFlowShareEmail({
                     <td style="color:#888888; font-size:13px; padding-bottom:8px;">FLOW</td>
                   </tr>
                   <tr>
-                    <td style="color:#1a1a1a; font-size:18px; font-weight:600; padding-bottom:12px;">${flowName || "Untitled Flow"}</td>
+                    <td style="color:#1a1a1a; font-size:18px; font-weight:600; padding-bottom:12px;">${safeFlowName}</td>
                   </tr>
                   <tr>
                     <td style="color:#888888; font-size:13px; padding-bottom:4px;">YOUR ACCESS</td>
@@ -280,6 +298,8 @@ async function sendFlowShareProRequiredEmail({
 }) {
   const appName = "ValueChart";
   const brandColor = "#3CB371";
+  const safeSharerName = escapeHtml(sharerName || "Someone");
+  const safeFlowName = escapeHtml(flowName || "Untitled Flow");
 
   const mailOptions = {
     from:
@@ -312,8 +332,8 @@ async function sendFlowShareProRequiredEmail({
                 A flow was shared with you
               </h2>
               <p style="color:#555555; text-align:center; font-size:16px; line-height:1.6; margin:0 0 24px 0;">
-                <strong>${sharerName || "Someone"}</strong> (a ValueChart Pro user) shared
-                the flow <strong>&ldquo;${flowName || "Untitled Flow"}&rdquo;</strong> with you.
+                <strong>${safeSharerName}</strong> (a ValueChart Pro user) shared
+                the flow <strong>&ldquo;${safeFlowName}&rdquo;</strong> with you.
               </p>
               <div style="background-color:#fffbe6; border-radius:8px; padding:20px; margin-bottom:32px; border-left:4px solid #faad14;">
                 <p style="color:#614700; font-size:14px; margin:0 0 8px 0; font-weight:600;">
@@ -383,6 +403,7 @@ If you weren't expecting this, you can safely ignore this email.`,
 }
 
 async function sendPasswordResetEmail({ to, name, resetUrl }) {
+  const safeName = escapeHtml(name || "there");
   const mailOptions = {
     from:
       process.env.SMTP_FROM ||
@@ -411,7 +432,7 @@ async function sendPasswordResetEmail({ to, name, resetUrl }) {
           <tr>
             <td style="padding:40px;">
               <h2 style="color:#1a1a1a; text-align:center; margin:0 0 16px 0; font-size:22px; font-weight:600;">Reset Your Password</h2>
-              <p style="color:#555555; font-size:16px; line-height:1.6;">Hi ${name || "there"},</p>
+              <p style="color:#555555; font-size:16px; line-height:1.6;">Hi ${safeName},</p>
               <p style="color:#555555; font-size:16px; line-height:1.6;">We received a request to reset your password. Click the button below to create a new one:</p>
               <div style="text-align:center; margin:32px 0;">
                 <a href="${resetUrl}"
@@ -468,6 +489,7 @@ If you didn't request this, you can safely ignore this email.`,
 }
 
 async function sendVerificationEmail({ to, name, otp }) {
+  const safeName = escapeHtml(name || "there");
   const mailOptions = {
     from:
       process.env.SMTP_FROM ||
@@ -496,7 +518,7 @@ async function sendVerificationEmail({ to, name, otp }) {
           <tr>
             <td style="padding:40px;">
               <h2 style="color:#1a1a1a; text-align:center; margin:0 0 16px 0; font-size:22px; font-weight:600;">Verify Your Email</h2>
-              <p style="color:#555555; font-size:16px; line-height:1.6;">Hi ${name || "there"},</p>
+              <p style="color:#555555; font-size:16px; line-height:1.6;">Hi ${safeName},</p>
               <p style="color:#555555; font-size:16px; line-height:1.6;">Use the code below to verify your email and activate your ValueChart account.</p>
               <div style="text-align:center; margin:32px 0;">
                 <div style="display:inline-block; background:#F0FDF4; border:2px solid #3CB371; border-radius:12px; padding:18px 32px; font-size:32px; font-weight:700; letter-spacing:8px; color:#15803D; font-family:'Courier New', monospace;">
@@ -582,8 +604,8 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">Payment Confirmed ✅</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p style="font-size:15px">Hi ${user.name || "there"},</p>
-    <p style="font-size:15px;line-height:1.6">Your payment of <strong>$${(amountCents / 100).toFixed(2)}</strong> for <strong>${planName}</strong> was successful. Your subscription is now active.</p>
+    <p style="font-size:15px">Hi ${escapeHtml(user.name || "there")},</p>
+    <p style="font-size:15px;line-height:1.6">Your payment of <strong>$${(amountCents / 100).toFixed(2)}</strong> for <strong>${escapeHtml(planName)}</strong> was successful. Your subscription is now active.</p>
     <div style="text-align:center;margin:32px 0">
       <a href="${APP_URL()}/dashboard/subscription" style="background:#3CB371;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">View Subscription</a>
     </div>
@@ -601,8 +623,8 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">Payment Failed ⚠️</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p style="font-size:15px">Hi ${user.name || "there"},</p>
-    <p style="font-size:15px;line-height:1.6">We couldn't process your payment for <strong>${planName}</strong>. Please update your payment method to keep your subscription active.</p>
+    <p style="font-size:15px">Hi ${escapeHtml(user.name || "there")},</p>
+    <p style="font-size:15px;line-height:1.6">We couldn't process your payment for <strong>${escapeHtml(planName)}</strong>. Please update your payment method to keep your subscription active.</p>
     <p style="font-size:14px;color:#cf1322">If not resolved within a few days, your account will be downgraded to the free plan.</p>
     <div style="text-align:center;margin:32px 0">
       <a href="${APP_URL()}/dashboard/subscription" style="background:#ff4d4f;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Update Payment Method</a>
@@ -621,7 +643,7 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">Pack Expires in 7 Days</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p>Hi ${user.name || "there"},</p>
+    <p>Hi ${escapeHtml(user.name || "there")},</p>
     <p>Your <strong>${packLabel}</strong> pack expires on <strong>${new Date(expiresAt).toLocaleDateString()}</strong>. Renew now to keep all your flows accessible.</p>
     <div style="text-align:center;margin:32px 0">
       <a href="${APP_URL()}/dashboard/subscription" style="background:#3CB371;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Renew Now</a>
@@ -629,6 +651,7 @@ const emailTemplates = {
     <p style="color:#888;font-size:12px">If your pack expires you'll get a 3-day grace period; after that flows beyond your 10-flow free limit will move to trash.</p>
   </div>
 </div>`,
+    text: `Hi ${user.name || "there"},\n\nYour ${packLabel} pack expires on ${new Date(expiresAt).toLocaleDateString()}. Renew now to keep all your flows accessible.\n\nRenew: ${APP_URL()}/dashboard/subscription\n\nIf your pack expires you'll get a 3-day grace period; after that flows beyond your 10-flow free limit will move to trash.`,
   }),
 
   flowPack3Days: (user, packLabel, expiresAt) => ({
@@ -639,13 +662,14 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">3 Days Until Expiry</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p>Hi ${user.name || "there"},</p>
+    <p>Hi ${escapeHtml(user.name || "there")},</p>
     <p>Your <strong>${packLabel}</strong> pack expires on <strong>${new Date(expiresAt).toLocaleDateString()}</strong>. Renew within 3 days to avoid losing flow access.</p>
     <div style="text-align:center;margin:32px 0">
       <a href="${APP_URL()}/dashboard/subscription" style="background:#FF7A45;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Renew Now</a>
     </div>
   </div>
 </div>`,
+    text: `Hi ${user.name || "there"},\n\nYour ${packLabel} pack expires on ${new Date(expiresAt).toLocaleDateString()}. Renew within 3 days to avoid losing flow access.\n\nRenew: ${APP_URL()}/dashboard/subscription`,
   }),
 
   flowPack1Day: (user, packLabel, expiresAt) => ({
@@ -656,13 +680,14 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">Expires Tomorrow</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p>Hi ${user.name || "there"},</p>
+    <p>Hi ${escapeHtml(user.name || "there")},</p>
     <p>Your <strong>${packLabel}</strong> pack expires on <strong>${new Date(expiresAt).toLocaleDateString()}</strong> — that's tomorrow. Renew now to keep your flows.</p>
     <div style="text-align:center;margin:32px 0">
       <a href="${APP_URL()}/dashboard/subscription" style="background:#cf1322;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Renew Now</a>
     </div>
   </div>
 </div>`,
+    text: `Hi ${user.name || "there"},\n\nYour ${packLabel} pack expires on ${new Date(expiresAt).toLocaleDateString()} — that's tomorrow. Renew now to keep your flows.\n\nRenew: ${APP_URL()}/dashboard/subscription`,
   }),
 
   flowPackGrace: (user, packLabel, gracePeriodEndsAt) => ({
@@ -673,7 +698,7 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">Pack Expired — Action Required</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p>Hi ${user.name || "there"},</p>
+    <p>Hi ${escapeHtml(user.name || "there")},</p>
     <p>Your <strong>${packLabel}</strong> pack has expired. You have a 3-day grace period — renew before <strong>${new Date(gracePeriodEndsAt).toLocaleDateString()}</strong> to keep all your flows.</p>
     <p>If you don't renew, flows beyond the 10-flow free limit will be moved to trash and you'll be asked to select 10 flows to keep.</p>
     <div style="text-align:center;margin:32px 0">
@@ -681,6 +706,7 @@ const emailTemplates = {
     </div>
   </div>
 </div>`,
+    text: `Hi ${user.name || "there"},\n\nYour ${packLabel} pack has expired. You have a 3-day grace period — renew before ${new Date(gracePeriodEndsAt).toLocaleDateString()} to keep all your flows.\n\nIf you don't renew, flows beyond the 10-flow free limit will be moved to trash and you'll be asked to select 10 flows to keep.\n\nRenew: ${APP_URL()}/dashboard/subscription`,
   }),
 
   flowPickerRequired: (user, flowCount) => ({
@@ -691,7 +717,7 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">Pick 10 Flows to Keep</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p>Hi ${user.name || "there"},</p>
+    <p>Hi ${escapeHtml(user.name || "there")},</p>
     <p>Your flow pack expired and you currently have <strong>${flowCount}</strong> flows. The free plan allows 10 — please select which 10 to keep. The rest will move to trash for 30 days, after which they'll be permanently deleted.</p>
     <div style="text-align:center;margin:32px 0">
       <a href="${APP_URL()}/dashboard/flows" style="background:#cf1322;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Select Flows to Keep</a>
@@ -699,6 +725,7 @@ const emailTemplates = {
     <p style="color:#888;font-size:12px">You can also renew your pack at any time within 30 days to auto-restore the trashed flows.</p>
   </div>
 </div>`,
+    text: `Hi ${user.name || "there"},\n\nYour flow pack expired and you currently have ${flowCount} flows. The free plan allows 10 — please select which 10 to keep. The rest will move to trash for 30 days, after which they'll be permanently deleted.\n\nSelect flows to keep: ${APP_URL()}/dashboard/flows\n\nYou can also renew your pack at any time within 30 days to auto-restore the trashed flows.`,
   }),
 
   flowsRestoredOnRenewal: (user, restoredCount) => ({
@@ -709,13 +736,14 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">Flows Restored ✅</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p>Hi ${user.name || "there"},</p>
+    <p>Hi ${escapeHtml(user.name || "there")},</p>
     <p>Welcome back! We've restored <strong>${restoredCount}</strong> flow${restoredCount === 1 ? "" : "s"} from trash now that your pack is active again.</p>
     <div style="text-align:center;margin:32px 0">
       <a href="${APP_URL()}/dashboard/flows" style="background:#3CB371;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Open Flows</a>
     </div>
   </div>
 </div>`,
+    text: `Hi ${user.name || "there"},\n\nWelcome back! We've restored ${restoredCount} flow${restoredCount === 1 ? "" : "s"} from trash now that your pack is active again.\n\nOpen flows: ${APP_URL()}/dashboard/flows`,
   }),
 
   subscriptionCancelled: (user, expiresAt) => ({
@@ -726,7 +754,7 @@ const emailTemplates = {
     <h1 style="color:#fff;margin:0;font-size:22px">Subscription Cancelled</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
-    <p style="font-size:15px">Hi ${user.name || "there"},</p>
+    <p style="font-size:15px">Hi ${escapeHtml(user.name || "there")},</p>
     <p style="font-size:15px;line-height:1.6">Your subscription has been cancelled.${expiresAt ? ` You'll keep access until <strong>${new Date(expiresAt).toLocaleDateString()}</strong>.` : ""}</p>
     <p style="font-size:14px;color:#666">After that, your account will return to the free plan.</p>
     <div style="text-align:center;margin:32px 0">

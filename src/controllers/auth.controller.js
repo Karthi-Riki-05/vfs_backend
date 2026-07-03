@@ -8,6 +8,7 @@ const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const { sendVerificationEmail } = require("../utils/email");
 const securityAlert = require("../services/securityAlert.service");
+const userService = require("../services/user.service");
 
 const VERIFY_OTP_TTL_MIN = 15;
 
@@ -199,18 +200,7 @@ exports.oauthSync = asyncHandler(async (req, res) => {
 
   // Mirror validateUser: OAuth users with an active team subscription must get
   // team access immediately, not only after a session refresh. See bug-004.
-  // "cancelling" = cancel_at_period_end set — user keeps access until expiresAt.
-  const teamSub = await prisma.subscription.findFirst({
-    where: {
-      userId: user.id,
-      productType: { in: ["team_monthly", "team_yearly"] },
-      status: { in: ["active", "cancelling"] },
-    },
-    select: { id: true, expiresAt: true },
-  });
-  const hasTeamAccess =
-    !!teamSub &&
-    (!teamSub.expiresAt || new Date(teamSub.expiresAt) > new Date());
+  const hasTeamAccess = await userService.getHasTeamAccess(user.id);
 
   res.json({
     success: true,
@@ -293,17 +283,7 @@ exports.validateUser = asyncHandler(async (req, res) => {
     { expiresIn: process.env.JWT_EXPIRES_IN || "7d" },
   );
 
-  const teamSub = await prisma.subscription.findFirst({
-    where: {
-      userId: user.id,
-      productType: { in: ["team_monthly", "team_yearly"] },
-      status: { in: ["active", "cancelling"] },
-    },
-    select: { id: true, expiresAt: true },
-  });
-  const hasTeamAccess =
-    !!teamSub &&
-    (!teamSub.expiresAt || new Date(teamSub.expiresAt) > new Date());
+  const hasTeamAccess = await userService.getHasTeamAccess(user.id);
 
   res.json({
     success: true,

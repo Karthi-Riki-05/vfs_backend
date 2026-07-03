@@ -1,4 +1,5 @@
 const flowService = require("../services/flow.service");
+const flowLimitService = require("../services/flowLimit.service");
 const asyncHandler = require("../utils/asyncHandler");
 const { prisma } = require("../lib/prisma");
 const pdfParse = require("pdf-parse");
@@ -498,8 +499,59 @@ class FlowController {
 
   packStatus = asyncHandler(async (req, res) => {
     const teamId = req.headers["x-team-context"] || null;
-    const status = await flowService.getPackStatus(req.user.id, teamId);
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const status = await flowService.getPackStatus(
+      req.user.id,
+      teamId,
+      appContext,
+    );
     res.json({ success: true, data: status });
+  });
+
+  // Over-limit lock endpoints
+  getLockState = asyncHandler(async (req, res) => {
+    const appType =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const state = await flowLimitService.getLockState(req.user.id, appType);
+    res.json({ success: true, data: { ...state, appType } });
+  });
+
+  markModalShown = asyncHandler(async (req, res) => {
+    const { appType } = req.body;
+    await flowLimitService.markModalShown(req.user.id, appType);
+    res.json({ success: true, data: { marked: true } });
+  });
+
+  getFlowsForPicker = asyncHandler(async (req, res) => {
+    const appType =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const flows = await flowLimitService.getFlowsForPicker(
+      req.user.id,
+      appType,
+    );
+    res.json({ success: true, data: flows });
+  });
+
+  resolveOverLimit = asyncHandler(async (req, res) => {
+    const { appType, selectedFlowIds } = req.body;
+    const result = await flowLimitService.resolveOverLimit(
+      req.user.id,
+      appType,
+      selectedFlowIds,
+    );
+    res.json({ success: true, data: result });
+  });
+
+  checkExpiry = asyncHandler(async (req, res) => {
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const flowPackExpiry = require("../services/flowPackExpiry.service");
+    const result = await flowPackExpiry.checkAndApplyExpiry(
+      req.user.id,
+      appContext,
+    );
+    res.json({ success: true, data: result });
   });
 }
 

@@ -112,6 +112,19 @@ const shareIdParamSchema = z.object({
   }),
 });
 
+const resolveLockSchema = z.object({
+  body: z.object({
+    appType: z.enum(["pro", "team"]),
+    selectedFlowIds: z.array(z.string().min(1)).min(1),
+  }),
+});
+
+const markModalShownSchema = z.object({
+  body: z.object({
+    appType: z.enum(["pro", "team"]),
+  }),
+});
+
 module.exports = {
   createFlowSchema,
   updateFlowSchema,
@@ -121,4 +134,6 @@ module.exports = {
   shareFlowSchema,
   updateShareSchema,
   shareIdParamSchema,
+  resolveLockSchema,
+  markModalShownSchema,
 };

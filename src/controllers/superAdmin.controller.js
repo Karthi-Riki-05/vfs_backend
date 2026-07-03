@@ -4,6 +4,7 @@ const AppError = require("../utils/AppError");
 const { prisma } = require("../lib/prisma");
 const { getStripe } = require("../lib/stripe");
 const fcmService = require("../services/fcm.service");
+const notificationRateLimit = require("../services/notificationRateLimit.service");
 
 /**
  * Builds (but doesn't execute) the PrismaPromise that archives the given
@@ -2455,6 +2456,20 @@ class SuperAdminController {
         "title and body are required",
         400,
         "VALIDATION_ERROR",
+      );
+    }
+    // bug-026: keyed on the calling admin, not a recipient — throttles how
+    // often one super-admin account can trigger a platform-wide broadcast
+    // (compromised/careless-account safety net; audit trail is separately
+    // handled by the logAdminAction route middleware).
+    if (
+      !notificationRateLimit.checkRateLimit(req.user.id, "admin_broadcast")
+        .allowed
+    ) {
+      throw new AppError(
+        "Broadcast rate limit reached — try again later",
+        429,
+        "RATE_LIMITED",
       );
     }
     const data = {};

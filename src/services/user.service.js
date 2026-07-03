@@ -7,6 +7,26 @@ const logger = require("../utils/logger");
 const securityAlert = require("./securityAlert.service");
 
 class UserService {
+  /**
+   * Live-recompute team access from the Subscription table — never trust a
+   * cached claim (JWT, session, etc.) for this. "cancelling" = cancel_at_-
+   * period_end set; user keeps access until expiresAt. See bug-033.
+   */
+  async getHasTeamAccess(userId) {
+    const teamSub = await prisma.subscription.findFirst({
+      where: {
+        userId,
+        productType: { in: ["team_monthly", "team_yearly"] },
+        status: { in: ["active", "cancelling"] },
+      },
+      select: { id: true, expiresAt: true },
+    });
+    return (
+      !!teamSub &&
+      (!teamSub.expiresAt || new Date(teamSub.expiresAt) > new Date())
+    );
+  }
+
   async getUserById(id) {
     const user = await prisma.user.findUnique({
       where: { id },
@@ -26,10 +46,13 @@ class UserService {
         companyId: true,
         createdAt: true,
         updatedAt: true,
+        hasPro: true,
+        currentVersion: true,
       },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
-    return user;
+    const hasTeamAccess = await this.getHasTeamAccess(id);
+    return { ...user, hasTeamAccess };
   }
 
   async updateUser(id, data) {

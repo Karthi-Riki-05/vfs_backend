@@ -21,6 +21,7 @@ const {
   TEAM_CREDITS_PER_SEAT_MONTHLY,
   TEAM_CREDITS_PER_SEAT_YEARLY,
 } = require("./aiCredit.service");
+const { getSubscriptionPeriodEnd } = require("./pro.service");
 
 // True only when the subscription row represents a currently-active paid period.
 // `status='active'` alone is insufficient: the cron/webhook may not have flipped
@@ -33,6 +34,52 @@ function isSubscriptionLive(sub) {
 }
 
 class SubscriptionService {
+  /**
+   * Mid-cycle seat additions grant prorated AI credits immediately (bug-044):
+   * addedSeats × perSeatCredits × (remaining days / period days). Previously
+   * credits only refreshed at renewal, so a user paying prorated money for
+   * extra seats got zero extra credits until the next invoice.
+   * Increments planCredits (does not reset); renewal still recalculates the
+   * full pool from the new seat count via _handleInvoicePaid.
+   */
+  async _grantProratedSeatCredits({
+    userId,
+    addedSeats,
+    isYearly,
+    periodStart,
+    periodEnd,
+  }) {
+    if (!addedSeats || addedSeats <= 0) return 0;
+    const perSeat = isYearly
+      ? TEAM_CREDITS_PER_SEAT_YEARLY
+      : TEAM_CREDITS_PER_SEAT_MONTHLY;
+
+    let fraction = 1;
+    if (periodStart && periodEnd && periodEnd > periodStart) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      fraction = (periodEnd - nowSec) / (periodEnd - periodStart);
+      fraction = Math.min(1, Math.max(0, fraction));
+    }
+    const credits = Math.round(addedSeats * perSeat * fraction);
+    if (credits <= 0) return 0;
+
+    await prisma.aiCreditBalance.upsert({
+      where: { userId_appContext: { userId, appContext: "team" } },
+      create: {
+        userId,
+        planCredits: credits,
+        addonCredits: 0,
+        planResetsAt: periodEnd ? new Date(periodEnd * 1000) : null,
+        appContext: "team",
+      },
+      update: { planCredits: { increment: credits } },
+    });
+    logger.info(
+      `[_grantProratedSeatCredits] user=${userId} +${credits} credits (${addedSeats} seats × ${perSeat} × ${fraction.toFixed(3)})`,
+    );
+    return credits;
+  }
+
   /**
    * Returns the Stripe Price ID for the given plan type.
    * Falls back to price_data if env vars are not set.
@@ -258,13 +305,12 @@ class SubscriptionService {
           items: [{ price: stripePriceId, quantity: teamMembers }],
           default_payment_method: paymentMethodId,
           metadata: { userId, plan, teamMembers: String(teamMembers) },
-          expand: ["latest_invoice.payment_intent"],
+          expand: ["latest_invoice.payment_intent", "items.data"],
         });
 
         // Persist the new subscription immediately (webhook may lag).
-        const periodEnd = subscription.current_period_end
-          ? new Date(subscription.current_period_end * 1000)
-          : null;
+        const rawPeriodEnd = getSubscriptionPeriodEnd(subscription);
+        const periodEnd = rawPeriodEnd ? new Date(rawPeriodEnd * 1000) : null;
         const newStatus =
           subscription.status === "active" ? "active" : "pending";
 
@@ -495,7 +541,22 @@ class SubscriptionService {
       const isReducingSeats = teamMembers < currentQuantity;
       const priceIsStale = this._itemPriceIsStale(subItem, plan);
 
+      // Any deliberate plan change while in "cancelling" state means the
+      // user wants to keep the subscription — clear the pending cancel
+      // (bug-042: previously the paid change was silently lost at period end).
+      const wasCancelling = subscription.status === "cancelling";
+
       if (teamMembers === currentQuantity && !priceIsStale) {
+        // Re-picking the exact current plan while cancelling is the most
+        // natural "I want my plan back" gesture — treat it as reactivation
+        // instead of a noop (bug-045).
+        if (wasCancelling) {
+          const result = await this.reactivateSubscription(userId);
+          return {
+            type: "reactivated",
+            message: result?.message || "Subscription reactivated successfully",
+          };
+        }
         return {
           type: "noop",
           message: "Member count unchanged",
@@ -504,16 +565,21 @@ class SubscriptionService {
       // If only the price is stale (quantity unchanged), treat as a price
       // migration: re-bill on the canonical Price with no immediate charge,
       // and let Stripe credit/debit the difference at next renewal.
+
       if (teamMembers === currentQuantity && priceIsStale) {
         await stripe.subscriptions.update(subscription.paymentId, {
           items: [this._buildItemForPlan(subItem.id, plan, teamMembers)],
           metadata: { userId, plan, teamMembers: String(teamMembers) },
           proration_behavior: "none",
+          ...(wasCancelling ? { cancel_at_period_end: false } : {}),
         });
         const newPrice = (teamMembers * PRICING[plan].perUser) / 100;
         await prisma.subscription.update({
           where: { userId },
-          data: { price: newPrice },
+          data: {
+            price: newPrice,
+            ...(wasCancelling ? { status: "active" } : {}),
+          },
         });
         logger.info(
           `[changePlan] Migrated user ${userId} to canonical ${plan} price (${teamMembers} seats, no proration)`,
@@ -614,6 +680,7 @@ class SubscriptionService {
             teamMembers: String(teamMembers),
           },
           proration_behavior: "create_prorations",
+          ...(wasCancelling ? { cancel_at_period_end: false } : {}),
         });
 
         // Record the credit in transaction_logs so billing history shows it.
@@ -646,6 +713,7 @@ class SubscriptionService {
         data: {
           usersCount: teamMembers,
           price,
+          ...(wasCancelling ? { status: "active" } : {}),
         },
       });
 
@@ -664,12 +732,22 @@ class SubscriptionService {
     if (currentPlan === "monthly" && plan === "yearly") {
       const activationDate = subscription.expiresAt || new Date();
 
+      // A pending cancel would delete the Stripe sub at period end — the
+      // exact moment the scheduled yearly activation needs it alive. Clear
+      // the cancel: scheduling an upgrade means the user is staying (bug-042).
+      if (subscription.status === "cancelling") {
+        await stripe.subscriptions.update(subscription.paymentId, {
+          cancel_at_period_end: false,
+        });
+      }
+
       await prisma.subscription.update({
         where: { userId },
         data: {
           scheduledPlanType: plan,
           scheduledTeamMembers: teamMembers,
           scheduledActivationDate: activationDate,
+          ...(subscription.status === "cancelling" ? { status: "active" } : {}),
         },
       });
 
@@ -935,6 +1013,11 @@ class SubscriptionService {
       };
     }
 
+    // Paying to change the plan is an unambiguous "I'm staying" signal — if
+    // the subscription was set to cancel at period end, clear that flag as
+    // part of the same update so the paid upgrade doesn't die at renewal.
+    const wasCancelling = subscription.status === "cancelling";
+
     let updatedSub;
     try {
       updatedSub = await stripe.subscriptions.update(subscription.paymentId, {
@@ -942,6 +1025,7 @@ class SubscriptionService {
         metadata: { userId, plan, teamMembers: String(teamMembers) },
         proration_behavior: "always_invoice",
         default_payment_method: defaultPm,
+        ...(wasCancelling ? { cancel_at_period_end: false } : {}),
       });
     } catch (err) {
       throw new AppError(
@@ -956,6 +1040,9 @@ class SubscriptionService {
         await stripe.subscriptions.update(subscription.paymentId, {
           items: [{ id: subItem.id, quantity: currentQuantity }],
           proration_behavior: "none",
+          // Restore the pending cancellation if the payment failed — the
+          // user's original cancel request must survive a declined upgrade.
+          ...(wasCancelling ? { cancel_at_period_end: true } : {}),
         });
       } catch {
         /* ignore */
@@ -997,8 +1084,29 @@ class SubscriptionService {
     const price = (teamMembers * PRICING[plan].perUser) / 100;
     await prisma.subscription.update({
       where: { userId },
-      data: { usersCount: teamMembers, price },
+      data: {
+        usersCount: teamMembers,
+        price,
+        ...(wasCancelling ? { status: "active" } : {}),
+      },
     });
+
+    // Grant prorated AI credits for the added seats right away (bug-044) —
+    // the user paid prorated money for them; credits must not lag to renewal.
+    await this._grantProratedSeatCredits({
+      userId,
+      addedSeats: teamMembers - currentQuantity,
+      isYearly: plan === "yearly",
+      periodStart:
+        updatedSub.items?.data?.[0]?.current_period_start ??
+        updatedSub.current_period_start ??
+        null,
+      periodEnd: getSubscriptionPeriodEnd(updatedSub),
+    }).catch((err) =>
+      logger.error(
+        `[_upgradeSeatsOffSession] prorated credit grant failed: ${err.message}`,
+      ),
+    );
 
     // Record the prorated charge in transaction_logs so billing history shows it.
     if (latestInvoiceId) {
@@ -1649,22 +1757,60 @@ class SubscriptionService {
       return;
     }
 
-    const updateData = {
-      status:
-        subscription.status === "canceled" ? "cancelled" : subscription.status,
-    };
+    const item = subscription.items?.data?.[0];
 
-    if (subscription.current_period_end) {
-      updateData.expiresAt = new Date(subscription.current_period_end * 1000);
+    // Portal-confirmed seat change while a cancel was pending (bug-042):
+    // Stripe's subscription_update_confirm flow applies the new quantity but
+    // leaves cancel_at_period_end untouched — the user paid the proration
+    // yet the sub would still die at renewal. A confirmed quantity change is
+    // an unambiguous "I'm staying" signal, so clear the pending cancel.
+    // (A plain cancel never changes quantity, so this can't misfire on it.)
+    let cancelAtPeriodEnd = subscription.cancel_at_period_end === true;
+    const qtyChanged =
+      item?.quantity != null &&
+      sub.usersCount != null &&
+      item.quantity !== sub.usersCount;
+    if (cancelAtPeriodEnd && qtyChanged) {
+      try {
+        const stripe = getStripe();
+        await stripe.subscriptions.update(subscription.id, {
+          cancel_at_period_end: false,
+        });
+        cancelAtPeriodEnd = false;
+        logger.info(
+          `[_handleSubscriptionUpdated] Cleared pending cancel for ${subscription.id} — seat change confirmed while cancelling`,
+        );
+      } catch (err) {
+        logger.error(
+          `[_handleSubscriptionUpdated] Failed to clear cancel_at_period_end for ${subscription.id}: ${err.message}`,
+        );
+      }
     }
-    if (subscription.current_period_start) {
-      updateData.startedAt = new Date(subscription.current_period_start * 1000);
+
+    // Stripe keeps status "active" for a sub that's merely set to cancel at
+    // period end — map that to our "cancelling" so a webhook can't clobber
+    // the cancelling state written by cancelSubscription().
+    const mappedStatus =
+      subscription.status === "canceled"
+        ? "cancelled"
+        : subscription.status === "active" && cancelAtPeriodEnd
+          ? "cancelling"
+          : subscription.status;
+    const updateData = { status: mappedStatus };
+
+    const rawPeriodEnd = getSubscriptionPeriodEnd(subscription);
+    if (rawPeriodEnd) {
+      updateData.expiresAt = new Date(rawPeriodEnd * 1000);
+    }
+    const rawPeriodStart =
+      item?.current_period_start ?? subscription.current_period_start;
+    if (rawPeriodStart) {
+      updateData.startedAt = new Date(rawPeriodStart * 1000);
     }
 
     // Sync seat count & price from Stripe — handles quantity changes made
     // via the billing portal (subscription_update_confirm), our changePlan
     // endpoint, or direct Stripe dashboard edits.
-    const item = subscription.items?.data?.[0];
     if (item) {
       const qty = item.quantity ?? null;
       const unitAmount = item.price?.unit_amount ?? null;
@@ -1673,6 +1819,27 @@ class SubscriptionService {
       }
       if (qty != null && unitAmount != null) {
         updateData.price = (qty * unitAmount) / 100;
+      }
+
+      // Seats increased (portal-confirmed upgrade or dashboard edit) →
+      // grant prorated AI credits for the new seats now (bug-044). The
+      // off-session path already updates usersCount inline before this
+      // webhook arrives, so its grant isn't repeated here (no qty diff).
+      if (qty != null && sub.usersCount != null && qty > sub.usersCount) {
+        await this._grantProratedSeatCredits({
+          userId: sub.userId,
+          addedSeats: qty - sub.usersCount,
+          isYearly: sub.productType === "team_yearly",
+          periodStart:
+            item.current_period_start ??
+            subscription.current_period_start ??
+            null,
+          periodEnd: getSubscriptionPeriodEnd(subscription),
+        }).catch((err) =>
+          logger.error(
+            `[_handleSubscriptionUpdated] prorated credit grant failed: ${err.message}`,
+          ),
+        );
       }
     }
 
@@ -1732,7 +1899,11 @@ class SubscriptionService {
     // When the caller passes their current workspace context (free / pro
     // / team), each app's Billing page sees only its own purchases.
     // Without it we return every row (admin / debug usage).
-    const where = appContext ? { userId, appContext } : { userId };
+    // Owner decision 2026-07-02: the Billing page history shows ONLY plans
+    // that ran out (status "expired") — not cancelled/active/replaced rows.
+    const where = appContext
+      ? { userId, appContext, status: "expired" }
+      : { userId, status: "expired" };
 
     const [history, total] = await Promise.all([
       prisma.subscriptionHistory.findMany({

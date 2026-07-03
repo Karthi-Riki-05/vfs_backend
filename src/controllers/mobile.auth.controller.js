@@ -16,6 +16,21 @@ function signRefreshToken(userId) {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "30d" });
 }
 
+// Resolve which app a device registration belongs to. Only "pro" or "team"
+// are ever stored — there is no "free" app: a free user is simply a
+// team-context user with no active subscription, so any non-"pro" value
+// (including the legacy "free" some clients may still send) folds into
+// "team". Same X-App-Context header convention used across every other
+// controller (see notification.controller.js resolveContext).
+function resolveDeviceAppContext(req) {
+  const raw = (
+    req.headers["x-app-context"] ||
+    req.user?.currentVersion ||
+    "team"
+  ).toLowerCase();
+  return raw === "pro" ? "pro" : "team";
+}
+
 function userPayload(user) {
   return {
     id: user.id,
@@ -345,15 +360,19 @@ class MobileAuthController {
       throw new AppError("fcmToken is required", 400, "VALIDATION_ERROR");
     }
 
+    const appContext = resolveDeviceAppContext(req);
+
     await prisma.firebaseUser.upsert({
       where: { userId_fcmToken: { userId: req.user.id, fcmToken } },
       create: {
         userId: req.user.id,
         fcmToken,
+        appContext,
         updatedAt: new Date(),
       },
       update: {
         deletedAt: null,
+        appContext,
         updatedAt: new Date(),
       },
     });
@@ -385,17 +404,20 @@ class MobileAuthController {
     if (!fcmToken) {
       throw new AppError("fcmToken is required", 400, "VALIDATION_ERROR");
     }
+    const appContext = resolveDeviceAppContext(req);
     await prisma.firebaseUser.upsert({
       where: { userId_fcmToken: { userId: req.user.id, fcmToken } },
       create: {
         userId: req.user.id,
         fcmToken,
+        appContext,
         fcmUsername: deviceName || platform || null,
         fcmUserId: deviceId || null,
         updatedAt: new Date(),
       },
       update: {
         deletedAt: null,
+        appContext,
         fcmUsername: deviceName || platform || undefined,
         fcmUserId: deviceId || undefined,
         updatedAt: new Date(),
