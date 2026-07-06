@@ -48,9 +48,20 @@ fi
 
 # ---------------------------------------------------------------
 # 1 — Database backup (db container only, no backend needed)
+# A previously-failed deploy can leave the stack down — pg data lives in
+# the pgdata volume, so it is safe (and required) to start db first;
+# otherwise every recovery deploy dies here on "service db is not running".
 # ---------------------------------------------------------------
 log "Step 1: Backing up database to $BACKUP_DIR/vfs-$TS.sql"
 mkdir -p "$BACKUP_DIR"
+if ! $DC ps --status running db 2>/dev/null | grep -q db; then
+  log "db container not running — starting it for the backup..."
+  $DC up -d db
+  for i in $(seq 1 30); do
+    $DC exec -T db pg_isready -U admin -d value_charts_db &>/dev/null && break
+    sleep 2
+  done
+fi
 $DC exec -T db pg_dump -U admin value_charts_db > "$BACKUP_DIR/vfs-$TS.sql"
 BACKUP_SIZE=$(du -h "$BACKUP_DIR/vfs-$TS.sql" | cut -f1)
 log "Backup OK ($BACKUP_SIZE)"
