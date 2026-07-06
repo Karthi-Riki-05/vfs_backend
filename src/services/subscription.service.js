@@ -1554,9 +1554,12 @@ class SubscriptionService {
     // Best-effort push notification.
     try {
       const push = require("./push.service");
+      // "team" scopes delivery to Team-app devices — omitting it broadcast
+      // this Team purchase push to the user's Pro app too (bug-052).
       await push.sendPushToUser(
         userId,
         push.builders.paymentSuccess({ planName: dbPlan?.name || "Team plan" }),
+        "team",
       );
     } catch (err) {
       logger.warn(`[push] paymentSuccess notify skipped: ${err.message}`);
@@ -1721,7 +1724,11 @@ class SubscriptionService {
     // Best-effort push notification.
     try {
       const push = require("./push.service");
-      await push.sendPushToUser(sub.userId, push.builders.paymentFailed());
+      await push.sendPushToUser(
+        sub.userId,
+        push.builders.paymentFailed(),
+        "team",
+      );
     } catch (err) {
       logger.warn(`[push] paymentFailed notify skipped: ${err.message}`);
     }

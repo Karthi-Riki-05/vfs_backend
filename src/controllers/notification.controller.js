@@ -9,8 +9,13 @@ const asyncHandler = require("../utils/asyncHandler");
 // is the team boundary; X-App-Context / currentVersion is the personal one.
 function resolveContext(req) {
   const teamId = req.headers["x-team-context"] || null;
-  const appContext =
-    req.headers["x-app-context"] || req.user.currentVersion || "team";
+  // Fallback is the platform default "team" — NOT req.user.currentVersion.
+  // currentVersion is a base-tier column ("free" for most Team subscribers,
+  // can be "pro" for users browsing the Team app), not a which-app-is-this-
+  // request signal; using it made headerless requests leak notifications
+  // across app containers (bug-052). The axios interceptor always sends
+  // X-App-Context, so this fallback only fires for non-browser callers.
+  const appContext = req.headers["x-app-context"] || "team";
   return { teamId, appContext };
 }
 
