@@ -143,6 +143,21 @@ UPDATE teams SET verify_team = 'system'
   WHERE app_context = 'pro' AND (verify_team IS NULL OR verify_team != 'system');
 UPDATE teams SET verify_team = 'system'
   WHERE app_context = 'team' AND (name IS NULL OR name = '') AND (verify_team IS NULL OR verify_team != 'system');
+-- Public marketing-site contact/support form submissions (contact_submissions).
+CREATE TABLE IF NOT EXISTS contact_submissions (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  email       TEXT NOT NULL,
+  phone       TEXT,
+  subject     TEXT,
+  message     TEXT,
+  source      TEXT NOT NULL DEFAULT 'contact',
+  ip_address  TEXT,
+  emailed     BOOLEAN NOT NULL DEFAULT false,
+  created_at  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS contact_submissions_created_at_idx ON contact_submissions (created_at);
+CREATE INDEX IF NOT EXISTS contact_submissions_source_idx     ON contact_submissions (source);
 ENDSQL
 log "Schema changes applied OK"
 

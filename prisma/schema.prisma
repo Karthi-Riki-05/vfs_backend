@@ -1710,3 +1710,24 @@ model AiCreditUsage {
   @@index([createdAt])
   @@map("ai_credit_usages")
 }
+
+// ============================================================
+// CONTACT SUBMISSION
+// Public marketing-site contact / support / feedback form entries.
+// ============================================================
+model ContactSubmission {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  phone     String?
+  subject   String?
+  message   String?
+  source    String   @default("contact")
+  ipAddress String?  @map("ip_address")
+  emailed   Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([source])
+  @@map("contact_submissions")
+}

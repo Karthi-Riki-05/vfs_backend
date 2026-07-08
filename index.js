@@ -195,6 +195,8 @@ app.use("/api/v1/account", accountRoutes);
 app.use("/api/v1/notifications", require("./src/routes/notification.routes"));
 app.use("/api/notifications", require("./src/routes/notification.routes"));
 app.use("/api/v1/auth/mobile", require("./src/routes/mobile.auth.routes"));
+app.use("/api/v1/public", require("./src/routes/public.routes"));
+app.use("/api/public", require("./src/routes/public.routes"));
 
 // Backwards-compatible aliases (old /api/ routes -> /api/v1/)
 app.use("/api/auth/mobile", require("./src/routes/mobile.auth.routes"));
