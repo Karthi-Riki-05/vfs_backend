@@ -5,22 +5,26 @@ WORKDIR /app
 # curl is needed for the HEALTHCHECK instruction below
 RUN apk add --no-cache openssl libc6-compat curl
 
-# Create non-root user before any COPY so --chown works without a large chown -R
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# Create non-root user before any COPY so --chown works without a large chown -R.
+# Also own /app itself, and switch to this user BEFORE npm install/prisma
+# generate run — otherwise those steps write root-owned files (node_modules,
+# the generated .prisma/client) that the runtime appuser can later neither
+# regenerate nor overwrite (EACCES on `prisma db push`/`generate` at runtime).
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup && chown appuser:appgroup /app
 
 COPY --chown=appuser:appgroup package*.json ./
+
+USER appuser
 
 RUN npm install
 
 COPY --chown=appuser:appgroup . .
 
-# Generate Prisma Client
+# Generate Prisma Client (as appuser — see ownership note above)
 RUN npx prisma generate
 
-# Create logs directory with correct ownership before switching to non-root user
-RUN mkdir -p /app/logs && chown appuser:appgroup /app/logs
-
-USER appuser
+# winston's File transport requires this directory to exist up front
+RUN mkdir -p /app/logs
 
 EXPOSE 5000
 
