@@ -158,6 +158,37 @@ CREATE TABLE IF NOT EXISTS contact_submissions (
 );
 CREATE INDEX IF NOT EXISTS contact_submissions_created_at_idx ON contact_submissions (created_at);
 CREATE INDEX IF NOT EXISTS contact_submissions_source_idx     ON contact_submissions (source);
+-- Billing source-of-truth column (bug: IAP purchase validation, 2026-07-13).
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'stripe';
+-- RevenueCat webhook event ledger — event_id is the idempotency key.
+CREATE TABLE IF NOT EXISTS iap_transactions (
+  id             TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider       TEXT NOT NULL DEFAULT 'revenuecat',
+  store          TEXT,
+  event_id       TEXT NOT NULL,
+  event_type     TEXT NOT NULL,
+  product_id     TEXT NOT NULL,
+  transaction_id TEXT,
+  price_cents    INTEGER,
+  currency       TEXT,
+  created_at     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS iap_transactions_event_id_key ON iap_transactions (event_id);
+CREATE INDEX IF NOT EXISTS iap_transactions_user_id_idx    ON iap_transactions (user_id);
+CREATE INDEX IF NOT EXISTS iap_transactions_product_id_idx ON iap_transactions (product_id);
+-- bug-058: dedupe existing rows before enforcing one team-wide chat group per
+-- (team, app context). NULL != NULL in Postgres, so personal/DM groups
+-- (team_id IS NULL) are never touched by either statement.
+DELETE FROM chat_groups a USING chat_groups b
+  WHERE a.id > b.id AND a.team_id = b.team_id AND a.app_context = b.app_context
+    AND a.team_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS chat_groups_team_id_app_context_key ON chat_groups (team_id, app_context);
+-- bug-058: dedupe existing group-membership rows before enforcing uniqueness
+-- (skipDuplicates: true calls in chat.service.js rely on this constraint).
+DELETE FROM chat_group_users a USING chat_group_users b
+  WHERE a.id > b.id AND a.group_id = b.group_id AND a.user_id = b.user_id;
+CREATE UNIQUE INDEX IF NOT EXISTS chat_group_users_group_id_user_id_key ON chat_group_users (group_id, user_id);
 ENDSQL
 log "Schema changes applied OK"
 
