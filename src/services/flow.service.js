@@ -1172,6 +1172,18 @@ class FlowService {
       }));
   }
 
+  // Truly public, unauthenticated read — no userId at all. Only flows the
+  // owner explicitly flagged isPublic=true (via flowsApi.publish) are
+  // reachable here; everything else 404s. Always view-only — callers must
+  // never let this path touch updateFlow/deleteFlow.
+  async getPublicFlow(id) {
+    const flow = await prisma.flow.findFirst({
+      where: { id, isPublic: true, deletedAt: null },
+    });
+    if (!flow) return null;
+    return { ...flow, permission: "view" };
+  }
+
   async getFlowByIdWithAccess(id, userId, appContext = null, teamId = null) {
     const flow = await prisma.flow.findFirst({
       where: { id, deletedAt: null },

@@ -311,6 +311,7 @@ model User {
   subscriptionHistory  SubscriptionHistory[]
   transactionLogs      TransactionLog[]
   devices              UserDevice[]
+  iapTransactions      IapTransaction[]
 
   @@index([legacyVsId])
   @@index([companyId])
@@ -516,6 +517,10 @@ model Subscription {
   scheduledTeamMembers    Int?        @map("scheduled_team_members")
   scheduledActivationDate DateTime?   @map("scheduled_activation_date")
   appContext              UserVersion @default(free) @map("app_context")
+  // Billing source of truth: 'stripe' (web checkout) or 'revenuecat' (mobile
+  // IAP). Lifecycle actions (cancel/seat change) must go through the owning
+  // provider — the other side is read-only for this subscription.
+  provider                String      @default("stripe")
 
   @@index([appType])
   @@index([status])
@@ -954,6 +959,10 @@ model ChatGroup {
   @@index([userId])
   @@index([appContext])
   @@index([teamId])
+  // bug-058: at most one team-wide conversation per (team, app context).
+  // Postgres treats NULL != NULL, so DM/personal groups (teamId: null) are
+  // never constrained by this — only real per-team rows are.
+  @@unique([teamId, appContext])
   @@map("chat_groups")
 }
 
@@ -975,6 +984,10 @@ model ChatGroupUser {
 
   @@index([userId])
   @@index([groupId])
+  // bug-058: `skipDuplicates: true` calls throughout chat.service.js rely on
+  // this constraint to actually detect duplicates — without it they were
+  // silent no-ops, letting the same user get added to a group twice.
+  @@unique([groupId, userId])
   @@map("chat_group_users")
 }
 
@@ -1712,8 +1725,34 @@ model AiCreditUsage {
 }
 
 // ============================================================
+// 40. IAP TRANSACTIONS — RevenueCat webhook event ledger
+// One row per processed RevenueCat event. The unique eventId is
+// the idempotency key: a redelivered webhook hits the constraint
+// and is skipped, so entitlements are never granted twice.
+// ============================================================
+model IapTransaction {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider      String   @default("revenuecat")
+  store         String? // APP_STORE | PLAY_STORE (RevenueCat event.store)
+  eventId       String   @unique @map("event_id")
+  eventType     String   @map("event_type")
+  productId     String   @map("product_id")
+  transactionId String?  @map("transaction_id")
+  priceCents    Int?     @map("price_cents")
+  currency      String?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([productId])
+  @@map("iap_transactions")
+}
+
+// ============================================================
 // CONTACT SUBMISSION
 // Public marketing-site contact / support / feedback form entries.
+// No user relation — submitters are anonymous visitors.
 // ============================================================
 model ContactSubmission {
   id        String   @id @default(cuid())
@@ -1722,9 +1761,9 @@ model ContactSubmission {
   phone     String?
   subject   String?
   message   String?
-  source    String   @default("contact")
+  source    String   @default("contact") // contact | support | feedback
   ipAddress String?  @map("ip_address")
-  emailed   Boolean  @default(false)
+  emailed   Boolean  @default(false) // whether the notification email was sent
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([createdAt])

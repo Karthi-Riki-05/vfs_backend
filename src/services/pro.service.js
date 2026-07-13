@@ -68,6 +68,45 @@ async function logFlowAddonHistory(
 
 class ProService {
   /**
+   * Idempotent get-or-create for a user's personal Pro workspace team
+   * (appContext='pro'). Every Pro activation path (mobile grant, web
+   * verify-purchase, Stripe webhook) MUST call this — without it,
+   * getAppStatus()'s flow-count falls back to teamId:null (the user's
+   * personal/Team-app flows), which double-counts unrelated flows as Pro
+   * usage. See bug-056.
+   *
+   * @param {string} userId
+   * @param {import('@prisma/client').Prisma.TransactionClient} [tx] optional transaction client
+   */
+  async _ensureProTeam(userId, tx = prisma) {
+    const existing = await tx.team.findFirst({
+      where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
+      select: { id: true, name: true },
+    });
+    if (existing) return existing;
+
+    const user = await tx.user.findUnique({
+      where: { id: userId },
+      select: { name: true },
+    });
+    const team = await tx.team.create({
+      data: {
+        name: user?.name ? `${user.name}'s Pro Team` : "My Pro Team",
+        teamOwnerId: userId,
+        appContext: "pro",
+        status: "active",
+        countMem: 1,
+        verifyTeam: "system",
+      },
+      select: { id: true, name: true },
+    });
+    await tx.teamMember.create({
+      data: { teamId: team.id, userId, role: "OWNER" },
+    });
+    return team;
+  }
+
+  /**
    * Grant Pro from the mobile app (Flutter WebView), with NO Stripe charge.
    * The purchase already happened in the App Store / Play Store, so this is
    * called automatically by ProGuard once a `?app=pro` user is authenticated.
@@ -377,6 +416,9 @@ class ProService {
         "[ProService.verifyPurchase] Already active for user:",
         userId,
       );
+      // Backfill: a user activated before this fix may still be missing
+      // their Pro team (bug-056). Ensure it exists even on the fast path.
+      await this._ensureProTeam(userId);
       return { verified: true, alreadyActive: true };
     }
 
@@ -391,6 +433,11 @@ class ProService {
         isLegacyPro: false,
       },
     });
+
+    // Bug-056: the Pro workspace team must exist before the user ever hits
+    // the Pro dashboard, or getAppStatus() falls back to counting their
+    // personal (teamId:null) flows as Pro usage.
+    await this._ensureProTeam(userId);
 
     // Grant 200 AI credits/month for new Pro ($5) — idempotent, webhook may also do this.
     const nextReset = new Date();
@@ -680,6 +727,9 @@ class ProService {
       logger.info(
         `[handleProUpgradeWebhook] Pro already activated for user ${userId}, skipping duplicate webhook`,
       );
+      // Backfill: bug-056 — ensure the Pro team exists even on the
+      // already-processed path (e.g. the browser's verifyPurchase call won).
+      await this._ensureProTeam(userId);
       return { alreadyProcessed: true };
     }
 
@@ -711,6 +761,11 @@ class ProService {
         },
         tx,
       );
+
+      // Bug-056: create the Pro workspace team in the same transaction so
+      // Pro flow-usage never falls back to counting the user's personal
+      // (teamId:null) flows.
+      await this._ensureProTeam(userId, tx);
     });
 
     logger.info(`[handleProUpgradeWebhook] Pro activated for user ${userId}`);

@@ -131,4 +131,65 @@ function isSvgDangerous(svgContent) {
   return DANGEROUS_PATTERNS.some((p) => lower.includes(p.toLowerCase()));
 }
 
-module.exports = { sanitizeSvg, isSvgDangerous };
+// General-purpose sanitizer for Shape content (types: html, shape, stencil).
+// Unlike sanitizeSvg() above, this has NO "must contain <svg>" gate — that
+// guard let plain-HTML shape content (a <script> tag with no <svg> wrapper)
+// pass through completely unsanitized before reaching dangerouslySetInnerHTML
+// in ShapeCard.tsx and the public /shapes/view/:id page. Runs the same
+// regex pass unconditionally, then DOMPurify with no tag-profile restriction
+// (so ordinary HTML tags survive) but the same FORBID_TAGS/FORBID_ATTR
+// denylist. Safe to run on `image` type's base64 data-URI content too — it
+// simply won't match anything and passes through unchanged.
+const DOMPURIFY_HTML_CONFIG = {
+  FORBID_TAGS: [
+    "script",
+    "object",
+    "embed",
+    "link",
+    "meta",
+    "iframe",
+    "form",
+    "input",
+    "button",
+  ],
+  FORBID_ATTR: [
+    "onload",
+    "onclick",
+    "onerror",
+    "onmouseover",
+    "onfocus",
+    "onblur",
+    "onchange",
+    "onsubmit",
+    "action",
+    "formaction",
+  ],
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|ftp):\/\/|data:image\/)/i,
+};
+
+function sanitizeShapeContent(content) {
+  if (!content || typeof content !== "string") return content;
+
+  let clean = regexSanitize(content);
+
+  const purify = tryGetDOMPurify();
+  if (purify) {
+    try {
+      clean = purify.sanitize(clean, DOMPURIFY_HTML_CONFIG);
+    } catch (err) {
+      console.warn(
+        "[Security] DOMPurify pass skipped (shape content):",
+        err.message,
+      );
+    }
+  }
+
+  if (clean !== content) {
+    console.warn(
+      "[Security] Shape content sanitised — removed potentially dangerous content",
+    );
+  }
+  return clean;
+}
+
+module.exports = { sanitizeSvg, isSvgDangerous, sanitizeShapeContent };

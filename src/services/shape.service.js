@@ -1,5 +1,6 @@
 const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
+const { sanitizeShapeContent } = require("../utils/sanitizeSvg");
 
 class ShapeService {
   async getAllShapes(userId, appContext = "team", teamId = null) {
@@ -158,6 +159,15 @@ class ShapeService {
     return shape;
   }
 
+  // Truly public, unauthenticated read — no userId at all. Only shapes the
+  // owner explicitly flagged isPublic=true are reachable here.
+  async getPublicShape(id) {
+    const shape = await prisma.shape.findFirst({
+      where: { id, isPublic: true, deletedAt: null },
+    });
+    return shape;
+  }
+
   async createShape(userId, data, appContext) {
     let teamId = data.teamId || null;
 
@@ -175,11 +185,14 @@ class ShapeService {
       data: {
         name: data.name,
         type: data.type,
-        content: data.content,
+        // Sanitized here — content/xmlContent render via
+        // dangerouslySetInnerHTML in ShapeCard.tsx and the public
+        // /shapes/view/:id viewer with no other sanitization in the path.
+        content: sanitizeShapeContent(data.content),
         textAlignment: data.textAlignment,
         groupId: data.groupId,
         category: data.category,
-        xmlContent: data.xmlContent,
+        xmlContent: sanitizeShapeContent(data.xmlContent),
         thumbnail: data.thumbnail,
         isPublic: data.isPublic || false,
         ownerId: userId,
@@ -198,12 +211,14 @@ class ShapeService {
     const updateData = {};
     if (data.name !== undefined) updateData.name = data.name;
     if (data.type !== undefined) updateData.type = data.type;
-    if (data.content !== undefined) updateData.content = data.content;
+    if (data.content !== undefined)
+      updateData.content = sanitizeShapeContent(data.content);
     if (data.textAlignment !== undefined)
       updateData.textAlignment = data.textAlignment;
     if (data.groupId !== undefined) updateData.groupId = data.groupId;
     if (data.category !== undefined) updateData.category = data.category;
-    if (data.xmlContent !== undefined) updateData.xmlContent = data.xmlContent;
+    if (data.xmlContent !== undefined)
+      updateData.xmlContent = sanitizeShapeContent(data.xmlContent);
     if (data.thumbnail !== undefined) updateData.thumbnail = data.thumbnail;
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
 
@@ -264,7 +279,7 @@ class ShapeService {
       data: {
         name: inlineShape.name,
         type: "shape",
-        xmlContent: inlineShape.xmlContent || null,
+        xmlContent: sanitizeShapeContent(inlineShape.xmlContent) || null,
         thumbnail: inlineShape.thumbnail || null,
         ownerId: userId,
         appContext: appContext || "team",
@@ -444,13 +459,15 @@ class ShapeService {
       data: {
         name: source.name + " (Copy)",
         type: source.type,
-        content: source.content,
+        // Re-sanitize on copy too — defense-in-depth for any shape stored
+        // before this sanitization existed.
+        content: sanitizeShapeContent(source.content),
         textAlignment: source.textAlignment,
         ratioLock: source.ratioLock,
         shapeType: source.shapeType,
         groupId: source.groupId,
         category: source.category,
-        xmlContent: source.xmlContent,
+        xmlContent: sanitizeShapeContent(source.xmlContent),
         thumbnail: source.thumbnail,
         isPublic: false,
         ownerId: userId,

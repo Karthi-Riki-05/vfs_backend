@@ -156,24 +156,46 @@ class ChatService {
 
     const isDmCreate =
       !!data.isDirect && !data.teamId && memberIds.length === 2;
-    const group = await prisma.chatGroup.create({
-      data: {
-        // For DMs we store an empty title; display name is computed per-user
-        // by getSidebarData. Named groups keep the supplied title; default to
-        // "Group" if missing so the non-null column stays valid.
-        title: isDmCreate ? "" : data.title?.trim() || "Group",
-        userId,
-        flowId: data.flowId || 0,
-        flowItemId: data.flowItemId || "",
-        appType: data.appType || null,
-        appContext,
-        teamId: data.teamId || null,
-        // Schema columns are nullable with no @default — set explicitly so
-        // sidebar ordering (updatedAt desc) doesn't push new groups last.
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-    });
+    let group;
+    try {
+      group = await prisma.chatGroup.create({
+        data: {
+          // For DMs we store an empty title; display name is computed per-user
+          // by getSidebarData. Named groups keep the supplied title; default to
+          // "Group" if missing so the non-null column stays valid.
+          title: isDmCreate ? "" : data.title?.trim() || "Group",
+          userId,
+          flowId: data.flowId || 0,
+          flowItemId: data.flowItemId || "",
+          appType: data.appType || null,
+          appContext,
+          teamId: data.teamId || null,
+          // Schema columns are nullable with no @default — set explicitly so
+          // sidebar ordering (updatedAt desc) doesn't push new groups last.
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+    } catch (err) {
+      // bug-058: the findFirst dedup check above is not atomic — a
+      // concurrent request for the same (teamId, appContext) can win the
+      // race and create its group first. The `@@unique([teamId, appContext])`
+      // constraint makes the loser's create() fail instead of silently
+      // producing a duplicate; recover by joining the winner's group.
+      if (err.code === "P2002" && data.teamId) {
+        const winner = await prisma.chatGroup.findFirst({
+          where: { teamId: data.teamId, appContext, deletedAt: null },
+        });
+        if (winner) {
+          await prisma.chatGroupUser.createMany({
+            data: [{ userId, groupId: winner.id }],
+            skipDuplicates: true,
+          });
+          return winner;
+        }
+      }
+      throw err;
+    }
 
     // Add all members (creator + recipients) in one batch, skipping any
     // pre-existing rows defensively.

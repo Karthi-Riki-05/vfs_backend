@@ -49,7 +49,7 @@ async function sendTeamInviteEmail({
 }) {
   const isPro = appContext === "pro";
   const appName = isPro ? "ValueChart Pro" : "ValueChart";
-  const brandColor = isPro ? "#D97706" : "#3CB371";
+  const brandColor = isPro ? "#D97706" : "#34A881";
   const brandBadge = isPro ? " Pro" : "";
   const safeTeamName = escapeHtml(teamName || "their team");
   const safeInviterName = escapeHtml(inviterName || "A team member");
@@ -76,10 +76,12 @@ async function sendTeamInviteEmail({
         <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
           <tr>
             <td style="background-color:${brandColor}; padding:32px 40px; text-align:center;">
-              <h1 style="color:#ffffff; margin:0; font-size:24px; font-weight:600;">
-                ValueChart${brandBadge}
-              </h1>
-              <p style="color:rgba(255,255,255,0.9); margin:8px 0 0 0; font-size:14px;">
+              <table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 auto 14px;">
+                <tr><td style="background-color:#ffffff; border-radius:12px; padding:8px 16px;">
+                  <img src="${APP_URL()}/images/${isPro ? "vc_pro.png" : "image.png"}" alt="ValueChart${brandBadge}" width="150" style="display:block; border:0; height:auto;">
+                </td></tr>
+              </table>
+              <p style="color:rgba(255,255,255,0.9); margin:0; font-size:14px;">
                 Team Collaboration Platform
               </p>
             </td>
@@ -176,7 +178,7 @@ async function sendFlowShareEmail({
   permission,
 }) {
   const appName = "ValueChart";
-  const brandColor = "#3CB371";
+  const brandColor = "#34A881";
   const permLabel = permission === "edit" ? "Can Edit" : "View Only";
   const permDesc =
     permission === "edit"
@@ -206,8 +208,12 @@ async function sendFlowShareEmail({
         <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
           <tr>
             <td style="background-color:${brandColor}; padding:32px 40px; text-align:center;">
-              <h1 style="color:#ffffff; margin:0; font-size:24px; font-weight:600;">${appName}</h1>
-              <p style="color:rgba(255,255,255,0.9); margin:8px 0 0 0; font-size:14px;">AI-Powered Diagramming</p>
+              <table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 auto 14px;">
+                <tr><td style="background-color:#ffffff; border-radius:12px; padding:8px 16px;">
+                  <img src="${APP_URL()}/images/image.png" alt="${appName}" width="150" style="display:block; border:0; height:auto;">
+                </td></tr>
+              </table>
+              <p style="color:rgba(255,255,255,0.9); margin:0; font-size:14px;">AI-Powered Diagramming</p>
             </td>
           </tr>
           <tr>
@@ -297,7 +303,7 @@ async function sendFlowShareProRequiredEmail({
   upgradeUrl,
 }) {
   const appName = "ValueChart";
-  const brandColor = "#3CB371";
+  const brandColor = "#34A881";
   const safeSharerName = escapeHtml(sharerName || "Someone");
   const safeFlowName = escapeHtml(flowName || "Untitled Flow");
 
@@ -322,8 +328,12 @@ async function sendFlowShareProRequiredEmail({
         <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
           <tr>
             <td style="background-color:${brandColor}; padding:32px 40px; text-align:center;">
-              <h1 style="color:#ffffff; margin:0; font-size:24px; font-weight:600;">${appName}</h1>
-              <p style="color:rgba(255,255,255,0.9); margin:8px 0 0 0; font-size:14px;">AI-Powered Diagramming</p>
+              <table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 auto 14px;">
+                <tr><td style="background-color:#ffffff; border-radius:12px; padding:8px 16px;">
+                  <img src="${APP_URL()}/images/image.png" alt="${appName}" width="150" style="display:block; border:0; height:auto;">
+                </td></tr>
+              </table>
+              <p style="color:rgba(255,255,255,0.9); margin:0; font-size:14px;">AI-Powered Diagramming</p>
             </td>
           </tr>
           <tr>
@@ -424,9 +434,13 @@ async function sendPasswordResetEmail({ to, name, resetUrl }) {
       <td align="center">
         <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
           <tr>
-            <td style="background-color:#3CB371; padding:32px 40px; text-align:center;">
-              <h1 style="color:#ffffff; margin:0; font-size:24px; font-weight:600;">ValueChart</h1>
-              <p style="color:rgba(255,255,255,0.9); margin:8px 0 0 0; font-size:14px;">AI-Powered Diagramming</p>
+            <td style="background-color:#34A881; padding:32px 40px; text-align:center;">
+              <table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 auto 14px;">
+                <tr><td style="background-color:#ffffff; border-radius:12px; padding:8px 16px;">
+                  <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="150" style="display:block; border:0; height:auto;">
+                </td></tr>
+              </table>
+              <p style="color:rgba(255,255,255,0.9); margin:0; font-size:14px;">AI-Powered Diagramming</p>
             </td>
           </tr>
           <tr>
@@ -436,7 +450,7 @@ async function sendPasswordResetEmail({ to, name, resetUrl }) {
               <p style="color:#555555; font-size:16px; line-height:1.6;">We received a request to reset your password. Click the button below to create a new one:</p>
               <div style="text-align:center; margin:32px 0;">
                 <a href="${resetUrl}"
-                   style="display:inline-block; background-color:#3CB371; color:#ffffff; text-decoration:none; padding:14px 48px; border-radius:8px; font-size:16px; font-weight:600;">
+                   style="display:inline-block; background-color:#34A881; color:#ffffff; text-decoration:none; padding:14px 48px; border-radius:8px; font-size:16px; font-weight:600;">
                   Reset Password
                 </a>
               </div>
@@ -510,9 +524,13 @@ async function sendVerificationEmail({ to, name, otp }) {
       <td align="center">
         <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
           <tr>
-            <td style="background-color:#3CB371; padding:32px 40px; text-align:center;">
-              <h1 style="color:#ffffff; margin:0; font-size:24px; font-weight:600;">ValueChart</h1>
-              <p style="color:rgba(255,255,255,0.9); margin:8px 0 0 0; font-size:14px;">AI-Powered Diagramming</p>
+            <td style="background-color:#34A881; padding:32px 40px; text-align:center;">
+              <table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 auto 14px;">
+                <tr><td style="background-color:#ffffff; border-radius:12px; padding:8px 16px;">
+                  <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="150" style="display:block; border:0; height:auto;">
+                </td></tr>
+              </table>
+              <p style="color:rgba(255,255,255,0.9); margin:0; font-size:14px;">AI-Powered Diagramming</p>
             </td>
           </tr>
           <tr>
@@ -521,7 +539,7 @@ async function sendVerificationEmail({ to, name, otp }) {
               <p style="color:#555555; font-size:16px; line-height:1.6;">Hi ${safeName},</p>
               <p style="color:#555555; font-size:16px; line-height:1.6;">Use the code below to verify your email and activate your ValueChart account.</p>
               <div style="text-align:center; margin:32px 0;">
-                <div style="display:inline-block; background:#F0FDF4; border:2px solid #3CB371; border-radius:12px; padding:18px 32px; font-size:32px; font-weight:700; letter-spacing:8px; color:#15803D; font-family:'Courier New', monospace;">
+                <div style="display:inline-block; background:#F0FDF4; border:2px solid #34A881; border-radius:12px; padding:18px 32px; font-size:32px; font-weight:700; letter-spacing:8px; color:#15803D; font-family:'Courier New', monospace;">
                   ${otp}
                 </div>
               </div>
@@ -600,14 +618,17 @@ const emailTemplates = {
     subject: "Payment Confirmed — ValueChart",
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
-  <div style="text-align:center;padding:24px 0;background:#3CB371;border-radius:8px 8px 0 0">
+  <div style="text-align:center;padding:24px 0;background:#34A881;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">Payment Confirmed ✅</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
     <p style="font-size:15px">Hi ${escapeHtml(user.name || "there")},</p>
     <p style="font-size:15px;line-height:1.6">Your payment of <strong>$${(amountCents / 100).toFixed(2)}</strong> for <strong>${escapeHtml(planName)}</strong> was successful. Your subscription is now active.</p>
     <div style="text-align:center;margin:32px 0">
-      <a href="${APP_URL()}/dashboard/subscription" style="background:#3CB371;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">View Subscription</a>
+      <a href="${APP_URL()}/dashboard/subscription" style="background:#34A881;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">View Subscription</a>
     </div>
     <p style="color:#888;font-size:12px;margin-top:24px;border-top:1px solid #eee;padding-top:16px">ValueChart — We Add Value To Your Business</p>
   </div>
@@ -620,6 +641,9 @@ const emailTemplates = {
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
   <div style="text-align:center;padding:24px 0;background:#ff4d4f;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">Payment Failed ⚠️</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
@@ -640,13 +664,16 @@ const emailTemplates = {
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
   <div style="text-align:center;padding:24px 0;background:#F59E0B;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">Pack Expires in 7 Days</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
     <p>Hi ${escapeHtml(user.name || "there")},</p>
     <p>Your <strong>${packLabel}</strong> pack expires on <strong>${new Date(expiresAt).toLocaleDateString()}</strong>. Renew now to keep all your flows accessible.</p>
     <div style="text-align:center;margin:32px 0">
-      <a href="${APP_URL()}/dashboard/subscription" style="background:#3CB371;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Renew Now</a>
+      <a href="${APP_URL()}/dashboard/subscription" style="background:#34A881;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Renew Now</a>
     </div>
     <p style="color:#888;font-size:12px">If your pack expires you'll get a 3-day grace period; after that flows beyond your 10-flow free limit will move to trash.</p>
   </div>
@@ -659,6 +686,9 @@ const emailTemplates = {
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
   <div style="text-align:center;padding:24px 0;background:#FF7A45;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">3 Days Until Expiry</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
@@ -677,6 +707,9 @@ const emailTemplates = {
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
   <div style="text-align:center;padding:24px 0;background:#cf1322;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">Expires Tomorrow</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
@@ -695,6 +728,9 @@ const emailTemplates = {
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
   <div style="text-align:center;padding:24px 0;background:#cf1322;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">Pack Expired — Action Required</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
@@ -714,6 +750,9 @@ const emailTemplates = {
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
   <div style="text-align:center;padding:24px 0;background:#cf1322;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">Pick 10 Flows to Keep</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
@@ -732,14 +771,17 @@ const emailTemplates = {
     subject: "✅ Your flows have been restored",
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
-  <div style="text-align:center;padding:24px 0;background:#3CB371;border-radius:8px 8px 0 0">
+  <div style="text-align:center;padding:24px 0;background:#34A881;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">Flows Restored ✅</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
     <p>Hi ${escapeHtml(user.name || "there")},</p>
     <p>Welcome back! We've restored <strong>${restoredCount}</strong> flow${restoredCount === 1 ? "" : "s"} from trash now that your pack is active again.</p>
     <div style="text-align:center;margin:32px 0">
-      <a href="${APP_URL()}/dashboard/flows" style="background:#3CB371;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Open Flows</a>
+      <a href="${APP_URL()}/dashboard/flows" style="background:#34A881;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Open Flows</a>
     </div>
   </div>
 </div>`,
@@ -751,6 +793,9 @@ const emailTemplates = {
     html: `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fff">
   <div style="text-align:center;padding:24px 0;background:#666;border-radius:8px 8px 0 0">
+    <div style="display:inline-block;background:#fff;border-radius:10px;padding:6px 14px;margin-bottom:10px">
+      <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="120" style="display:block;border:0;height:auto">
+    </div>
     <h1 style="color:#fff;margin:0;font-size:22px">Subscription Cancelled</h1>
   </div>
   <div style="padding:32px 24px;border:1px solid #eee;border-top:0;border-radius:0 0 8px 8px">
@@ -758,7 +803,7 @@ const emailTemplates = {
     <p style="font-size:15px;line-height:1.6">Your subscription has been cancelled.${expiresAt ? ` You'll keep access until <strong>${new Date(expiresAt).toLocaleDateString()}</strong>.` : ""}</p>
     <p style="font-size:14px;color:#666">After that, your account will return to the free plan.</p>
     <div style="text-align:center;margin:32px 0">
-      <a href="${APP_URL()}/dashboard/subscription" style="background:#3CB371;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Reactivate Subscription</a>
+      <a href="${APP_URL()}/dashboard/subscription" style="background:#34A881;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:600">Reactivate Subscription</a>
     </div>
   </div>
 </div>`,
