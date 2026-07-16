@@ -49,9 +49,20 @@ const IAP_PRODUCTS = {
   "com.valuecharts.app.year_5": { type: "team", seats: 5, period: "yearly" },
   "com.valuecharts.app.year_10": { type: "team", seats: 10, period: "yearly" },
 
-  // ── Legacy ANDROID team subscriptions (2022, live in Play Console under
+  // ── Legacy ANDROID team subscriptions (live in Play Console under
   // com.valuecharts.app) ── same Phase-1 purpose as the iOS set above.
+  // mth_5/mth_10/yr_5/yr_10 confirmed 2026-07-16 from the live native
+  // Android app's own Kotlin source (skuTeamMth5/Mth10/Yr5/Yr10) — mirrors
+  // the iOS 4-tier pattern with Android's mth_/yr_ naming. The
+  // mth_15/20/25/30/35/40/100 entries below were an earlier guess read off
+  // a Play Console screenshot (which can list legacy/unused products the
+  // shipped app never references) — kept mapped as a harmless safety net
+  // for historical purchase restoration, but NOT shown as purchasable in
+  // the app UI (see frontend/lib/iapBridge.ts LEGACY_ANDROID_TEAM_PLANS).
+  "com.valuecharts.app.mth_5": { type: "team", seats: 5, period: "monthly" },
   "com.valuecharts.app.mth_10": { type: "team", seats: 10, period: "monthly" },
+  "com.valuecharts.app.yr_5": { type: "team", seats: 5, period: "yearly" },
+  "com.valuecharts.app.yr_10": { type: "team", seats: 10, period: "yearly" },
   "com.valuecharts.app.mth_15": { type: "team", seats: 15, period: "monthly" },
   "com.valuecharts.app.mth_20": { type: "team", seats: 20, period: "monthly" },
   "com.valuecharts.app.mth_25": { type: "team", seats: 25, period: "monthly" },
