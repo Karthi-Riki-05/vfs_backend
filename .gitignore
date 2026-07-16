@@ -33,6 +33,10 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# IAP credentials — service-account keys, never committed (see IAP_CONTRACT.md)
+secrets/
+*.json.key
+
 # database backups
 /backups
 

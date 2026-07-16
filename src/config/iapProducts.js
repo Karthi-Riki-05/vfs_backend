@@ -40,6 +40,26 @@ const IAP_PRODUCTS = {
   valuechart_pro_yearly: { type: "pro_lifetime" },
   valuechart_free: { type: "noop" },
 
+  // ── Legacy iOS team subscriptions (old native app, live in App Store
+  // Connect) ── Phase-1 pipeline testing + historical restores. No active
+  // subscribers (owner-confirmed 2026-07-10); deactivate in the console once
+  // the new team_* products exist. Mapped to the same team entitlements.
+  "com.valuecharts.app.mon_5": { type: "team", seats: 5, period: "monthly" },
+  "com.valuecharts.app.mon_10": { type: "team", seats: 10, period: "monthly" },
+  "com.valuecharts.app.year_5": { type: "team", seats: 5, period: "yearly" },
+  "com.valuecharts.app.year_10": { type: "team", seats: 10, period: "yearly" },
+
+  // ── Legacy ANDROID team subscriptions (2022, live in Play Console under
+  // com.valuecharts.app) ── same Phase-1 purpose as the iOS set above.
+  "com.valuecharts.app.mth_10": { type: "team", seats: 10, period: "monthly" },
+  "com.valuecharts.app.mth_15": { type: "team", seats: 15, period: "monthly" },
+  "com.valuecharts.app.mth_20": { type: "team", seats: 20, period: "monthly" },
+  "com.valuecharts.app.mth_25": { type: "team", seats: 25, period: "monthly" },
+  "com.valuecharts.app.mth_30": { type: "team", seats: 30, period: "monthly" },
+  "com.valuecharts.app.mth_35": { type: "team", seats: 35, period: "monthly" },
+  "com.valuecharts.app.mth_40": { type: "team", seats: 40, period: "monthly" },
+  "com.valuecharts.app.mth_100": { type: "team", seats: 100, period: "monthly" },
+
   // ── Flow packs (30-day consumables, Pro app) ───────────────────────────
   // flowPackage/flowCount mirror the Stripe checkout metadata consumed by
   // proService.handleExtraFlowsWebhook.
