@@ -30,8 +30,16 @@ exports.getConsent = asyncHandler(async (req, res) => {
 exports.setConsent = asyncHandler(async (req, res) => {
   const { consented } = req.body;
   const ipAddress = req.ip || req.headers["x-forwarded-for"] || "";
-  await aiAssistantService.setConsent(req.user.id, consented, ipAddress);
-  res.json({ success: true, data: { consented } });
+  // Pass the active team context so a member's action in a team workspace
+  // never mutates their PERSONAL consent row (Issue #5).
+  const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+  const result = await aiAssistantService.setConsent(
+    req.user.id,
+    consented,
+    ipAddress,
+    teamId,
+  );
+  res.json({ success: true, data: result });
 });
 
 exports.getHistory = asyncHandler(async (req, res) => {

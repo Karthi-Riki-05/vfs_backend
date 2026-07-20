@@ -810,6 +810,38 @@ class PaymentService {
     return { paymentMethods, defaultPaymentMethodId: defaultPmId };
   }
 
+  // Proactive duplicate check for the custom card-entry form — called with a
+  // fingerprint from a freshly-tokenized (not yet attached) PaymentMethod, so
+  // the form can block the save before it ever becomes a real saved card.
+  // Cards aren't stored in our DB, so this is a live Stripe lookup, same
+  // pattern as listPaymentMethods above.
+  // paymentMethodId is a freshly-tokenized, NOT YET ATTACHED PaymentMethod
+  // (created client-side via stripe.createPaymentMethod). Its card.fingerprint
+  // is never returned to the browser (Stripe.js omits it from publishable-key
+  // responses) — it must be read back here, server-side, with the secret key.
+  async checkDuplicateCard(userId, paymentMethodId) {
+    const stripe = getStripe();
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+    if (!user.stripeCustomerId) return { isDuplicate: false };
+
+    const newPm = await stripe.paymentMethods.retrieve(paymentMethodId);
+    const fingerprint = newPm.card?.fingerprint;
+    if (!fingerprint) return { isDuplicate: false };
+
+    const pmList = await stripe.paymentMethods.list({
+      customer: user.stripeCustomerId,
+      type: "card",
+      limit: 100,
+    });
+    const match = pmList.data.find((pm) => pm.card?.fingerprint === fingerprint);
+    if (!match) return { isDuplicate: false };
+    return {
+      isDuplicate: true,
+      existingCard: { brand: match.card.brand, last4: match.card.last4 },
+    };
+  }
+
   async setDefaultCard(userId, paymentMethodId) {
     const stripe = getStripe();
     const user = await prisma.user.findUnique({ where: { id: userId } });

@@ -321,6 +321,10 @@ class ChatService {
             where: { receiverId: { not: undefined } },
             select: { receiverId: true, isRead: true },
           },
+          // B15: include existing reactions so they render on load/refresh.
+          // Previously omitted → the frontend only ever saw reactions via the
+          // live socket echo, so they never showed after a reload.
+          reactions: { select: { emoji: true, userId: true } },
         },
       }),
       prisma.chatMessage.count({ where: whereClause }),
@@ -894,13 +898,29 @@ class ChatService {
     const myTeamIds = myTeams.map((t) => t.id);
 
     if (myTeamIds.length === 0) {
-      return {
-        teams: [],
-        groups: [],
-        contacts: [],
-        allGroups: [],
-        locked: true,
-      };
+      // B48: no NON-SYSTEM team in this app context — but a standalone
+      // (teamId=null) group/DM in this appContext still counts. A standalone
+      // Pro user's only "pro team" is the system billing shell (verifyTeam=
+      // 'system', excluded above), so the old hard lock hid the pro groups
+      // they created. Only lock when there are ALSO no standalone groups here;
+      // otherwise fall through so the main query surfaces them (teams stays []).
+      const standaloneCount = await prisma.chatGroup.count({
+        where: {
+          deletedAt: null,
+          teamId: null,
+          appContext,
+          OR: [{ userId }, { members: { some: { userId } } }],
+        },
+      });
+      if (standaloneCount === 0) {
+        return {
+          teams: [],
+          groups: [],
+          contacts: [],
+          allGroups: [],
+          locked: true,
+        };
+      }
     }
 
     // Active team (validated) sorts first so the current workspace stays on

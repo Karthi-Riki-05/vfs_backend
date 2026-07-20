@@ -237,8 +237,13 @@ Error/Negative:
   rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;
 
 Arrow/Edge:
-  edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;
-  jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;
+  edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;
+  IMPORTANT: do NOT set fixed exitX/exitY/entryX/entryY on edges. Leaving the
+  connection points unset lets draw.io attach each arrow to the nearest side of
+  the source/target node (floating connection points), so arrows stay aligned
+  for branches and left-right layouts. Fixed exit/entry (e.g. exitX=0.5;exitY=1)
+  forces every arrow out the bottom-centre and into the top-centre, which
+  detaches/misaligns connectors on any non-vertical flow (decision branches).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LAYOUT RULES
@@ -344,13 +349,49 @@ class AiAssistantService {
     };
   }
 
-  async setConsent(userId, consented, ipAddress) {
+  async setConsent(userId, consented, ipAddress, activeTeamId = null) {
+    // Issue #5 (Fix_issues.md): AI consent is ONE row per user with no team
+    // dimension. getConsent() is team-aware (a team's consent is governed by
+    // the TEAM OWNER's row), but setConsent used to be blind to context and
+    // always wrote the caller's personal row. A member accepting/declining
+    // (or merely dismissing) the re-prompt shown in a team workspace then
+    // silently overwrote the personal consent they'd granted in their own
+    // workspace. Guard: a member operating in a team context can NOT change
+    // consent — team consent is owner-controlled — so we no-op on their
+    // personal row and return the owner-governed state read-only.
+    if (activeTeamId) {
+      const team = await prisma.team.findFirst({
+        where: { id: activeTeamId, deletedAt: null },
+        select: { teamOwnerId: true },
+      });
+      if (team && team.teamOwnerId !== userId) {
+        const member = await prisma.teamMember.findFirst({
+          where: { teamId: activeTeamId, userId },
+          select: { id: true },
+        });
+        if (member) {
+          const ownerConsent = await prisma.aiConsent.findUnique({
+            where: { userId: team.teamOwnerId },
+          });
+          return {
+            consented: ownerConsent
+              ? ownerConsent.consented && !ownerConsent.revokedAt
+              : false,
+            source: "team",
+            readOnly: true,
+          };
+        }
+      }
+    }
+
+    // Personal context, or the caller IS the team owner (their row is what
+    // governs team consent) → write their own row.
     const existing = await prisma.aiConsent.findUnique({
       where: { userId },
     });
 
     if (existing) {
-      return prisma.aiConsent.update({
+      await prisma.aiConsent.update({
         where: { userId },
         data: {
           consented,
@@ -359,16 +400,17 @@ class AiAssistantService {
           ipAddress,
         },
       });
+    } else {
+      await prisma.aiConsent.create({
+        data: {
+          userId,
+          consented,
+          consentedAt: consented ? new Date() : null,
+          ipAddress,
+        },
+      });
     }
-
-    return prisma.aiConsent.create({
-      data: {
-        userId,
-        consented,
-        consentedAt: consented ? new Date() : null,
-        ipAddress,
-      },
-    });
+    return { consented, source: "self" };
   }
 
   async getUserContext(userId, appContext) {

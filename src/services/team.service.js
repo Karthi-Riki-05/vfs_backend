@@ -840,6 +840,32 @@ class TeamService {
       } catch {
         // never block invite acceptance on notification failure
       }
+
+      // FCM push so the owner is reached even when offline or viewing a
+      // different workspace (the in-app bell is strictly workspace-scoped
+      // by design — see notification.service buildScope). Same
+      // createNotification + sendPushToUser pairing as chat/subscription.
+      try {
+        const push = require("./push.service");
+        await push.sendPushToUser(
+          team.teamOwnerId,
+          {
+            title: "New Team Member",
+            body: `${acceptingUser.name || acceptingUser.email} joined "${
+              team.name || "your team"
+            }"`,
+            data: {
+              type: "team_member_joined",
+              teamId: team.id,
+              url: `/dashboard/teams/${team.id}`,
+            },
+          },
+          team.appContext || "team",
+          "team_member_joined",
+        );
+      } catch {
+        // never block invite acceptance on push failure
+      }
     }
 
     return { teamId: invite.teamId, appContext: memberAppContext };

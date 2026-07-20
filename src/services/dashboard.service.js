@@ -56,11 +56,17 @@ class DashboardService {
         prisma.flow.count({
           where: { ...base, updatedAt: { gte: startOfMonth } },
         }),
-        // Shared flows = flows the caller has shared with others. FlowShare
-        // has no teamId column, so we cannot isolate shares by team bucket;
-        // count all of the caller's shares regardless of app mode — share
-        // counts must never be hidden by the active context (DATA-LOSS-001).
-        prisma.flowShare.count({ where: { sharedById: userId } }),
+        // Shared flows = flows the caller has shared with others. FlowShare has
+        // no teamId column, but it DOES carry appContext — so we scope by app
+        // (B49): the Pro dashboard must not count Team-app shares and vice-versa
+        // (cross-app isolation). Mirrors getSharedFlows' appContext anchor and
+        // the Free-fold (team app shows team+free). Pro stays strictly isolated.
+        prisma.flowShare.count({
+          where: {
+            sharedById: userId,
+            appContext: appContext === "pro" ? "pro" : { in: ["team", "free"] },
+          },
+        }),
         this._getOwnedTeamMemberCount(userId, teamId, appContext),
       ]);
 
@@ -108,10 +114,13 @@ class DashboardService {
   }
 
   async getRecentFlows(userId, appContext = "free", limit = 5, teamId = null) {
+    // B26/B38: the recent list must match the `totalFlows` count, which counts
+    // ALL non-deleted flows. Previously this filtered `diagramData != ""`, so a
+    // just-created (still-empty) flow bumped Total Flows but never appeared in
+    // Recent ("No recent flows" / "2 of 5"). Drop the content filter so newly
+    // created flows show up (empty ones fall back to a placeholder thumbnail).
     const flows = await prisma.flow.findMany({
-      where: await this._flowWhere(userId, appContext, teamId, {
-        diagramData: { not: "" },
-      }),
+      where: await this._flowWhere(userId, appContext, teamId),
       orderBy: { updatedAt: "desc" },
       take: limit,
       select: {

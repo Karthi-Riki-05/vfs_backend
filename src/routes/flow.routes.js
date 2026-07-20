@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const flowController = require("../controllers/flow.controller");
 const { authenticate } = require("../middleware/auth.middleware");
+const { requireFeature } = require("../middleware/requireEntitlement");
 const { aiLimiter } = require("../middleware/rateLimiter");
 const validate = require("../middleware/validate");
 const {
@@ -296,8 +297,15 @@ router.delete(
 
 // ==================== SHARING ROUTES ====================
 
-// Share a flow with users
-router.post("/:id/share", validate(shareFlowSchema), flowController.shareFlow);
+// Share a flow with users. canShareFlows is a paid entitlement (free tier:
+// false) — inherited from the tenant owner when X-Team-Context is a paid
+// team, so free members inside a paid team can still share with teammates.
+router.post(
+  "/:id/share",
+  validate(shareFlowSchema), // malformed payloads stay 400, not 403
+  requireFeature("canShareFlows"),
+  flowController.shareFlow,
+);
 
 // Get all shares for a flow
 router.get(

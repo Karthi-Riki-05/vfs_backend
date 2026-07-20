@@ -30,7 +30,14 @@ const getTransactionsQuerySchema = z.object({
   }),
 });
 
+const checkDuplicateCardSchema = z.object({
+  body: z.object({
+    paymentMethodId: z.string().min(1),
+  }),
+});
+
 module.exports = {
   createCheckoutSchema,
   getTransactionsQuerySchema,
+  checkDuplicateCardSchema,
 };

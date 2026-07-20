@@ -32,6 +32,14 @@ class PaymentController {
     res.json({ success: true, data: result });
   });
 
+  checkDuplicateCard = asyncHandler(async (req, res) => {
+    const result = await paymentService.checkDuplicateCard(
+      req.user.id,
+      req.body.paymentMethodId,
+    );
+    res.json({ success: true, data: result });
+  });
+
   setDefaultCard = asyncHandler(async (req, res) => {
     const { paymentMethodId } = req.body;
     if (!paymentMethodId) {

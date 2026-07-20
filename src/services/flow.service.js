@@ -1028,8 +1028,16 @@ class FlowService {
   }
 
   async updateShare(flowId, shareId, userId, permission) {
+    // Match shareFlow's ownership check: the tenant owner OR the member who
+    // created the flow under the tenant namespace (ownerId = tenant owner,
+    // creatorId = this member) may manage its shares. Checking ownerId alone
+    // meant a member could create a share but not edit it (Issue #6).
     const flow = await prisma.flow.findFirst({
-      where: { id: flowId, ownerId: userId, deletedAt: null },
+      where: {
+        id: flowId,
+        deletedAt: null,
+        OR: [{ ownerId: userId }, { creatorId: userId }],
+      },
     });
     if (!flow)
       throw new AppError(
@@ -1056,7 +1064,14 @@ class FlowService {
     if (!share) throw new AppError("Share not found", 404, "NOT_FOUND");
 
     const flow = await prisma.flow.findFirst({ where: { id: flowId } });
-    if (flow.ownerId !== userId && share.sharedWithId !== userId) {
+    // The tenant owner, the member who CREATED the flow, or the share's own
+    // recipient may remove it. Previously creatorId was ignored, so a member
+    // couldn't remove a share on a flow they created themselves (Issue #6).
+    if (
+      flow.ownerId !== userId &&
+      flow.creatorId !== userId &&
+      share.sharedWithId !== userId
+    ) {
       throw new AppError("Access denied", 403, "FORBIDDEN");
     }
 
@@ -1108,35 +1123,80 @@ class FlowService {
   }
 
   async getSharedFlows(userId, appContext = "team", activeTeamId = null) {
-    // Resolve which team owners can deliver shares to this user.
-    // - Team context: only the active team's owner (strict workspace isolation).
-    // - Personal context (no team selected): show shares from ANY team owner
-    //   the user belongs to, so new users with empty localStorage still see
-    //   their incoming shares before the workspace switcher reconciles.
-    let sharedByFilter;
+    // Resolve the set of PEERS whose shares to this user are visible in the
+    // current scope. A peer is anyone in a team the user is part of — as the
+    // team OWNER or as a MEMBER. Bug fix (Fix_issues.md Issue #4): the old
+    // logic only allowed the team OWNER as the sharer, so it never surfaced:
+    //   • owner ← member share  (an owner is not a teamMember row of their own
+    //                            team, so the personal branch returned [])
+    //   • member ← member share (peer-to-peer within one team)
+    // Both are now covered. Isolation is still enforced by (a) sharedWithId ===
+    // this user (only shares explicitly targeted at them), and (b) the
+    // appContext double-anchor below — never by sharedById alone.
+    const peerIdsFor = async (teamIds) => {
+      if (!teamIds.length) return [];
+      const [owners, members] = await Promise.all([
+        prisma.team.findMany({
+          where: { id: { in: teamIds } },
+          select: { teamOwnerId: true },
+        }),
+        prisma.teamMember.findMany({
+          where: { teamId: { in: teamIds } },
+          select: { userId: true },
+        }),
+      ]);
+      const set = new Set([
+        ...(Array.isArray(owners) ? owners : []).map((t) => t.teamOwnerId),
+        ...(Array.isArray(members) ? members : []).map((m) => m.userId),
+      ]);
+      set.delete(userId); // you never "share with yourself"
+      return [...set];
+    };
+
+    let peerIds;
     if (activeTeamId) {
+      // Team context: peers are the owner + members of THIS team only.
       const team = await prisma.team.findFirst({
         where: { id: activeTeamId, deletedAt: null },
         select: { teamOwnerId: true },
       });
       if (!team) return [];
-      sharedByFilter = { sharedById: team.teamOwnerId };
-    } else {
-      // Personal context — collect owners of every team the user is a member of.
-      const memberships = await prisma.teamMember.findMany({
-        where: { userId, team: { deletedAt: null } },
-        select: { team: { select: { teamOwnerId: true } } },
+      const members = await prisma.teamMember.findMany({
+        where: { teamId: activeTeamId },
+        select: { userId: true },
       });
-      const ownerIds = [
-        ...new Set(
-          (Array.isArray(memberships) ? memberships : []).map(
-            (m) => m.team.teamOwnerId,
+      const set = new Set([
+        team.teamOwnerId,
+        ...(Array.isArray(members) ? members : []).map((m) => m.userId),
+      ]);
+      set.delete(userId);
+      peerIds = [...set];
+    } else {
+      // Personal context: peers span every team the user is part of, whether
+      // they OWN it or are a MEMBER of it (an owner has no teamMember row, so
+      // owned teams must be collected explicitly — this is the core fix).
+      const [ownedTeams, memberTeams] = await Promise.all([
+        prisma.team.findMany({
+          where: { teamOwnerId: userId, deletedAt: null },
+          select: { id: true },
+        }),
+        prisma.teamMember.findMany({
+          where: { userId, team: { deletedAt: null } },
+          select: { teamId: true },
+        }),
+      ]);
+      const teamIds = [
+        ...new Set([
+          ...(Array.isArray(ownedTeams) ? ownedTeams : []).map((t) => t.id),
+          ...(Array.isArray(memberTeams) ? memberTeams : []).map(
+            (m) => m.teamId,
           ),
-        ),
+        ]),
       ];
-      if (!ownerIds.length) return [];
-      sharedByFilter = { sharedById: { in: ownerIds } };
+      peerIds = await peerIdsFor(teamIds);
     }
+    if (!peerIds.length) return [];
+    const sharedByFilter = { sharedById: { in: peerIds } };
 
     const shares = await prisma.flowShare.findMany({
       where: {

@@ -61,6 +61,30 @@ function requireTier(minTier) {
   };
 }
 
+/**
+ * Require a boolean feature flag on the resolved entitlements payload
+ * (e.g. requireFeature("canShareFlows")). Same X-Team-Context inheritance
+ * as every other gate: a free member inside a paid tenant inherits the
+ * tenant owner's flags.
+ */
+function requireFeature(flagKey) {
+  return async (req, res, next) => {
+    try {
+      const ent = await _ensure(req);
+      if (ent?.[flagKey] !== true) {
+        throw new AppError(
+          "Upgrade required for this feature",
+          403,
+          "UPGRADE_REQUIRED",
+        );
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
 /** Require access to a named module (see ENTITLEMENTS.modules). */
 function requireModule(moduleKey) {
   return async (req, res, next) => {
@@ -155,6 +179,7 @@ async function requireTeamChatEntitlement(req, res, next) {
 module.exports = {
   loadEntitlements,
   requireTier,
+  requireFeature,
   requireModule,
   requireTeamCreateEntitlement,
   requireTeamChatEntitlement,

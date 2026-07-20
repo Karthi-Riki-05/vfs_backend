@@ -452,8 +452,15 @@ class ShapeService {
     });
 
     if (!source) throw new AppError("Shape not found", 404, "NOT_FOUND");
-    if (source.ownerId !== userId)
-      throw new AppError("Not the owner of this shape", 403, "FORBIDDEN");
+    // B13/B14: copy must be allowed for any shape the caller can SEE (public,
+    // owned, or team/group-associated) — not owner-only. The visibility gate
+    // (_canAccessShape) previously guarded reads but copy used a stricter
+    // ownerId check, so copying a public/team-library shape 403'd ("Failed to
+    // copy shape"). The new row is created under the caller's ownership below,
+    // so this is safe.
+    const canAccess = await this._canAccessShape(source, userId);
+    if (!canAccess)
+      throw new AppError("Not allowed to copy this shape", 403, "FORBIDDEN");
 
     const copy = await prisma.shape.create({
       data: {

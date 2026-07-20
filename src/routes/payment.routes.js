@@ -6,6 +6,7 @@ const validate = require("../middleware/validate");
 const {
   createCheckoutSchema,
   getTransactionsQuerySchema,
+  checkDuplicateCardSchema,
 } = require("../validators/payment.validator");
 
 /**
@@ -91,6 +92,12 @@ router.get("/stripe-config", paymentController.stripeConfig);
 
 // Card management endpoints
 router.post("/setup-intent", authenticate, paymentController.setupIntent);
+router.post(
+  "/check-duplicate-card",
+  authenticate,
+  validate(checkDuplicateCardSchema),
+  paymentController.checkDuplicateCard,
+);
 router.get(
   "/payment-methods",
   authenticate,

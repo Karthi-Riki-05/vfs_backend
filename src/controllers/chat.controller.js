@@ -168,9 +168,15 @@ class ChatController {
       throw new AppError("File not found", 404, "FILE_NOT_FOUND");
     }
 
+    // B45: serve images INLINE so the chat can preview them (window.open /
+    // <img> shows the picture) instead of forcing a download. Non-images stay
+    // attachments. `?download=1` still forces a download for any type.
+    const isImage = (file.fileType || "").startsWith("image/");
+    const forceDownload = req.query.download === "1";
+    const disposition = isImage && !forceDownload ? "inline" : "attachment";
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${file.fileName}"`,
+      `${disposition}; filename="${file.fileName}"`,
     );
     res.setHeader("Content-Type", file.fileType);
     fs.createReadStream(localPath).pipe(res);
