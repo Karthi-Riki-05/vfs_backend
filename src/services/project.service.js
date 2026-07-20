@@ -40,18 +40,19 @@ class ProjectService {
     const projects = await prisma.project.findMany({
       where,
       orderBy: { updatedAt: "desc" },
-      include: {
-        _count: {
-          select: {
-            flows: {
-              where: { deletedAt: null },
-            },
-          },
-        },
-      },
     });
 
-    return projects.map((p) => ({
+    // B42: count each project's flows with the SAME scope the details list uses
+    // (via _projectFlowWhere) so the card count matches what the details page
+    // actually shows. Previously the card counted every non-deleted flow with
+    // that projectId, over-counting team/cross-scope flows the details excluded.
+    const counts = await Promise.all(
+      projects.map((p) =>
+        prisma.flow.count({ where: this._projectFlowWhere(p, userId) }),
+      ),
+    );
+
+    return projects.map((p, i) => ({
       id: p.id,
       name: p.name,
       description: p.description,
@@ -60,8 +61,33 @@ class ProjectService {
       teamId: p.teamId,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
-      flowCount: p._count.flows,
+      flowCount: counts[i],
     }));
+  }
+
+  // B42: single source of truth for "which flows belong to this project".
+  // The All-Projects card count and the Project-Details list MUST use the
+  // exact same scope or the card over-counts (card said 2, details showed 1)
+  // — a team-scoped flow was counted but excluded from the list. Both now
+  // call this helper, so the count and the list are always identical.
+  _projectFlowWhere(project, userId) {
+    return project.teamId
+      ? {
+          projectId: project.id,
+          teamId: project.teamId,
+          deletedAt: null,
+          appContext: { in: ["team", "free"] },
+        }
+      : {
+          projectId: project.id,
+          ownerId: userId,
+          teamId: null,
+          deletedAt: null,
+          appContext:
+            project.appContext === "free"
+              ? { in: ["team", "free"] }
+              : project.appContext,
+        };
   }
 
   async getProjectById(id, userId, appContext) {
@@ -95,31 +121,9 @@ class ProjectService {
     const take = Math.min(Number(limit) || 50, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // Show flows whose workspace matches the project's. Personal projects
-    // surface the caller's own free flows; team projects surface every flow
-    // attached to that team (any owner) so all team members see the same
-    // workspace.
-    const flowWhere = project.teamId
-      ? {
-          projectId: id,
-          teamId: project.teamId,
-          deletedAt: null,
-          // Free folds into the Team-App container (no standalone free shell).
-          appContext: { in: ["team", "free"] },
-        }
-      : {
-          projectId: id,
-          ownerId: userId,
-          teamId: null,
-          deletedAt: null,
-          // A free personal project folds into the Team container; flows are
-          // only ever tagged pro/team, so map free → {team,free} to avoid
-          // matching zero rows (DATA-LOSS-001). Pro stays strictly isolated.
-          appContext:
-            project.appContext === "free"
-              ? { in: ["team", "free"] }
-              : project.appContext,
-        };
+    // Show flows whose workspace matches the project's — SAME scope as the
+    // All-Projects card count (B42), via the shared helper.
+    const flowWhere = this._projectFlowWhere(project, userId);
 
     if (search) {
       flowWhere.OR = [
