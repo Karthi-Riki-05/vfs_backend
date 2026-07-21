@@ -1172,26 +1172,21 @@ class FlowService {
       set.delete(userId);
       peerIds = [...set];
     } else {
-      // Personal context: peers span every team the user is part of, whether
-      // they OWN it or are a MEMBER of it (an owner has no teamMember row, so
-      // owned teams must be collected explicitly — this is the core fix).
-      const [ownedTeams, memberTeams] = await Promise.all([
-        prisma.team.findMany({
-          where: { teamOwnerId: userId, deletedAt: null },
-          select: { id: true },
-        }),
-        prisma.teamMember.findMany({
-          where: { userId, team: { deletedAt: null } },
-          select: { teamId: true },
-        }),
-      ]);
+      // Personal context: peers come ONLY from teams the user OWNS — owned
+      // teams fold into the personal workspace, so an owner sees shares from
+      // their team members here (Fix_issues.md Issue #4). Teams the user is
+      // merely a MEMBER of are SEPARATE workspaces: their shares must appear
+      // ONLY when the user is switched into that team's context, never in
+      // personal (B50 — workspace isolation for "Shared with me"). A plain
+      // member who owns no team therefore sees no team shares in personal.
+      const ownedTeams = await prisma.team.findMany({
+        where: { teamOwnerId: userId, deletedAt: null },
+        select: { id: true },
+      });
       const teamIds = [
-        ...new Set([
-          ...(Array.isArray(ownedTeams) ? ownedTeams : []).map((t) => t.id),
-          ...(Array.isArray(memberTeams) ? memberTeams : []).map(
-            (m) => m.teamId,
-          ),
-        ]),
+        ...new Set(
+          (Array.isArray(ownedTeams) ? ownedTeams : []).map((t) => t.id),
+        ),
       ];
       peerIds = await peerIdsFor(teamIds);
     }
