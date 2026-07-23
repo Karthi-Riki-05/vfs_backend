@@ -357,14 +357,19 @@ class FlowController {
         });
       }
 
-      // Tier-aware generation: Free → Gemini, Pro/Team → Claude. Provider
-      // routing, retry, fallback and XML sanitisation all live in
-      // aiDetect.service (single source of truth) — no hardcoded Gemini here.
-      const { xml: generatedXml, model } =
-        await aiDetectService.generateDiagramXmlFromText(
-          extractedText,
-          req.user,
-        );
+      // Step 9 — unified with the interactive path: the model picks the
+      // diagram family, complexity drives provider routing (Free/SIMPLE →
+      // Gemini, paid MEDIUM/COMPLEX → Claude) and token-based billing. All of
+      // that lives in aiDetect.service (single source of truth).
+      const {
+        xml: generatedXml,
+        model,
+        usage,
+        complexity,
+      } = await aiDetectService.generateDiagramXmlFromText(
+        extractedText,
+        req.user,
+      );
       let xml = generatedXml;
 
       if (!xml || !xml.includes("<mxGraphModel")) {
@@ -398,15 +403,26 @@ class FlowController {
         '<mxCell id="0"$1',
       );
 
-      // Charge exactly one credit, only after a successful generation. If
-      // generation had failed it would have thrown above (asyncHandler →
-      // error response) before reaching here, so nothing is over-charged.
+      // Charge by actual token usage (Step 7/9), clamped to the complexity
+      // estimate range, only after a successful generation. If generation had
+      // failed it would have thrown above (asyncHandler → error response)
+      // before reaching here, so nothing is over-charged.
+      const estimate =
+        complexity && typeof aiDetectService.estimateCredits === "function"
+          ? aiDetectService.estimateCredits(complexity)
+          : null;
       await aiCreditService.deductCredit(
         req.user.id,
         "diagram_generation",
         model,
         appContext,
         teamId,
+        {
+          inputTokens: usage?.inputTokens,
+          outputTokens: usage?.outputTokens,
+          capMin: estimate?.min,
+          capMax: estimate?.max,
+        },
       );
 
       res.json({ success: true, data: { xml } });

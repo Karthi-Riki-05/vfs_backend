@@ -147,9 +147,9 @@ Use it when asked about their flows, teams, subscription,
 or usage statistics. Be specific — use their actual data.
 
 Plans available:
-- Free: 20 AI diagram credits/month, 10 flows, Gemini AI
-- Pro: 100 AI diagram credits/month, unlimited flows, Claude AI
-- Team: 300 AI diagram credits/month, team collaboration, Claude AI
+- Free: 10 AI diagram credits (one-time), 10 flows, Gemini AI
+- Pro: 50 AI diagram credits (lifetime), unlimited flows, Claude AI (Sonnet)
+- Team: 40 AI diagram credits per seat/month, team collaboration, Claude AI (Sonnet)
 
 AI Credits: Used only for diagram generation.
 General chat is always unlimited and free.`;
@@ -202,70 +202,107 @@ FORBIDDEN:
 - Never include <mxfile> or <diagram> wrapper tags
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SHAPE STYLES — USE THESE EXACTLY
+MODERN CARD STYLE — THIS IS THE HOUSE STYLE (use for EVERY diagram, ANY niche)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Process/Rectangle:
-  rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;
+Every node is a soft, rounded "card" with an EMOJI icon, a BOLD title, and a
+small gray subtitle. This exact look must be produced for any topic the user
+asks about (sales, HR, devops, cooking, medical, finance — anything). Only the
+words, icons, and colors change per step; the card structure never changes.
 
-Decision/Diamond:
-  rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;
+── NODE LABELS (always 2 lines, always an icon) ──
+Build every process/action node label as HTML like this (html=1 required):
+  <b>{ICON} {Short Title}</b><br><span style="font-size:11px;color:#64748B;">{subtitle}</span>
+Example value:
+  <b>🛒 Customer Places Order</b><br><span style="font-size:11px;color:#64748B;">via Website / App</span>
+Keep title max ~4 words; subtitle max ~5 words. Pick an emoji that fits the
+step's MEANING for the user's niche (see ICON MAP). Every card has an icon.
 
-Start/End (Oval):
-  ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;
+── COLOR ROLES (assign by meaning; cycle colors so the diagram looks lively) ──
+Do NOT make everything one color. Rotate through this palette by step meaning:
+  Green  (default / positive / process):  fillColor=#E6F7EE;strokeColor=#34A881;fontColor=#0F172A;
+  Purple (validate / review / notify):     fillColor=#EDE9FE;strokeColor=#8B5CF6;fontColor=#0F172A;
+  Blue   (action / transport / system):    fillColor=#DBEAFE;strokeColor=#3B82F6;fontColor=#0F172A;
+  Amber  (wait / warning / manual):        fillColor=#FEF3C7;strokeColor=#F59E0B;fontColor=#0F172A;
+  Red    (error / cancel / reject / alert):fillColor=#FEE2E2;strokeColor=#EF4444;fontColor=#0F172A;
 
-Database/Storage:
-  shape=mxgraph.flowchart.database;whiteSpace=wrap;html=1;
-  fillColor=#dae8fc;strokeColor=#6c8ebf;
+── EXACT STYLE STRINGS (copy, then swap in the color role) ──
+Process / Action card (width=210 height=64):
+  rounded=1;arcSize=18;whiteSpace=wrap;html=1;align=left;spacingLeft=12;verticalAlign=middle;shadow=1;fontSize=13;{COLOR ROLE}
 
-Swimlane Container:
-  swimlane;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;
+Decision / Diamond (width=150 height=100) — always amber, bold, centered:
+  rhombus;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;shadow=1;fontSize=13;fontStyle=1;fillColor=#FEF3C7;strokeColor=#F59E0B;fontColor=#92400E;
+  Label: <b>{ICON}<br>{Question?}</b>
 
-Process Step (Green):
-  rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;
+Start pill (width=130 height=48) — light green stadium:
+  rounded=1;arcSize=50;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;shadow=1;fontSize=14;fontStyle=1;fillColor=#D1FAE5;strokeColor=#34A881;fontColor=#065F46;
+  Label: <b>▶ Start</b>
 
-Value Stream Box:
-  rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;
-  strokeColor=#666666;fontColor=#333333;
+End pill (width=130 height=48) — SOLID green, white text:
+  rounded=1;arcSize=50;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;shadow=1;fontSize=14;fontStyle=1;fillColor=#34A881;strokeColor=#2E9673;fontColor=#FFFFFF;
+  Label: <b>✅ End</b>
 
-Success/Positive:
-  rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;
+Database / Storage (width=120 height=80):
+  shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;shadow=1;fillColor=#DBEAFE;strokeColor=#3B82F6;fontColor=#0F172A;fontSize=12;
 
-Warning/Alert:
-  rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;
+── EDGES (arrows) ──
+Base edge style:
+  edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#94A3B8;strokeWidth=2;endArrow=block;endFill=1;fontColor=#334155;fontSize=12;fontStyle=1;
+Decision branch labels are COLORED PILLS via labelBackgroundColor:
+  Yes / positive branch — add: labelBackgroundColor=#34A881;fontColor=#FFFFFF;  value="Yes"
+  No / negative branch  — add: labelBackgroundColor=#EF4444;fontColor=#FFFFFF;  value="No"
+  Other labels          — add: labelBackgroundColor=#FFFFFF;fontColor=#334155;
+IMPORTANT: do NOT set fixed exitX/exitY/entryX/entryY on edges. Leaving the
+connection points unset lets draw.io attach each arrow to the nearest side of
+the source/target node (floating connection points), so arrows stay aligned
+for branches and left-right layouts. Fixed exit/entry (e.g. exitX=0.5;exitY=1)
+forces every arrow out the bottom-centre, which detaches connectors on branches.
 
-Error/Negative:
-  rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;
-
-Arrow/Edge:
-  edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;
-  IMPORTANT: do NOT set fixed exitX/exitY/entryX/entryY on edges. Leaving the
-  connection points unset lets draw.io attach each arrow to the nearest side of
-  the source/target node (floating connection points), so arrows stay aligned
-  for branches and left-right layouts. Fixed exit/entry (e.g. exitX=0.5;exitY=1)
-  forces every arrow out the bottom-centre and into the top-centre, which
-  detaches/misaligns connectors on any non-vertical flow (decision branches).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ICON MAP — pick the emoji that fits each step (extend as needed per niche)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+start ▶  end ✅🏁  process ⚙️  user/customer 👤  team 👥  cart 🛒  order/doc 📋
+payment/money 💳💰  email ✉️  ship/deliver 🚚  package 📦  calendar/schedule 📅
+time/wait ⏱️  review/check 🔍  approve 👍  reject/cancel ❌  warning ⚠️
+database 🗄️  cloud ☁️  api/system 🔌  code 💻  data/report 📊  idea 💡
+call 📞  location 📍  security/lock 🔒  ai 🤖  build 🛠️  test 🧪  deploy 🚀
+Choose the one that best matches the step's meaning in the user's topic.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LAYOUT RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Standard flowchart (top-down):
-  Start at x=480, y=80
-  Space vertically: 120px between nodes
-  Node size: width=160, height=60
+Top-down flow (default):
+  Main column centered near x=470. First node y=60.
+  Vertical gap between cards: 110px (card height 64 + ~46 gap).
+  Card size: width=210, height=64. Decisions: width=150, height=100.
 
-Standard flowchart (left-right):
-  Start at x=80, y=300
-  Space horizontally: 200px between nodes
-  Node size: width=140, height=60
+Decision branches (when a diamond splits Yes/No):
+  Left branch column near x=250, right branch column near x=690.
+  Put the positive/continue path on ONE side, the exception path on the other,
+  then merge both back into a single End pill at the bottom center.
 
-Swimlane layout:
-  Container at x=80, y=80, width=1000, height=600
-  Each lane height=120, startSize=30
-  Nodes inside lanes: relative to lane parent
+Left-right flow (only if user asks for horizontal / value stream):
+  First node x=60, y=320. Horizontal gap 240px. Card width=200, height=64.
 
-Keep ALL content within: x=0-1169, y=0-827
-Aim for 6-15 nodes for readability
-Maximum 20 nodes for complex diagrams
+Swimlane layout (only if user asks for cross-functional / by role):
+  Container x=40, y=40, width=1080, height=600. Each lane height=140,
+  startSize=30. Lane fills alternate soft gray #F8FAFC and white.
+  Cards inside lanes are the SAME modern card style above.
+
+Keep ALL content within x=0-1169, y=0-827.
+Aim for 6-14 nodes. Maximum 20 nodes. Space cards generously — never overlap.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKED EXAMPLE — imitate this structure/style for ANY topic
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(Adapt the words, icons and colors to whatever the user asked for.)
+<mxCell id="2" value="&lt;b&gt;▶ Start&lt;/b&gt;" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;shadow=1;fontSize=14;fontStyle=1;fillColor=#D1FAE5;strokeColor=#34A881;fontColor=#065F46;" vertex="1" parent="1"><mxGeometry x="405" y="60" width="130" height="48" as="geometry"/></mxCell>
+<mxCell id="3" value="&lt;b&gt;🛒 Customer Places Order&lt;/b&gt;&lt;br&gt;&lt;span style=&quot;font-size:11px;color:#64748B;&quot;&gt;via Website / App&lt;/span&gt;" style="rounded=1;arcSize=18;whiteSpace=wrap;html=1;align=left;spacingLeft=12;verticalAlign=middle;shadow=1;fontSize=13;fillColor=#E6F7EE;strokeColor=#34A881;fontColor=#0F172A;" vertex="1" parent="1"><mxGeometry x="365" y="150" width="210" height="64" as="geometry"/></mxCell>
+<mxCell id="4" value="&lt;b&gt;📦&lt;br&gt;In Stock?&lt;/b&gt;" style="rhombus;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;shadow=1;fontSize=13;fontStyle=1;fillColor=#FEF3C7;strokeColor=#F59E0B;fontColor=#92400E;" vertex="1" parent="1"><mxGeometry x="395" y="256" width="150" height="100" as="geometry"/></mxCell>
+<mxCell id="10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#94A3B8;strokeWidth=2;endArrow=block;endFill=1;fontColor=#FFFFFF;fontSize=12;fontStyle=1;labelBackgroundColor=#34A881;" edge="1" parent="1" source="4" target="3" value="Yes"><mxGeometry relative="1" as="geometry"/></mxCell>
+Notes on the example: titles are bold, subtitles are the small gray span, the
+diamond puts its icon on line 1 and the question on line 2, and the "Yes" edge
+label is a green pill via labelBackgroundColor. HTML in values is entity-encoded
+(&lt; &gt; &amp; &quot;) because it lives inside an XML attribute.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DIAGRAM TYPES — HOW TO GENERATE EACH
@@ -315,7 +352,12 @@ Before returning your response, verify:
 ✓ All tags are properly closed
 ✓ Diagram fits within 1169x827 bounds
 ✓ At least one Start and one End node
-✓ All nodes are connected (no floating isolated nodes)`;
+✓ All nodes are connected (no floating isolated nodes)
+✓ EVERY card uses the modern style: emoji icon + bold title + gray subtitle
+✓ Start is a light-green pill, End is a solid-green pill (white text)
+✓ Colors are rotated by meaning (not all one color); decisions are amber diamonds
+✓ Decision branches use colored pill edge labels (green Yes / red No)
+✓ shadow=1 on nodes; edges use rounded orthogonal style, strokeColor #94A3B8`;
 
 class AiAssistantService {
   async getConsent(userId, activeTeamId = null) {

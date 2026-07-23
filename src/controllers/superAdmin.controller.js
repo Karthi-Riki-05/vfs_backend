@@ -454,7 +454,7 @@ class SuperAdminController {
       flowLimitFields = { proUnlimitedFlows: true };
     }
 
-    const planCreditsMap = { team: 300, pro: 100, free: 20 };
+    const planCreditsMap = { team: 200, pro: 50, free: 10 };
 
     // Resolve/create Plan row for pro/team before the transaction.
     let planRow = null;
@@ -1327,7 +1327,7 @@ class SuperAdminController {
     expiresAt.setMonth(expiresAt.getMonth() + monthsToAdd);
 
     const productType = `${normalizedPlan}_${normalizedDuration}`;
-    const planCreditMap = { pro: 100, team: 300 };
+    const planCreditMap = { pro: 50, team: 200 };
     const grantCredits =
       credits !== undefined && credits !== null && credits !== ""
         ? parseInt(credits, 10)
@@ -1556,11 +1556,11 @@ class SuperAdminController {
           where: { userId_appContext: { userId, appContext: "free" } },
           create: {
             userId,
-            planCredits: 20,
+            planCredits: 10,
             addonCredits: 0,
             appContext: "free",
           },
-          update: { planCredits: 20 },
+          update: { planCredits: 10 },
         }),
         prisma.flow.updateMany({
           where: {
@@ -1623,11 +1623,11 @@ class SuperAdminController {
         where: { userId_appContext: { userId, appContext: "free" } },
         create: {
           userId,
-          planCredits: 20,
+          planCredits: 10,
           addonCredits: 0,
           appContext: "free",
         },
-        update: { planCredits: 20 },
+        update: { planCredits: 10 },
       }),
       prisma.flow.updateMany({
         where: {
@@ -2066,7 +2066,7 @@ class SuperAdminController {
         apiKeys,
         // Plan credits and flow limits are currently enforced in code — expose
         // the defaults so the UI can display them even if not editable.
-        aiCreditDefaults: { free: 20, pro: 100, team: 300 },
+        aiCreditDefaults: { free: 10, pro: 50, team: 200 },
         flowLimitDefaults: {
           free: 10,
           pro: "configurable per user (proFlowLimit / proUnlimitedFlows)",

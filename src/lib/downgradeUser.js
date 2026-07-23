@@ -58,7 +58,7 @@ async function applyTeamFlowPicker(userId) {
  *      • Sets hasPro = false, currentVersion = 'free'
  *      • Resets proFlowLimit = 10, proUnlimitedFlows = false
  *      • Zeros lapsed plan credits on team/pro rows (addon credits preserved)
- *      • Ensures a one-time Free balance row exists (20 credits, no refill)
+ *      • Ensures a one-time Free balance row exists (10 credits, no refill)
  *
  * @param {string} userId
  * @param {{ reason?: string }} [options]
@@ -132,7 +132,7 @@ async function downgradeUser(userId, options = {}) {
     data: { planCredits: 0 },
   });
 
-  // Ensure the Free balance row exists (one-time 20-credit grant, no expiry).
+  // Ensure the Free balance row exists (one-time 10-credit grant, no expiry).
   // If it already exists, keep whatever credits the user currently holds —
   // free credits are a one-time grant and must never be topped back up.
   await prisma.aiCreditBalance.upsert({
@@ -141,7 +141,7 @@ async function downgradeUser(userId, options = {}) {
     create: {
       userId,
       appContext: "free",
-      planCredits: 20,
+      planCredits: 10,
       addonCredits: 0,
       planResetsAt: null,
     },

@@ -183,7 +183,7 @@ class ProService {
         create: {
           userId,
           appContext: "pro",
-          planCredits: 200,
+          planCredits: 50,
           addonCredits: 0,
           planResetsAt: null,
         },
@@ -229,7 +229,7 @@ class ProService {
       currentVersion: "pro",
       hasPro: true,
       proPurchasedAt: purchasedAt,
-      planCredits: 200,
+      planCredits: 50,
       planResetsAt: null,
       proTeamId: proTeam.id,
       proTeamName: proTeam.name,
@@ -448,13 +448,13 @@ class ProService {
       where: { userId_appContext: { userId, appContext: "pro" } },
       create: {
         userId,
-        planCredits: 200,
+        planCredits: 50,
         addonCredits: 0,
         planResetsAt: nextReset,
         appContext: "pro",
       },
       update: {
-        planCredits: 200,
+        planCredits: 50,
         planResetsAt: nextReset,
       },
     });

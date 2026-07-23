@@ -4,10 +4,14 @@ const asyncHandler = require("../utils/asyncHandler");
 class AccountController {
   deleteAccount = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const { password } = req.body;
+    const { password, confirmation } = req.body;
 
-    // Verify password first — before any Stripe or DB work
-    await accountService.verifyPassword(userId, password);
+    // Authorize first — password for credentials users, "DELETE" confirmation
+    // for OAuth/social users (who have no password) — before any Stripe/DB work.
+    await accountService.verifyDeleteAuthorization(userId, {
+      password,
+      confirmation,
+    });
 
     // Perform the full deletion (Stripe cancellation + DB hard-delete)
     await accountService.deleteAccount(userId);

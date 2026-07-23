@@ -33,13 +33,13 @@ async function grantProCredits(userId, options = {}, tx = null) {
       where: { userId_appContext: { userId, appContext: "pro" } },
       create: {
         userId,
-        planCredits: 200,
+        planCredits: 50,
         addonCredits: 0,
         planResetsAt: nextReset,
         appContext: "pro",
       },
       update: {
-        planCredits: 200,
+        planCredits: 50,
         planResetsAt: nextReset,
       },
     });

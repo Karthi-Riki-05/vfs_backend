@@ -25,9 +25,9 @@
 // Seat tiers offered as fixed-price store products (stores cannot do
 // per-seat quantity pricing like Stripe). Must stay in sync with the
 // products actually created in Play Console / App Store Connect.
-// Owner decision 2026-07-04: in-app team plans cap at 25 members — the
-// 50/75/100 tiers remain WEB-ONLY (Stripe), where store commission on
-// $1.5k-2k/yr deals is avoided. Do not add them here without new store
+// Owner decision 2026-07-23: team plans cap at 25 members on ALL platforms
+// (web + native). The 50/75/100 tiers were retired everywhere (previously
+// they were web-only via Stripe). Do not add larger tiers without new store
 // products AND an owner decision.
 const TEAM_SEAT_TIERS = [5, 10, 15, 20, 25];
 
@@ -54,11 +54,10 @@ const IAP_PRODUCTS = {
   // mth_5/mth_10/yr_5/yr_10 confirmed 2026-07-16 from the live native
   // Android app's own Kotlin source (skuTeamMth5/Mth10/Yr5/Yr10) — mirrors
   // the iOS 4-tier pattern with Android's mth_/yr_ naming. The
-  // mth_15/20/25/30/35/40/100 entries below were an earlier guess read off
-  // a Play Console screenshot (which can list legacy/unused products the
-  // shipped app never references) — kept mapped as a harmless safety net
-  // for historical purchase restoration, but NOT shown as purchasable in
-  // the app UI (see frontend/lib/iapBridge.ts LEGACY_ANDROID_TEAM_PLANS).
+  // mth_15/20/25 entries below round out the in-app 25-seat cap. Larger
+  // legacy guesses (mth_30/35/40/100) were removed 2026-07-23 with the
+  // 50/75/100 tier retirement — they exceeded the seat cap, were never
+  // referenced by the shipped app, and had no active subscribers.
   "com.valuecharts.app.mth_5": { type: "team", seats: 5, period: "monthly" },
   "com.valuecharts.app.mth_10": { type: "team", seats: 10, period: "monthly" },
   "com.valuecharts.app.yr_5": { type: "team", seats: 5, period: "yearly" },
@@ -66,10 +65,6 @@ const IAP_PRODUCTS = {
   "com.valuecharts.app.mth_15": { type: "team", seats: 15, period: "monthly" },
   "com.valuecharts.app.mth_20": { type: "team", seats: 20, period: "monthly" },
   "com.valuecharts.app.mth_25": { type: "team", seats: 25, period: "monthly" },
-  "com.valuecharts.app.mth_30": { type: "team", seats: 30, period: "monthly" },
-  "com.valuecharts.app.mth_35": { type: "team", seats: 35, period: "monthly" },
-  "com.valuecharts.app.mth_40": { type: "team", seats: 40, period: "monthly" },
-  "com.valuecharts.app.mth_100": { type: "team", seats: 100, period: "monthly" },
 
   // ── Flow packs (30-day consumables, Pro app) ───────────────────────────
   // flowPackage/flowCount mirror the Stripe checkout metadata consumed by
@@ -92,7 +87,7 @@ const IAP_PRODUCTS = {
 };
 
 // ── Team seat subscriptions (Team app) — generated matrix ────────────────
-// team_5_monthly … team_100_yearly. seats/period mirror the Stripe checkout
+// team_5_monthly … team_25_yearly. seats/period mirror the Stripe checkout
 // metadata consumed by subscriptionService._handleCheckoutComplete.
 for (const seats of TEAM_SEAT_TIERS) {
   for (const period of ["monthly", "yearly"]) {

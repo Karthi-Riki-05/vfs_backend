@@ -9,7 +9,11 @@ const logger = require("../utils/logger");
 const proService = require("./pro.service");
 const { sendEmail, emailTemplates } = require("../utils/email");
 const downgradeUser = require("../lib/downgradeUser");
-const { grantTeamCredits } = require("./aiCredit.service");
+const {
+  grantTeamCredits,
+  TEAM_CREDITS_PER_SEAT_MONTHLY,
+  TEAM_CREDITS_PER_SEAT_YEARLY,
+} = require("./aiCredit.service");
 
 class PaymentService {
   async createCheckoutSession(userId, planId, urls = {}) {
@@ -564,7 +568,9 @@ class PaymentService {
     if (isTeam) {
       const seats = sub.usersCount || 5;
       const isYearly = sub.productType === "team_yearly";
-      const credits = isYearly ? seats * 60 * 12 : seats * 60;
+      const credits = isYearly
+        ? seats * TEAM_CREDITS_PER_SEAT_YEARLY
+        : seats * TEAM_CREDITS_PER_SEAT_MONTHLY;
 
       await prisma.$transaction(async (tx) => {
         await tx.subscription.update({
@@ -834,7 +840,9 @@ class PaymentService {
       type: "card",
       limit: 100,
     });
-    const match = pmList.data.find((pm) => pm.card?.fingerprint === fingerprint);
+    const match = pmList.data.find(
+      (pm) => pm.card?.fingerprint === fingerprint,
+    );
     if (!match) return { isDuplicate: false };
     return {
       isDuplicate: true,

@@ -6,13 +6,15 @@ const subscribeSchema = z.object({
   }),
 });
 
-const TEAM_MEMBER_OPTIONS = [5, 10, 15, 20, 25, 50, 75, 100];
+// Owner decision 2026-07-23: team plans cap at 25 seats on ALL platforms
+// (web + native). The old 50/75/100 web-only tiers were retired.
+const TEAM_MEMBER_OPTIONS = [5, 10, 15, 20, 25];
 
 const createCheckoutSchema = z.object({
   body: z.object({
     plan: z.enum(["monthly", "yearly"]),
     teamMembers: z.number().refine((val) => TEAM_MEMBER_OPTIONS.includes(val), {
-      message: "Team members must be one of: 5, 10, 15, 20, 25, 50, 75, 100",
+      message: "Team members must be one of: 5, 10, 15, 20, 25",
     }),
     paymentMethodId: z.string().optional(),
   }),
@@ -22,7 +24,7 @@ const changePlanSchema = z.object({
   body: z.object({
     plan: z.enum(["monthly", "yearly"]),
     teamMembers: z.number().refine((val) => TEAM_MEMBER_OPTIONS.includes(val), {
-      message: "Team members must be one of: 5, 10, 15, 20, 25, 50, 75, 100",
+      message: "Team members must be one of: 5, 10, 15, 20, 25",
     }),
   }),
 });

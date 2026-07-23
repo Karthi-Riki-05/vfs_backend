@@ -2,11 +2,27 @@ const { prisma } = require("../lib/prisma");
 const logger = require("../utils/logger");
 
 const PLAN_CREDITS = {
-  free: 20,
-  pro: 200, // new Pro ($5) — legacy Pro ($1) gets 100 via isLegacyPro flag
-  proLegacy: 100,
-  team: 300,
+  free: 10,
+  pro: 50, // new Pro ($5) — legacy Pro ($1) gets 50 via isLegacyPro flag
+  proLegacy: 50,
+  team: 200, // baseline (5 seats × 40); seat-scaled below
 };
+
+// Step 7 — token-based credit formula (AI_ANALYSIS §9A):
+//   credits = max(1, round((inputTokens + outputTokens) / 1000 − 1.5))
+// Simple diagrams land ~3 credits, complex ~6. Opus (if ever routed) costs
+// more per token, so a multiplier hook is left in place (unused while the
+// model catalogue is Gemini + Sonnet only).
+const OPUS_CREDIT_MULTIPLIER = 1.7;
+
+function creditsFromTokens(inputTokens = 0, outputTokens = 0, model = null) {
+  const totalTokens = (Number(inputTokens) || 0) + (Number(outputTokens) || 0);
+  let credits = Math.round(totalTokens / 1000 - 1.5);
+  if (model && /opus/i.test(model)) {
+    credits = Math.round(credits * OPUS_CREDIT_MULTIPLIER);
+  }
+  return Math.max(1, credits);
+}
 
 // Billing-user resolver: in a team workspace, AI credit reads and deductions
 // target the TEAM OWNER's balance (so a free member gets the team's 300-
@@ -109,10 +125,10 @@ async function getOrCreateBalance(userId, appContext = "team") {
     balance.planResetsAt &&
     new Date() > balance.planResetsAt
   ) {
-    // Seat-aware refill: monthly teams refill to seats × 60. Yearly teams
+    // Seat-aware refill: monthly teams refill to seats × 40. Yearly teams
     // return null here — their renewal is handled by the invoice.paid
     // webhook, so we must NOT clobber the upfront yearly grant with the
-    // flat 300 baseline.
+    // flat 200 baseline.
     const refill = await teamCreditsForOwner(userId);
     if (refill !== null) {
       balance = await prisma.aiCreditBalance.update({
@@ -141,6 +157,7 @@ async function deductCredit(
   model,
   appContext = "team",
   activeTeamId = null,
+  opts = {},
 ) {
   // Deductions hit the billing user (team owner in team context, self in
   // personal). Usage audit row still records the ACTING user so you can
@@ -158,17 +175,30 @@ async function deductCredit(
     };
   }
 
-  let planDeduct = 0;
-  let addonDeduct = 0;
-  let sourceType = "plan";
-
-  if (balance.planCredits > 0) {
-    planDeduct = 1;
-    sourceType = "plan";
-  } else {
-    addonDeduct = 1;
-    sourceType = "addon";
+  // Step 7 — how many credits to charge. Default 1 (legacy callers, e.g. the
+  // document path until Step 9). When token usage is supplied, charge the
+  // token-based formula amount, clamped to the estimate range shown to the
+  // user (capMin/capMax from Step 4) so the charge never lands outside the
+  // quoted "about X-Y credits", and never exceeds the remaining balance.
+  let charge = 1;
+  if (opts && (opts.inputTokens != null || opts.outputTokens != null)) {
+    charge = creditsFromTokens(opts.inputTokens, opts.outputTokens, model);
+    if (Number.isFinite(opts.capMin)) charge = Math.max(charge, opts.capMin);
+    if (Number.isFinite(opts.capMax)) charge = Math.min(charge, opts.capMax);
+  } else if (Number.isFinite(opts?.credits)) {
+    charge = opts.credits;
   }
+  charge = Math.max(1, Math.min(Math.round(charge), total));
+
+  // Draw from plan credits first, then addon credits.
+  const planDeduct = Math.min(balance.planCredits, charge);
+  const addonDeduct = charge - planDeduct;
+  const sourceType =
+    planDeduct > 0 && addonDeduct > 0
+      ? "mixed"
+      : planDeduct > 0
+        ? "plan"
+        : "addon";
 
   const [updated] = await prisma.$transaction([
     prisma.aiCreditBalance.update({
@@ -186,7 +216,7 @@ async function deductCredit(
       data: {
         userId,
         feature,
-        creditsUsed: 1,
+        creditsUsed: charge,
         sourceType,
         model: model || null,
         appContext: ctx,
@@ -197,6 +227,7 @@ async function deductCredit(
   return {
     success: true,
     sourceType,
+    creditsUsed: charge,
     remaining: updated.planCredits + updated.addonCredits,
     balance: {
       planCredits: updated.planCredits,
@@ -233,7 +264,7 @@ async function getBalance(userId, appContext = "team", activeTeamId = null) {
     planResetsAt: balance.planResetsAt,
     appContext: balance.appContext,
     // The plan's full grant (progress-bar denominator). Team plans are
-    // seat-scaled (seats × 60/mo or seats × 800/yr), so the frontend can't
+    // seat-scaled (seats × 40/mo or seats × 500/yr), so the frontend can't
     // hardcode it.
     planLimit: await planLimitFor(billing.userId, ctx),
     // Lets the frontend label "Team credits" vs "Personal credits".
@@ -265,10 +296,10 @@ async function planLimitFor(userId, ctx) {
   return planCreditsFor(ctx);
 }
 
-// Credits per seat per month for team plans (60/seat/month).
-const TEAM_CREDITS_PER_SEAT_MONTHLY = 60;
-// Credits per seat per year for yearly team plans (800/seat/year).
-const TEAM_CREDITS_PER_SEAT_YEARLY = 800;
+// Credits per seat per month for team plans (40/seat/month).
+const TEAM_CREDITS_PER_SEAT_MONTHLY = 40;
+// Credits per seat per year for yearly team plans (500/seat/year).
+const TEAM_CREDITS_PER_SEAT_YEARLY = 500;
 
 async function teamCreditsForOwner(userId) {
   // Look up the active subscription to get seat count and billing period.
@@ -348,8 +379,8 @@ async function resetAllPlanCredits() {
 }
 
 // Grant initial team AI credits when a subscription is first activated.
-// Monthly: seats × 60, resets next month (cron). Yearly: the FULL year
-// upfront (seats × 800), resets at the yearly renewal (invoice.paid webhook).
+// Monthly: seats × 40, resets next month (cron). Yearly: the FULL year
+// upfront (seats × 500), resets at the yearly renewal (invoice.paid webhook).
 async function grantTeamCredits(userId, seats, plan, expiresAt = null) {
   const yearly = plan === "yearly";
   const credits = yearly
@@ -385,6 +416,7 @@ module.exports = {
   getBalance,
   hasCredits,
   deductCredit,
+  creditsFromTokens,
   addAddonCredits,
   resetAllPlanCredits,
   grantTeamCredits,

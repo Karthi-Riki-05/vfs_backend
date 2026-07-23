@@ -27,44 +27,166 @@ XML STRUCTURE
 </mxGraphModel>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CELL TEMPLATES
+STEP 1 — PICK THE RIGHT DIAGRAM FAMILY (do this FIRST)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Process/Rectangle (blue):
-<mxCell id="2" value="Step Name"
-  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;"
-  vertex="1" parent="1">
-  <mxGeometry x="80" y="160" width="140" height="60" as="geometry" />
-</mxCell>
+Read the request and choose the ONE family that matches. Do NOT
+default to a flowchart. Use that family's shapes and its layout rule.
 
-Decision/Diamond (yellow):
-<mxCell id="3" value="Decision?"
-  style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;"
-  vertex="1" parent="1">
-  <mxGeometry x="280" y="150" width="140" height="80" as="geometry" />
-</mxCell>
-
-Start/End (oval, red):
-<mxCell id="4" value="Start"
-  style="ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;"
-  vertex="1" parent="1">
-  <mxGeometry x="80" y="80" width="120" height="60" as="geometry" />
-</mxCell>
-
-Edge/Arrow:
-<mxCell id="5" value=""
-  style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;
-  jettySize=auto;html=1;"
-  edge="1" source="2" target="3" parent="1">
-  <mxGeometry relative="1" as="geometry" />
-</mxCell>
+- process / steps / workflow / VSM ............ FLOWCHART
+- pie / percentage / share / distribution ..... PIE CHART
+- bar / column / compare quantities ........... BAR CHART
+- trend / over time / line graph .............. LINE CHART
+- brainstorm / ideas / topic + subtopics ...... MIND MAP
+- hierarchy / reporting / team structure ...... ORG CHART
+- classes / objects / methods / attributes .... UML CLASS
+- actors / messages / interaction over time ... UML SEQUENCE
+- database / entities / tables / relations .... ER DIAGRAM
+- servers / routers / firewalls / topology .... NETWORK
+- AWS / Azure / GCP / cloud architecture ...... CLOUD
+- business process / pools / lanes / gateways . BPMN
+- overlapping sets / commonality .............. VENN
+- app screen / UI / mockup / wireframe ........ WIREFRAME
+If unclear, ask yourself what the user will SEE, then match above.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-LAYOUT
+VISUAL STYLE — modern, on-brand, high-contrast (APPLY TO EVERY SHAPE)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Top-down: Start x=480,y=80. Move y+120 per step. Width=140, Height=60
-Left-right: Start x=80,y=300. Move x+200 per step. Width=140, Height=60
-Keep within: x=0-1169, y=0-827
-Aim for 6-15 nodes. Maximum 20 nodes.
+Make diagrams look clean and premium (like Lucidchart) — NOT the dated draw.io
+defaults. On EVERY vertex you MUST add: fontFamily=Inter;fontSize=13;
+fontColor=<matching dark tone>;rounded=1;shadow=1;strokeWidth=2;html=1;
+whiteSpace=wrap;align=center;verticalAlign=middle;spacingLeft=6;spacingRight=6.
+Use fontStyle=1 (bold) on titles/headers.
+
+BRAND PALETTE — pick fills from here (each row = fillColor / strokeColor /
+fontColor, all high-contrast). The primary green is the app brand colour:
+  Green  (primary): fillColor=#E6F7F0;strokeColor=#34A881;fontColor=#0E5A43
+  Blue            : fillColor=#E8F1FE;strokeColor=#3B82F6;fontColor=#1E3A8A
+  Purple          : fillColor=#F1EBFB;strokeColor=#8B5CF6;fontColor=#5B21B6
+  Amber           : fillColor=#FFF4E0;strokeColor=#F59E0B;fontColor=#92580A
+  Rose (stop/end) : fillColor=#FDEBEC;strokeColor=#EF4444;fontColor=#9B1C1C
+  Teal            : fillColor=#E3F6F5;strokeColor=#14B8A6;fontColor=#0F766E
+  Slate (neutral) : fillColor=#EEF1F5;strokeColor=#64748B;fontColor=#334155
+Rules:
+- The GREEN palette is the app brand and MUST be the dominant colour: use it for
+  the main content nodes (process steps, primary boxes, the central mind-map
+  node, class boxes, entities, tasks). Use Amber for decisions/gateways, Rose
+  for start-stop / end / error, and Blue/Purple/Teal ONLY to group or
+  distinguish secondary sets. Most nodes should be green; accents are the
+  minority. Do NOT make every node a different colour (max ~3-4 hues total).
+- NEVER use the old washed-out draw.io default palette (the pale
+  light-blue/yellow/red/green/orange fills). Always use the palette above.
+- Edges: style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#94A3B8;strokeWidth=2;fontColor=#475569;endArrow=block;". Curved connectors (mind maps): rounded=1;edgeStyle=none.
+- For vivid fills (pie/bar slices) use the SATURATED stroke colours as the
+  fillColor (#34A881,#3B82F6,#F59E0B,#8B5CF6,#14B8A6,#EF4444) with
+  fontColor=#FFFFFF;fontStyle=1.
+
+The example snippets below show STRUCTURE and may list older colours — you MUST
+override their colours with this palette and add the style keys above.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DIAGRAM TYPE LIBRARY — one canonical example per family
+(copy the shape STYLE, then build the full diagram from real content)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FLOWCHART ─────────────────────────────────────────
+Process (blue):  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F1FE;strokeColor=#3B82F6;"  (w140 h60)
+Decision (yellow): style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF4E0;strokeColor=#F59E0B;"  (w140 h80)
+Start/End (red): style="ellipse;whiteSpace=wrap;html=1;fillColor=#FDEBEC;strokeColor=#EF4444;"  (w120 h60)
+Edge: style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" source="2" target="3"
+Layout: top-down, first node x=480 y=80, each next y+120. Label decision edges "Yes"/"No".
+
+PIE CHART ──────────────────────────────────────────
+One cell PER slice, all same x/y/size, stacked. Angles are FRACTIONS of the
+whole circle (0..1). startAngle of slice N = sum of all previous fractions.
+Slice fraction = sliceValue / totalOfAllValues. Put the % in the value.
+<mxCell id="2" value="Design 40%"
+  style="shape=mxgraph.basic.pie;startAngle=0;endAngle=0.4;fillColor=#E8F1FE;strokeColor=#3B82F6;html=1;"
+  vertex="1" parent="1"><mxGeometry x="360" y="200" width="260" height="260" as="geometry"/></mxCell>
+<mxCell id="3" value="Dev 35%"
+  style="shape=mxgraph.basic.pie;startAngle=0.4;endAngle=0.75;fillColor=#E6F7F0;strokeColor=#34A881;html=1;"
+  vertex="1" parent="1"><mxGeometry x="360" y="200" width="260" height="260" as="geometry"/></mxCell>
+<mxCell id="4" value="QA 25%"
+  style="shape=mxgraph.basic.pie;startAngle=0.75;endAngle=1;fillColor=#F1EBFB;strokeColor=#8B5CF6;html=1;"
+  vertex="1" parent="1"><mxGeometry x="360" y="200" width="260" height="260" as="geometry"/></mxCell>
+Rule: the LAST slice endAngle must be exactly 1. If the user gives no
+numbers, split evenly. A plain % in a label is fine; never wrap a word
+in percent signs like %name% (that is a reserved placeholder).
+
+BAR CHART ──────────────────────────────────────────
+Bars share a baseline (bottom y). Taller bar = bigger value. Vary only height + x.
+Baseline at y=460. bar_top_y = 460 - height. Space bars x+120.
+<mxCell id="2" value="Q1" style="whiteSpace=wrap;html=1;fillColor=#E8F1FE;strokeColor=#3B82F6;" vertex="1" parent="1"><mxGeometry x="120" y="300" width="80" height="160" as="geometry"/></mxCell>
+<mxCell id="3" value="Q2" style="whiteSpace=wrap;html=1;fillColor=#E6F7F0;strokeColor=#34A881;" vertex="1" parent="1"><mxGeometry x="240" y="220" width="80" height="240" as="geometry"/></mxCell>
+Optional axis: one thin rectangle (h2) as the baseline line at y=460.
+
+LINE CHART ─────────────────────────────────────────
+Small point vertices connected by straight edges, left→right, y inverted by value.
+Point: style="ellipse;whiteSpace=wrap;html=1;fillColor=#3B82F6;strokeColor=#3B82F6;" (w10 h10)
+Edge between consecutive points: style="endArrow=none;html=1;strokeColor=#3B82F6;"
+
+MIND MAP ───────────────────────────────────────────
+Central topic ellipse at canvas center (x=520 y=380), branches radiate around it.
+Center: style="ellipse;whiteSpace=wrap;html=1;fillColor=#F1EBFB;strokeColor=#8B5CF6;fontStyle=1;" (w160 h70)
+Branch: style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F1FE;strokeColor=#3B82F6;" (w140 h50)
+Edge: style="edgeStyle=none;rounded=1;html=1;endArrow=none;"
+Place branches at up/down/left/right offsets ~260px from center.
+
+ORG CHART ──────────────────────────────────────────
+Boxes in a tree, top = highest level. Box: style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E8F1FE;strokeColor=#3B82F6;" (w160 h50)
+Edge: style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;"
+Layout: root centered top; each level y+120; siblings spread x+200.
+
+UML CLASS ──────────────────────────────────────────
+Class = swimlane with stacked member rows.
+<mxCell id="2" value="User" style="swimlane;fontStyle=1;childLayout=stackLayout;horizontal=1;startSize=26;html=1;fillColor=#E8F1FE;strokeColor=#3B82F6;" vertex="1" parent="1"><mxGeometry x="80" y="80" width="180" height="110" as="geometry"/></mxCell>
+<mxCell id="3" value="+ id: int" style="text;html=1;align=left;spacingLeft=6;" vertex="1" parent="2"><mxGeometry y="26" width="180" height="26" as="geometry"/></mxCell>
+<mxCell id="4" value="+ login()" style="text;html=1;align=left;spacingLeft=6;" vertex="1" parent="2"><mxGeometry y="52" width="180" height="26" as="geometry"/></mxCell>
+Relations: style="endArrow=block;endFill=0;html=1;" (inheritance) between classes.
+
+UML SEQUENCE ───────────────────────────────────────
+Each actor = a lifeline column. Messages = horizontal arrows, time flows DOWN.
+Lifeline: style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;" (w100 h300)
+Message: style="html=1;endArrow=block;" edge between lifelines, lower y = later.
+Space lifelines x+200.
+
+ER DIAGRAM ─────────────────────────────────────────
+Entity = swimlane like UML class but rows are columns of a table.
+Relationship edge: style="endArrow=ERmany;startArrow=ERone;html=1;" (crow's-foot).
+
+NETWORK ────────────────────────────────────────────
+style="sketch=0;html=1;shape=mxgraph.networks.router;" / .switch / .firewall / .server
+(w60 h60, add a value label). Connect with plain edges. Tier: core top, edge below.
+
+CLOUD (AWS/Azure/GCP) ──────────────────────────────
+AWS resource: style="sketch=0;html=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.ec2;" (w60 h60)
+(swap resIcon: aws4.s3, aws4.lambda, aws4.rds, aws4.api_gateway ...). Group related
+resources inside a container rectangle. Connect with edges.
+
+BPMN ───────────────────────────────────────────────
+Start event: style="ellipse;html=1;fillColor=#E6F7F0;strokeColor=#34A881;" (w40 h40)
+Task: style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F1FE;strokeColor=#3B82F6;" (w120 h60)
+Gateway: style="rhombus;html=1;fillColor=#FFF4E0;strokeColor=#F59E0B;" (w50 h50)
+End event: style="ellipse;html=1;fillColor=#FDEBEC;strokeColor=#EF4444;strokeWidth=3;" (w40 h40)
+Left→right flow. Optionally wrap in a pool: style="swimlane;html=1;horizontal=0;".
+
+VENN ───────────────────────────────────────────────
+2-3 overlapping ellipses, semi-transparent so overlap shows.
+style="ellipse;whiteSpace=wrap;html=1;fillColor=#E8F1FE;strokeColor=#3B82F6;fillOpacity=40;" (w240 h240)
+Overlap circles by ~100px on x.
+
+WIREFRAME / MOCKUP ─────────────────────────────────
+Frame: style="shape=mxgraph.mockup.containers.browserWindow;html=1;" (w320 h240)
+Inside: buttons style="rounded=1;html=1;fillColor=#f5f5f5;strokeColor=#666;",
+text fields style="rounded=0;html=1;fillColor=#ffffff;strokeColor=#999;",
+labels style="text;html=1;align=left;". Stack rows top→down inside the frame.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GENERAL LAYOUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Keep everything within x=0-1169, y=0-827.
+Never overlap non-chart nodes; leave ~40px gaps.
+Node count by complexity: SIMPLE ≤ 8, MEDIUM ≤ 15, COMPLEX ≤ 25.
+Pick the smallest count that fully answers the request.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STRICT RULES
@@ -139,6 +261,11 @@ async function isDiagramRequest(userMessage) {
     "build",
     "design",
     "produce",
+    // Common ways users phrase a diagram request (still require a diagram noun
+    // alongside, so "i need help" stays chat). Added after live testing showed
+    // "need a mind map for this business" was missed.
+    "need",
+    "want",
   ];
   const diagramWords = [
     "diagram",
@@ -152,6 +279,16 @@ async function isDiagramRequest(userMessage) {
     "map",
     "visualization",
     "visualisation",
+    // Families added with the expanded prompt library (Step 1) that lack the
+    // words diagram/chart/map — without these the intent gate wrongly routes
+    // them to chat (verified live 2026-07-22).
+    "architecture",
+    "network",
+    "topology",
+    "wireframe",
+    "mockup",
+    "bpmn",
+    "gantt",
   ];
 
   const hasCreate = createWords.some((w) => lower.includes(w));
@@ -192,6 +329,197 @@ async function isDiagramRequest(userMessage) {
 
   // No clear create+diagram pair found
   return false;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Complexity classification (Step 3)
+// Returns { type: SIMPLE|MEDIUM|COMPLEX, diagramType, estimatedNodes, source }
+// Primary: a tiny Gemini JSON call. Fallback: deterministic keyword scoring.
+// Used by detectIntent to (later) size the credit estimate and route models.
+// ─────────────────────────────────────────────────────────────
+
+const COMPLEXITY_PROMPT = `You classify diagram-generation requests. Return ONLY compact JSON, no markdown, no explanation:
+{"type":"SIMPLE","diagramType":"flowchart","estimatedNodes":6}
+Rules:
+- SIMPLE: one clear idea, few elements (<=8 nodes). e.g. a small pie, a 3-step flow.
+- MEDIUM: a full but focused diagram (9-15 nodes). e.g. a login flow with branches.
+- COMPLEX: detailed / comprehensive / many parts (16-25 nodes). e.g. a full system architecture.
+diagramType must be one of: flowchart, pie, bar, line, mindmap, orgchart, uml-class, uml-sequence, er, network, cloud, bpmn, venn, wireframe.
+estimatedNodes is the integer node count you would need to fully satisfy the request (2-25).`;
+
+// First matching family wins; default flowchart.
+const DIAGRAM_TYPE_MATCHERS = [
+  ["pie", /\b(pie|percentage|percent|share|distribution|proportion)\b/],
+  ["bar", /\b(bar chart|bar graph|column chart|histogram)\b/],
+  ["line", /\b(line chart|line graph|trend|over time|time series)\b/],
+  ["mindmap", /\b(mind ?map|brainstorm|idea map)\b/],
+  [
+    "orgchart",
+    /\b(org ?chart|organi[sz]ation|hierarchy|reporting line|team structure)\b/,
+  ],
+  ["uml-sequence", /\b(sequence diagram|interaction diagram|message flow)\b/],
+  ["uml-class", /\b(class diagram|uml class|object model)\b/],
+  ["er", /\b(er diagram|entity relationship|database schema|data model)\b/],
+  ["network", /\b(network|topology|router|firewall|switch)\b/],
+  ["cloud", /\b(aws|azure|gcp|cloud architecture|lambda|s3|ec2|rds)\b/],
+  ["bpmn", /\b(bpmn|business process|swimlane|gateway)\b/],
+  ["venn", /\b(venn|overlap|intersection)\b/],
+  ["wireframe", /\b(wireframe|mockup|ui screen|screen design|prototype)\b/],
+  ["flowchart", /\b(flow ?chart|workflow|process|vsm|value stream|steps?)\b/],
+];
+
+function detectDiagramType(text) {
+  for (const [type, re] of DIAGRAM_TYPE_MATCHERS) {
+    if (re.test(text)) return type;
+  }
+  return "flowchart";
+}
+
+function classifyComplexityByKeywords(message) {
+  const text = String(message || "").toLowerCase();
+  const diagramType = detectDiagramType(text);
+
+  let score = 0;
+  const complexSignals = [
+    "detailed",
+    "comprehensive",
+    "complete",
+    "full",
+    "entire",
+    "complex",
+    "large",
+    "advanced",
+    "end to end",
+    "end-to-end",
+    "whole",
+    "in depth",
+    "in-depth",
+    "elaborate",
+    "every step",
+    "all steps",
+  ];
+  if (complexSignals.some((w) => text.includes(w))) score += 3;
+
+  // Each connector (and / comma / arrow) hints at more elements.
+  const connectors = (text.match(/\band\b|,|;|->|→/g) || []).length;
+  score += Math.min(connectors, 6) * 0.7;
+
+  if (text.length > 240) score += 2;
+  else if (text.length > 120) score += 1;
+
+  // Some families are inherently richer / lighter.
+  if (
+    ["er", "network", "cloud", "bpmn", "uml-sequence", "uml-class"].includes(
+      diagramType,
+    )
+  )
+    score += 1.5;
+  if (["pie", "venn", "line"].includes(diagramType)) score -= 1;
+
+  let type, estimatedNodes;
+  if (score <= 1.5) {
+    type = "SIMPLE";
+    estimatedNodes = 6;
+  } else if (score < 5) {
+    type = "MEDIUM";
+    estimatedNodes = 12;
+  } else {
+    type = "COMPLEX";
+    estimatedNodes = 20;
+  }
+  return { type, diagramType, estimatedNodes, source: "keyword" };
+}
+
+async function classifyComplexity(message, context = "") {
+  // When a conversation context is supplied, complexity is judged from the
+  // whole discussion (not just the one-line request) — so "a mind map for this
+  // business" after describing a business rates by the described detail.
+  const classifyInput = context
+    ? `Conversation so far:\n${context}\n\nDiagram request: ${message}`
+    : String(message || "");
+
+  const fallback = classifyComplexityByKeywords(classifyInput);
+  if (!process.env.GEMINI_API_KEY) return fallback;
+
+  try {
+    const genAI = getGemini();
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.5-flash",
+      systemInstruction: COMPLEXITY_PROMPT,
+    });
+
+    // NOTE: generationConfig MUST be passed in the generateContent REQUEST
+    // (not at model creation) for @google/generative-ai 0.21.0 to honour
+    // responseMimeType JSON mode. thinkingBudget:0 turns off gemini-2.5-flash
+    // "thinking" tokens — otherwise they consume maxOutputTokens before any
+    // JSON is emitted (and add cost) for what is a trivial classification.
+    const result = await model.generateContent({
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: classifyInput.slice(0, 2000) }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens: 150,
+        responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+
+    // Belt-and-braces: strip any stray fences / prose, then take the {...} block.
+    let raw = result.response
+      .text()
+      .trim()
+      .replace(/```json\s*/gi, "")
+      .replace(/```/g, "")
+      .trim();
+    const jsonStart = raw.indexOf("{");
+    const jsonEnd = raw.lastIndexOf("}");
+    if (jsonStart > -1 && jsonEnd > jsonStart) {
+      raw = raw.slice(jsonStart, jsonEnd + 1);
+    }
+    const parsed = JSON.parse(raw);
+
+    const type = ["SIMPLE", "MEDIUM", "COMPLEX"].includes(
+      String(parsed.type).toUpperCase(),
+    )
+      ? String(parsed.type).toUpperCase()
+      : fallback.type;
+    const estimatedNodes = Number.isFinite(parsed.estimatedNodes)
+      ? Math.max(2, Math.min(25, Math.round(parsed.estimatedNodes)))
+      : fallback.estimatedNodes;
+    const diagramType =
+      typeof parsed.diagramType === "string" && parsed.diagramType.trim()
+        ? parsed.diagramType.trim().toLowerCase()
+        : fallback.diagramType;
+
+    return { type, diagramType, estimatedNodes, source: "gemini" };
+  } catch (err) {
+    logger.warn(
+      `[AIDetect] complexity classifier failed, using keyword fallback: ${err.message}`,
+    );
+    return fallback;
+  }
+}
+
+// Pre-generation credit estimate shown to the user (Step 4). This is a
+// heuristic RANGE derived from the complexity tier — the exact charge is
+// computed from real token usage after generation (Step 7). Ranges align
+// with the locked decisions: Simple ~3, Medium ~4-5, Complex ~6 credits.
+const CREDIT_ESTIMATE_RANGES = {
+  SIMPLE: { min: 2, max: 4, likely: 3 },
+  MEDIUM: { min: 4, max: 6, likely: 5 },
+  COMPLEX: { min: 5, max: 8, likely: 6 },
+};
+
+function estimateCredits(complexity) {
+  const type =
+    complexity && complexity.type
+      ? String(complexity.type).toUpperCase()
+      : "MEDIUM";
+  return CREDIT_ESTIMATE_RANGES[type] || CREDIT_ESTIMATE_RANGES.MEDIUM;
 }
 
 function sanitizeXml(xml) {
@@ -257,7 +585,11 @@ async function generateWithClaude(userMessage) {
   if (!xml || !xml.includes("<mxGraphModel")) {
     throw new Error("Claude did not return valid mxGraph XML");
   }
-  return { xml, model: "claude-sonnet-4-6" };
+  const usage = {
+    inputTokens: response.usage?.input_tokens || 0,
+    outputTokens: response.usage?.output_tokens || 0,
+  };
+  return { xml, model: "claude-sonnet-4-6", usage };
 }
 
 async function generateWithGemini(userMessage) {
@@ -273,10 +605,31 @@ async function generateWithGemini(userMessage) {
   if (!xml || !xml.includes("<mxGraphModel")) {
     throw new Error("Gemini did not return valid mxGraph XML");
   }
-  return { xml, model: "gemini-2.5-flash" };
+  const um = result.response.usageMetadata || {};
+  const usage = {
+    inputTokens: um.promptTokenCount || 0,
+    outputTokens: um.candidatesTokenCount || 0,
+  };
+  return { xml, model: "gemini-2.5-flash", usage };
 }
 
-async function generateDiagramXml(userMessage, user = null) {
+async function generateDiagramXml(
+  userMessage,
+  user = null,
+  complexity = null,
+  context = "",
+) {
+  // Conversation-aware generation — when the caller supplies recent chat
+  // context, prepend it so references like "this business" resolve to what was
+  // discussed (like Claude/Gemini chat). Reassigning userMessage here means the
+  // retry loop below reuses the contextual prompt automatically.
+  if (context) {
+    userMessage =
+      `Conversation so far:\n${context}\n\n---\n` +
+      `Using the conversation above as context (resolve references like "this" ` +
+      `or "this business" from it), create the following diagram: ${userMessage}`;
+  }
+
   // Tier resolution — accepts user object, userId string, or null.
   // Always falls back to DB lookup (B2 approach) so the result is
   // accurate even if req.user is missing hasPro / subscription.
@@ -289,13 +642,26 @@ async function generateDiagramXml(userMessage, user = null) {
 
   const tier = userId ? await getTierByUserId(userId) : "free";
 
+  // Step 6 — model routing by complexity (paid-only Claude):
+  //   SIMPLE            → Gemini (all tiers)
+  //   MEDIUM / COMPLEX  → Claude if pro/team, else Gemini
+  //   free              → always Gemini
+  // `complexity` is supplied by the caller (the interactive controller, which
+  // already classified the request). When it is NOT supplied (e.g. the
+  // document→diagram path, unified later in Step 9), routing falls back to the
+  // existing tier-only behaviour — only an explicit SIMPLE sends a paid user
+  // to Gemini.
+  const isSimple =
+    complexity && String(complexity.type).toUpperCase() === "SIMPLE";
+
   const useClaude =
     (tier === "pro" || tier === "team") &&
+    !isSimple &&
     process.env.ANTHROPIC_API_KEY &&
     process.env.ANTHROPIC_API_KEY !== "placeholder";
 
   logger.info(
-    `[AIDetect] tier=${tier} provider=${useClaude ? "claude" : "gemini"} userId=${userId || "anon"}`,
+    `[AIDetect] tier=${tier} complexity=${complexity ? complexity.type : "unknown"} provider=${useClaude ? "claude" : "gemini"} userId=${userId || "anon"}`,
   );
 
   const maxAttempts = 3;
@@ -399,28 +765,42 @@ Simple ASCII labels only. No special characters.`;
 
 /**
  * Tier-aware diagram generation from extracted DOCUMENT text (PDF/Word).
- * Mirrors generateDiagramXml's routing — Free → Gemini, Pro/Team → Claude
- * (with Claude→Gemini fallback, retry, sanitize/validate) — so the document
- * upload path no longer hardcodes Gemini or bypasses the tier router.
+ * Step 9 — unified with the interactive path: the model PICKS the best diagram
+ * family from the content (no longer hardcoded to VSM), complexity is
+ * classified so provider routing (Step 6) and token-based billing (Step 7)
+ * apply exactly as they do for a typed request.
  *
  * @param {string} extractedText raw text pulled from the uploaded document
  * @param {object|string|null} user req.user object, userId string, or null
- * @returns {Promise<{xml: string, model: string}>}
+ * @returns {Promise<{xml: string, model: string, usage: object}>}
  */
 async function generateDiagramXmlFromText(extractedText, user = null) {
-  // Frame the document text as a diagram-generation request, then delegate to
-  // generateDiagramXml so tier resolution, provider routing, retry, fallback,
-  // sanitisation and validation are all shared (single source of truth).
+  // Generic framing — let the model choose the family (flowchart, VSM, org
+  // chart, mind map, ER, sequence, architecture, …) using the type selector in
+  // DIAGRAM_SYSTEM_PROMPT, instead of forcing a Value Stream Map every time.
   const userMessage =
-    `Create a Value Stream Mapping (VSM) diagram from this process document. ` +
-    `Use the document content to identify the process steps and their order.\n\n` +
+    `Create the most appropriate diagram from this document. Read the content, ` +
+    `choose the diagram family that best represents it, then generate it.\n\n` +
     `Document content:\n${(extractedText || "").substring(0, 3000)}`;
 
-  return generateDiagramXml(userMessage, user);
+  // Classify so routing + token billing match the interactive path. Defensive:
+  // a classifier failure just leaves generateDiagramXml on its tier-only route.
+  let complexity = null;
+  try {
+    complexity = await classifyComplexity(userMessage);
+  } catch (_) {
+    complexity = null;
+  }
+
+  const result = await generateDiagramXml(userMessage, user, complexity);
+  return { ...result, complexity };
 }
 
 module.exports = {
   isDiagramRequest,
+  classifyComplexity,
+  classifyComplexityByKeywords,
+  estimateCredits,
   generateDiagramXml,
   generateDiagramXmlFromText,
   sanitizeXml,

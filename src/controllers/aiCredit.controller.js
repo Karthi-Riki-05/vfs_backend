@@ -102,6 +102,40 @@ async function persistDiagramToConversation({
   return convId;
 }
 
+// Build a compact context string from the recent messages of a conversation
+// so diagram classification + generation are conversation-aware (like a normal
+// chat). Caps at the last `limit` messages, trims each, and never includes the
+// stored diagram XML (only role + text). Returns "" for a new/empty/unknown
+// conversation. Never throws — context is best-effort.
+async function buildConversationContext(conversationId, userId, limit = 8) {
+  if (!conversationId) return "";
+  try {
+    const conv = await prisma.aiConversation.findFirst({
+      where: { id: conversationId, userId },
+      select: { id: true },
+    });
+    if (!conv) return "";
+    const msgs = await prisma.aiMessage.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      select: { role: true, content: true },
+    });
+    if (!msgs || !msgs.length) return "";
+    return msgs
+      .reverse()
+      .map(
+        (m) =>
+          `${m.role === "user" ? "User" : "Assistant"}: ${String(
+            m.content || "",
+          ).slice(0, 500)}`,
+      )
+      .join("\n");
+  } catch (_) {
+    return "";
+  }
+}
+
 // Background processor for async diagram jobs. Runs AFTER the HTTP response is
 // sent (not awaited by the request), so it is immune to the reverse-proxy
 // gateway timeout that caused the 504. Generates the XML, deducts the credit on
@@ -114,18 +148,51 @@ async function processDiagramJob(jobId) {
       data: { status: "processing" },
     });
 
-    // generateDiagramXml accepts a userId string and resolves the plan/model.
-    const { xml, model } = await aiDetectService.generateDiagramXml(
-      job.prompt,
+    // Conversation-aware: pull recent chat so "this business" etc. resolve.
+    const context = await buildConversationContext(
+      job.conversationId,
       job.userId,
     );
 
+    // Classify complexity so the async path routes by it (Step 6) and charges
+    // by token usage (Step 7) — same as the sync path. Context makes the
+    // complexity reflect the whole discussion, not just the one-line request.
+    let complexity = null;
+    if (typeof aiDetectService.classifyComplexity === "function") {
+      try {
+        complexity = await aiDetectService.classifyComplexity(
+          job.prompt,
+          context,
+        );
+      } catch (_) {
+        complexity = null;
+      }
+    }
+
+    // generateDiagramXml accepts a userId string and resolves the plan/model.
+    const { xml, model, usage } = await aiDetectService.generateDiagramXml(
+      job.prompt,
+      job.userId,
+      complexity,
+      context,
+    );
+
+    const estimate =
+      complexity && typeof aiDetectService.estimateCredits === "function"
+        ? aiDetectService.estimateCredits(complexity)
+        : null;
     const deduct = await aiCreditService.deductCredit(
       job.userId,
       "diagram_generation",
       model,
       job.appContext || "free",
       job.teamId || null,
+      {
+        inputTokens: usage?.inputTokens,
+        outputTokens: usage?.outputTokens,
+        capMin: estimate?.min,
+        capMax: estimate?.max,
+      },
     );
 
     let convId = job.conversationId || null;
@@ -219,7 +286,7 @@ class AiCreditController {
   });
 
   detectIntent = asyncHandler(async (req, res) => {
-    const { message } = req.body || {};
+    const { message, conversationId } = req.body || {};
     if (!message || typeof message !== "string" || !message.trim()) {
       throw new AppError("Message is required", 400, "VALIDATION_ERROR");
     }
@@ -237,10 +304,34 @@ class AiCreditController {
       aiCreditService.getBalance(userId, appContext, teamId),
     ]);
 
+    // Step 3 — classify complexity so the UI can (Step 4) show a credit
+    // estimate before generating. Defensive: never let a classifier failure
+    // break intent detection.
+    let complexity = null;
+    let creditEstimate = null;
+    if (isDiagram && typeof aiDetectService.classifyComplexity === "function") {
+      try {
+        // Conversation-aware estimate: fold in recent chat so the shown range
+        // reflects the whole discussion, not just this one line.
+        const context = await buildConversationContext(conversationId, userId);
+        complexity = await aiDetectService.classifyComplexity(message, context);
+        creditEstimate = aiDetectService.estimateCredits(complexity);
+      } catch (_) {
+        complexity = null;
+        creditEstimate = null;
+      }
+    }
+
     res.json({
       success: true,
       data: {
         isDiagramRequest: isDiagram,
+        complexity,
+        // Estimated range shown to the user before generating (Step 4).
+        // NOTE: the actual charge is still a flat 1 credit until token-based
+        // deduction lands (Step 7) — keep creditsRequired truthful for the
+        // balance gate until then.
+        creditEstimate,
         creditsRequired: isDiagram ? 1 : 0,
         balance,
       },
@@ -286,16 +377,45 @@ class AiCreditController {
       });
     }
 
-    const { xml, model } = await aiDetectService.generateDiagramXml(
+    // Step 6 — classify complexity here so generation can route by it
+    // (SIMPLE → Gemini for all; MEDIUM/COMPLEX → Claude for paid tiers).
+    // Defensive: a classifier failure just leaves routing on its tier-only
+    // fallback inside generateDiagramXml.
+    // Conversation-aware: recent chat lets the diagram resolve references and
+    // rate complexity from the whole discussion (like Claude/Gemini chat).
+    const context = await buildConversationContext(conversationId, userId);
+    let complexity = null;
+    if (typeof aiDetectService.classifyComplexity === "function") {
+      try {
+        complexity = await aiDetectService.classifyComplexity(message, context);
+      } catch (_) {
+        complexity = null;
+      }
+    }
+
+    const { xml, model, usage } = await aiDetectService.generateDiagramXml(
       message,
       req.user,
+      complexity,
+      context,
     );
+    // Step 7 — charge by actual token usage, clamped to the estimate range.
+    const estimate =
+      complexity && typeof aiDetectService.estimateCredits === "function"
+        ? aiDetectService.estimateCredits(complexity)
+        : null;
     const result = await aiCreditService.deductCredit(
       userId,
       "diagram_generation",
       model,
       appContext,
       teamId,
+      {
+        inputTokens: usage?.inputTokens,
+        outputTokens: usage?.outputTokens,
+        capMin: estimate?.min,
+        capMax: estimate?.max,
+      },
     );
 
     // Persist to conversation
@@ -376,7 +496,7 @@ class AiCreditController {
         xml,
         model,
         conversationId: convId,
-        creditsUsed: 1,
+        creditsUsed: result.creditsUsed ?? 1,
         remainingCredits: result.remaining,
         balance: result.balance,
       },

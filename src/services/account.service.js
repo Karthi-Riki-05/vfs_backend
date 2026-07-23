@@ -116,6 +116,40 @@ class AccountService {
     }
   }
 
+  // Authorize an account deletion. Credentials users (have a password) must
+  // pass their password; OAuth/social users (no password — Google/Facebook/etc)
+  // have nothing to verify, so they confirm by typing "DELETE" instead. This
+  // lets social-login users self-delete (previously blocked with OAUTH_ACCOUNT).
+  async verifyDeleteAuthorization(userId, { password, confirmation } = {}) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { password: true },
+    });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    if (user.password) {
+      // Credentials account — require the correct password.
+      if (!password) {
+        throw new AppError("Password is required", 400, "PASSWORD_REQUIRED");
+      }
+      const valid = await argon2.verify(user.password, password);
+      if (!valid) {
+        throw new AppError("Password is incorrect", 401, "INVALID_CREDENTIALS");
+      }
+      return;
+    }
+
+    // OAuth/social account — no password to verify. Require the typed
+    // "DELETE" confirmation (case-insensitive, trimmed) as the safeguard.
+    if ((confirmation || "").trim().toUpperCase() !== "DELETE") {
+      throw new AppError(
+        'Type "DELETE" to confirm deleting your account.',
+        400,
+        "CONFIRMATION_REQUIRED",
+      );
+    }
+  }
+
   async _cancelStripeSubscriptions(user) {
     let stripe;
     try {

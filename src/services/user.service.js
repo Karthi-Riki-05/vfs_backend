@@ -48,11 +48,16 @@ class UserService {
         updatedAt: true,
         hasPro: true,
         currentVersion: true,
+        // Selected only to derive `hasPassword` below — the hash is stripped
+        // before returning. Lets the client show a password prompt for
+        // credentials users and a "type DELETE" confirm for OAuth users.
+        password: true,
       },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
     const hasTeamAccess = await this.getHasTeamAccess(id);
-    return { ...user, hasTeamAccess };
+    const { password, ...safe } = user;
+    return { ...safe, hasTeamAccess, hasPassword: !!password };
   }
 
   async updateUser(id, data) {

@@ -1453,7 +1453,7 @@ class SubscriptionService {
       }),
       // Grant seat-scaled team AI credits scoped to team appContext.
       // Monthly: seats × 60. Yearly: full year upfront (seats × 800) —
-      // e.g. 5 seats yearly = 4000. Mirrors aiCredit.grantTeamCredits().
+      // e.g. 5 seats yearly = 2500. Mirrors aiCredit.grantTeamCredits().
       prisma.aiCreditBalance.upsert({
         where: { userId_appContext: { userId, appContext: "team" } },
         create: {
@@ -1639,7 +1639,7 @@ class SubscriptionService {
     const seats = sub.usersCount || 5;
     const isYearly = sub.productType === "team_yearly";
     // Monthly: 60 credits/seat. Yearly: full year upfront (800/seat/year),
-    // matching aiCredit.service grant logic — e.g. 5 seats yearly = 4000.
+    // matching aiCredit.service grant logic — e.g. 5 seats yearly = 2500.
     const credits = isYearly
       ? seats * TEAM_CREDITS_PER_SEAT_YEARLY
       : seats * TEAM_CREDITS_PER_SEAT_MONTHLY;
