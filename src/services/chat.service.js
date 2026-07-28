@@ -69,7 +69,34 @@ class ChatService {
     return groupsWithUnread;
   }
 
-  async createChatGroup(userId, data, appContext) {
+  async createChatGroup(userId, data, appContext, activeTeamId = null) {
+    // CSV-51 permission gate: in a TEAM workspace, only the team OWNER or an
+    // ADMIN-role member may create a group and invite others — plain members
+    // cannot. The governing team is the explicit body.teamId (team-wide
+    // conversation) OR the active workspace (X-Team-Context). DMs and personal
+    // (no-team) groups are exempt — a user may always start their own DMs/
+    // personal groups.
+    const governingTeamId = data.teamId || activeTeamId || null;
+    if (governingTeamId && !data.isDirect) {
+      const govTeam = await prisma.team.findFirst({
+        where: { id: governingTeamId, deletedAt: null },
+        select: { id: true, teamOwnerId: true },
+      });
+      if (govTeam && govTeam.teamOwnerId !== userId) {
+        const membership = await prisma.teamMember.findFirst({
+          where: { userId, teamId: governingTeamId },
+          select: { role: true },
+        });
+        if (membership?.role !== "ADMIN") {
+          throw new AppError(
+            "Only team owners and admins can create groups in this workspace.",
+            403,
+            "TEAM_GROUP_CREATE_FORBIDDEN",
+          );
+        }
+      }
+    }
+
     // Explicit teamId = team-wide conversation. Verify the creator actually
     // belongs to (or owns) that team — otherwise anyone could plant a
     // conversation inside an arbitrary team.
@@ -887,43 +914,89 @@ class ChatService {
         ? { appContext: "pro" }
         : { appContext: { not: "pro" } };
 
-    // The Teams section lists ALL teams the user owns or belongs to in this
-    // workspace — not just the active context. The active-context switcher
-    // excludes OWNED teams by design (they fold into the personal context),
-    // so newly created teams could otherwise never surface in chat unless
-    // they happened to be the auto-resolved (oldest) one. Each team's
-    // conversation is still ACL'd by its own group membership, so listing
-    // them all does not cross the per-team data buckets.
-    // System-created billing shells (verifyTeam='system') stay hidden — the
-    // Teams page applies the same filter (team.service.js).
-    const myTeams = await prisma.team.findMany({
+    // Workspace isolation (CSV-51) — the sidebar scopes to the ACTIVE
+    // workspace, mirroring flow.service._workspaceScope / the shape B51 fix, so
+    // switching workspace switches the chat bucket:
+    //   • active JOINED team (member, not owner) → ONLY that team's chat; no
+    //     personal (teamId=null) standalone groups, no other teams.
+    //   • active OWNED team-app/free team, or personal (no active team) →
+    //     personal container: owned teams fold in + teamId=null standalone
+    //     groups. JOINED teams are hidden here.
+    // System-created billing shells (verifyTeam='system') stay hidden. The
+    // app-context filter (appCtxFilter) still applies on top.
+    const ownedTeams = await prisma.team.findMany({
       where: {
         deletedAt: null,
         ...appCtxFilter,
-        AND: [
-          { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
-          { OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }] },
-        ],
+        teamOwnerId: userId,
+        OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }],
       },
       select: { id: true },
     });
-    const myTeamIds = myTeams.map((t) => t.id);
+    const ownedTeamIds = ownedTeams.map((t) => t.id);
+
+    let scopedTeamIds;
+    let includeStandalone;
+    // canCreateGroups mirrors the createChatGroup gate: personal / owned →
+    // always; a JOINED team workspace → only OWNER or ADMIN. The frontend uses
+    // this to hide "+ Create Group" from plain members (backend still enforces).
+    let canCreateGroups = true;
+    if (activeTeamId) {
+      // Validate the active workspace: a non-system team in this app context
+      // that the caller owns or belongs to.
+      const activeTeam = await prisma.team.findFirst({
+        where: {
+          id: activeTeamId,
+          deletedAt: null,
+          ...appCtxFilter,
+          AND: [
+            { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
+            { OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }] },
+          ],
+        },
+        select: { id: true, teamOwnerId: true },
+      });
+      if (!activeTeam || activeTeam.teamOwnerId === userId) {
+        // Owned team folds into personal; stale/invalid active team → personal.
+        scopedTeamIds = ownedTeamIds;
+        includeStandalone = true;
+        // owner (or personal fallback) → can create.
+      } else {
+        // Joined team → strict: only that team's chat.
+        scopedTeamIds = [activeTeamId];
+        includeStandalone = false;
+        // Joined team: only an ADMIN member may create groups here.
+        const membership = await prisma.teamMember.findFirst({
+          where: { userId, teamId: activeTeamId },
+          select: { role: true },
+        });
+        canCreateGroups = membership?.role === "ADMIN";
+      }
+    } else {
+      // Personal context.
+      scopedTeamIds = ownedTeamIds;
+      includeStandalone = true;
+    }
+    const myTeamIds = scopedTeamIds;
 
     if (myTeamIds.length === 0) {
-      // B48: no NON-SYSTEM team in this app context — but a standalone
-      // (teamId=null) group/DM in this appContext still counts. A standalone
-      // Pro user's only "pro team" is the system billing shell (verifyTeam=
-      // 'system', excluded above), so the old hard lock hid the pro groups
-      // they created. Only lock when there are ALSO no standalone groups here;
-      // otherwise fall through so the main query surfaces them (teams stays []).
-      const standaloneCount = await prisma.chatGroup.count({
-        where: {
-          deletedAt: null,
-          teamId: null,
-          appContext,
-          OR: [{ userId }, { members: { some: { userId } } }],
-        },
-      });
+      // B48: no NON-SYSTEM team in the scoped workspace — but a standalone
+      // (teamId=null) group/DM in this appContext still counts (only when the
+      // personal container is in scope; a joined-team workspace never shows
+      // standalone groups). A standalone Pro user's only "pro team" is the
+      // system billing shell (excluded above), so the old hard lock hid the
+      // pro groups they created. Only lock when there are ALSO no standalone
+      // groups here; otherwise fall through so the main query surfaces them.
+      const standaloneCount = includeStandalone
+        ? await prisma.chatGroup.count({
+            where: {
+              deletedAt: null,
+              teamId: null,
+              appContext,
+              OR: [{ userId }, { members: { some: { userId } } }],
+            },
+          })
+        : 0;
       if (standaloneCount === 0) {
         return {
           teams: [],
@@ -931,6 +1004,7 @@ class ChatService {
           contacts: [],
           allGroups: [],
           locked: true,
+          canCreateGroups,
         };
       }
     }
@@ -978,7 +1052,15 @@ class ChatService {
           OR: [{ userId }, { members: { some: { userId } } }],
           AND: [
             {
-              OR: [{ teamId: { in: myTeamIds } }, { teamId: null, appContext }],
+              OR: [
+                { teamId: { in: myTeamIds } },
+                // Standalone (teamId=null) groups/DMs belong to the personal
+                // container only — hidden when a JOINED team is the active
+                // workspace (CSV-51 workspace isolation).
+                ...(includeStandalone
+                  ? [{ teamId: null, appContext }]
+                  : []),
+              ],
             },
           ],
         },
@@ -1168,6 +1250,9 @@ class ChatService {
       teams: teamsWithConvo,
       groups: regularGroups,
       contacts,
+      // Owner/admin-only group creation (CSV-51) — frontend hides "+ Create
+      // Group" when false; backend enforces regardless in createChatGroup.
+      canCreateGroups,
       // Flat list for backward compat — now also carries per-user display
       // metadata so the frontend never has to compute it.
       allGroups: chatGroups.map((g) => {

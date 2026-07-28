@@ -40,10 +40,14 @@ class ChatController {
     // teamId, which getSidebarData classifies as a team conversation —
     // collapsing them into one slot and making new groups "disappear".
     // Named groups and DMs stay teamId:null and are scoped by appContext.
+    // The active workspace (X-Team-Context) is passed SEPARATELY (not as the
+    // group's teamId) purely for the owner/admin-only create gate below.
+    const activeTeamId = req.headers["x-team-context"] || null;
     const group = await chatService.createChatGroup(
       req.user.id,
       { ...req.body, teamId: req.body?.teamId || null },
       appContext,
+      activeTeamId,
     );
     res.status(201).json({ success: true, data: group });
   });
