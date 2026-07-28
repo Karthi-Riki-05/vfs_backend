@@ -845,11 +845,38 @@ class SubscriptionService {
 
     let activated = 0;
     let failed = 0;
+    let skipped = 0;
+    // bug-031: a row whose claiming replica crashed mid-processing becomes
+    // reclaimable after this window (else it would stick in "activating" forever).
+    const staleThreshold = new Date(Date.now() - 10 * 60 * 1000);
 
     for (const sub of due) {
       const userId = sub.userId;
       const plan = sub.scheduledPlanType;
       const teamMembers = sub.scheduledTeamMembers || sub.usersCount || 5;
+
+      // bug-031: atomically CLAIM this row before any Stripe call, so two
+      // concurrent replicas (each running the same cron) can't both charge the
+      // customer's saved card. Postgres row-level UPDATE atomicity is the
+      // mutual-exclusion primitive — no advisory lock, no Redis, no schema
+      // change. Exactly one replica's updateMany matches (count === 1).
+      const claim = await prisma.subscription.updateMany({
+        where: {
+          userId: sub.userId,
+          scheduledPlanType: sub.scheduledPlanType,
+          scheduledActivationDate: sub.scheduledActivationDate,
+          OR: [
+            { status: { not: "activating" } },
+            { updatedAt: { lt: staleThreshold } },
+          ],
+        },
+        data: { status: "activating" },
+      });
+      if (claim.count === 0) {
+        // Another replica already claimed this row this tick — skip it.
+        skipped += 1;
+        continue;
+      }
 
       try {
         // 1. Cancel the current Stripe subscription (period has ended).
@@ -955,7 +982,7 @@ class SubscriptionService {
       }
     }
 
-    return { processed: due.length, activated, failed };
+    return { processed: due.length, activated, failed, skipped };
   }
 
   /**

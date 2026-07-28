@@ -44,6 +44,14 @@ const oauthSyncSchema = z.object({
     // skips — so the OAuth link is never written. See bug-003.
     providerAccountId: z.union([z.string(), z.number()]).optional(),
     accountType: z.string().max(50).optional(),
+    // bug-082: did the provider assert this email as verified? Absent/false =>
+    // the email is NOT an identity key. Must be declared here for the same
+    // bug-003 reason — validate.js replaces req.body with the parsed result.
+    // LinkedIn sends the OIDC claim as the string "true", hence the union.
+    emailVerified: z
+      .union([z.boolean(), z.enum(["true", "false"])])
+      .optional()
+      .transform((v) => v === true || v === "true"),
   }),
 });
 

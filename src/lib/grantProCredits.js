@@ -4,7 +4,7 @@ const { prisma } = require("./prisma");
 const logger = require("../utils/logger");
 
 /**
- * Grant 200 Pro AI credits to a user and optionally record a TransactionLog.
+ * Grant 50 Pro AI credits to a user and optionally record a TransactionLog.
  * Idempotent: uses upsert for the credit balance and deduplicates on txnId.
  *
  * Accepts an optional Prisma transaction client so callers inside an existing
@@ -24,23 +24,21 @@ async function grantProCredits(userId, options = {}, tx = null) {
   } = options;
 
   const _run = async (db) => {
-    const nextReset = new Date();
-    nextReset.setMonth(nextReset.getMonth() + 1);
-    nextReset.setDate(1);
-    nextReset.setHours(0, 0, 0, 0);
-
+    // Pro = 50 credits LIFETIME on every channel (web + mobile). planResetsAt
+    // MUST be null so aiCredit.service never schedules a monthly refill — Pro is
+    // a one-time $5 lifetime purchase, not a monthly allowance (bug-087).
     await db.aiCreditBalance.upsert({
       where: { userId_appContext: { userId, appContext: "pro" } },
       create: {
         userId,
         planCredits: 50,
         addonCredits: 0,
-        planResetsAt: nextReset,
+        planResetsAt: null,
         appContext: "pro",
       },
       update: {
         planCredits: 50,
-        planResetsAt: nextReset,
+        planResetsAt: null,
       },
     });
 
@@ -58,12 +56,15 @@ async function grantProCredits(userId, options = {}, tx = null) {
             paymentMethod,
             appType: "individual",
             appContext: "pro",
+            // bug-030: tag so a later charge.refunded can identify this as the
+            // one-time Pro purchase and revoke Pro (vs an AI-credit/flow charge).
+            purchaseType: "pro_upgrade",
           },
         });
       }
     }
 
-    logger.info(`[grantProCredits] 200 Pro credits granted to user ${userId}`);
+    logger.info(`[grantProCredits] 50 Pro credits granted to user ${userId}`);
   };
 
   if (tx) {

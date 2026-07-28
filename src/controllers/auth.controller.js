@@ -145,23 +145,95 @@ exports.resendVerification = asyncHandler(async (req, res) => {
 });
 
 exports.oauthSync = asyncHandler(async (req, res) => {
-  const { email, name, image, provider, providerAccountId, accountType } =
-    req.body;
+  const {
+    email,
+    name,
+    image,
+    provider,
+    providerAccountId,
+    accountType,
+    emailVerified: providerVerifiedEmail,
+  } = req.body;
 
-  let user = await prisma.user.findUnique({ where: { email } });
+  // bug-082 — identity resolution. An email the provider has NOT vouched for is
+  // not an identity key: matching on it lets a provider account carrying someone
+  // else's address resolve to their row (the mobile twin rejects this outright —
+  // see socialLogin / bug-006). Verified => match by email as before. Unverified
+  // => match ONLY an Account link already established for this provider identity.
+  const linkKey =
+    provider && providerAccountId
+      ? { provider, providerAccountId: String(providerAccountId) }
+      : null;
+
+  let user = null;
+  if (providerVerifiedEmail) {
+    user = await prisma.user.findUnique({ where: { email } });
+  } else if (linkKey) {
+    const link = await prisma.account.findUnique({
+      where: { provider_providerAccountId: linkKey },
+      include: { user: true },
+    });
+    user = link?.user || null;
+  }
 
   if (!user) {
+    // Unverified and unlinked: if the address already belongs to someone, stop —
+    // never adopt their row, never create a duplicate.
+    if (!providerVerifiedEmail) {
+      const taken = await prisma.user.findUnique({
+        where: { email },
+        select: { id: true },
+      });
+      if (taken) {
+        logger.warn(
+          `OAuth sync blocked — ${provider} did not verify ${email}, which already belongs to ${taken.id}`,
+        );
+        throw new AppError(
+          "This email is already registered and your provider did not verify it. Sign in with your password, or reset it to regain access.",
+          403,
+          "SOCIAL_EMAIL_NOT_VERIFIED",
+        );
+      }
+    }
+
     user = await prisma.user.create({
       data: {
         name: name || email.split("@")[0],
         email,
         image: image || null,
         role: "Viewer",
-        emailVerified: new Date(),
+        // Only a provider-vouched email counts as verified; otherwise the row
+        // stays subject to the OTP gate like any credentials registration.
+        emailVerified: providerVerifiedEmail ? new Date() : null,
       },
     });
     logger.info(`OAuth user created via ${provider}: ${user.id}`);
   } else {
+    // Rule #2 parity with validateUser / protect / mobile socialLogin: an
+    // inactive account must not complete sign-in (bug-082).
+    if (user.userStatus === "deleted") {
+      throw new AppError(
+        "User account has been deactivated",
+        401,
+        "USER_DEACTIVATED",
+      );
+    }
+    if (user.suspendedAt !== null) {
+      logger.warn(`OAuth sign-in blocked — account suspended: ${user.id}`);
+      throw new AppError("Account is inactive", 403, "ACCOUNT_INACTIVE");
+    }
+
+    // Super-admins must never use the OAuth path. Enforced here, before any
+    // write, because the frontend signIn check is UX only (server authoritative).
+    if (user.role === "super_admin") {
+      logger.warn(`OAuth sign-in blocked — super_admin: ${user.id}`);
+      throw new AppError(
+        "This account cannot sign in with a social provider",
+        403,
+        "OAUTH_NOT_ALLOWED",
+      );
+    }
+
     // Update image/name if not set
     const updates = {};
     if (!user.image && image) updates.image = image;
@@ -202,12 +274,13 @@ exports.oauthSync = asyncHandler(async (req, res) => {
   // team access immediately, not only after a session refresh. See bug-004.
   const hasTeamAccess = await userService.getHasTeamAccess(user.id);
 
+  // bug-083: return only what the NextAuth `signIn`/`jwt` callbacks consume.
+  // `email`/`name` are dropped — the caller already has them from the provider,
+  // and echoing profile data back widens the blast radius of any future leak.
   res.json({
     success: true,
     data: {
       id: user.id,
-      email: user.email,
-      name: user.name,
       role: user.role,
       hasPro: user.hasPro,
       currentVersion: user.currentVersion,

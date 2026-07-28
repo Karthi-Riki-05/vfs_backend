@@ -110,24 +110,35 @@ function requireModule(moduleKey) {
  * default) requires Team tier. Delegates to requireTier so the actual gate
  * remains ownership-based (header only selects WHICH tier minimum applies).
  *
- * §5 GAP-04 extension: if the caller holds the ADMIN role inside the active
- * tenant (X-Team-Context), allow team creation regardless of their own tier —
- * the sub-team is created under the tenant owner's ownerId hierarchy.
+ * bug-085 (Option A): a caller acting INSIDE another owner's tenant
+ * (X-Team-Context points to a team they do NOT own — the only kind the profile
+ * switcher ever selects, since an owned team folds into the personal context)
+ * may only be invited into / invite within that tenant team. They must NOT
+ * mint a new, caller-owned top-level team: it would escape the tenant owner's
+ * hierarchy and, via the caller's own (often free) tier, create a downgraded
+ * workspace. We block that here BEFORE requireTier, because requireTier
+ * resolves entitlements WITH tenant inheritance and would otherwise let any
+ * member of a paid tenant pass on the owner's inherited team tier — regardless
+ * of role. (This replaces the former §5 GAP-04 ADMIN allow-branch, which let
+ * ADMINs — and, via inheritance, ordinary members — create caller-owned teams.)
+ * Team owners and the personal/no-context case fall through to the own-tier
+ * gate below (getEntitlements resolves to the caller: no teamId, or caller==owner).
  */
 async function requireTeamCreateEntitlement(req, res, next) {
   try {
     const teamId = req.headers["x-team-context"] || null;
     if (teamId && req.user?.id) {
-      const membership = await prisma.teamMember.findFirst({
-        where: {
-          teamId,
-          userId: req.user.id,
-          role: "ADMIN",
-          team: { deletedAt: null },
-        },
-        select: { id: true },
+      const tenant = await prisma.team.findFirst({
+        where: { id: teamId, deletedAt: null },
+        select: { teamOwnerId: true },
       });
-      if (membership) return next();
+      if (tenant && tenant.teamOwnerId !== req.user.id) {
+        throw new AppError(
+          "Members cannot create new teams inside a workspace they do not own. Switch to your personal workspace to create a team.",
+          403,
+          "TEAM_CREATE_FORBIDDEN",
+        );
+      }
     }
     const appContext =
       req.headers["x-app-context"] || req.user?.currentVersion || "team";

@@ -187,11 +187,52 @@ class PaymentService {
         ],
       },
       include: {
-        user: { select: { id: true, name: true, email: true } },
+        user: {
+          select: { id: true, name: true, email: true, proPurchasedAt: true },
+        },
       },
     });
 
     const user = txLog?.user || null;
+
+    // bug-030: a FULL refund of the one-time Pro purchase must revoke Pro access
+    // (previously the refund was only logged + emailed, so refunded users kept
+    // lifetime Pro forever). Only fires for a pro_upgrade charge, only on a full
+    // refund, and is idempotent (no-op once proPurchasedAt is already null).
+    if (
+      isFull &&
+      txLog?.purchaseType === "pro_upgrade" &&
+      user?.proPurchasedAt
+    ) {
+      // Keep hasPro/tier only if the user ALSO holds an independent live Team
+      // subscription — a Team+Pro user who refunds just Pro keeps Team access.
+      const teamSub = await prisma.subscription.findUnique({
+        where: { userId: user.id },
+        select: { status: true },
+      });
+      const hasLiveTeam =
+        !!teamSub &&
+        (teamSub.status === "active" || teamSub.status === "cancelling");
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          proPurchasedAt: null,
+          proFlowLimit: 10,
+          proUnlimitedFlows: false,
+          ...(hasLiveTeam ? {} : { hasPro: false, currentVersion: "free" }),
+        },
+      });
+      // Zero the Pro plan credits granted on purchase; leave add-on credits
+      // (bought separately) untouched — same pattern as downgradeUser().
+      await prisma.aiCreditBalance.updateMany({
+        where: { userId: user.id, appContext: "pro" },
+        data: { planCredits: 0 },
+      });
+      logger.info(
+        `[Webhook] Pro entitlement revoked on full refund for user ${user.id} (teamRetained=${hasLiveTeam})`,
+      );
+    }
 
     if (user?.email) {
       const amount = (charge.amount_refunded / 100).toFixed(2);

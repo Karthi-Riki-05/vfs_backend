@@ -223,14 +223,18 @@ model User {
   currentVersion              UserVersion @default(free) @map("current_version")
   isLegacyPro                 Boolean     @default(false) @map("is_legacy_pro")
   isLegacyBcrypt              Boolean     @default(false) @map("is_legacy_bcrypt")
-  // WebView-safe AI-billing context: the team whose AI-credit pool the user
-  // last chose to bill (null = personal). Persisted server-side so a killed/
-  // relaunched Flutter WebView restores the selection without sessionStorage.
-  // Billing-only — NOT a data scope (flows/dashboard stay owner-private).
+  // WebView-safe active-workspace context: the team the user last selected
+  // (null = personal). Persisted server-side so a killed/relaunched Flutter
+  // WebView restores the selection without sessionStorage. Restored as
+  // X-Team-Context, so it scopes BOTH data (the selected team's private
+  // bucket) AND billing — switching team changes which flows/dashboard rows
+  // are shown. NOT billing-only.
   lastActiveTeamId            String?     @map("last_active_team_id")
   // Separate active-context for the Pro app (?app=pro). The Pro app stores its
   // proTeamId here so it never bleeds into the Team app's lastActiveTeamId —
-  // each app reads back its own context (cross-app isolation). Billing-only.
+  // each app reads back its own context (cross-app isolation). Restored as
+  // X-Team-Context → drives data + billing for ?app=pro (the Pro team IS the
+  // Pro app's data bucket). NOT billing-only.
   lastActiveProTeamId         String?     @map("last_active_pro_team_id")
   refreshToken                String?     @map("refresh_token") @db.Text
 

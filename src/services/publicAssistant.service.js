@@ -42,8 +42,8 @@ KEY FEATURES
 
 PRICING (USD; local currency shown at checkout)
 Two separate apps — the Team app and the Pro app:
-- FREE (in the Team app): $0 — 50 flows free, 20 AI credits (one-time), AI powered by Gemini. No share/export.
-- PRO (the Pro app): $5 ONE-TIME, LIFETIME — no subscription ever. 10 flows included (expandable), 200 AI credits that never expire, AI powered by Claude, share/export, unwatermarked + password-protected sharing. Optional add-ons: $10/month for 100 flows, $20/month for unlimited; one-time 30-day flow packs $10/$20.
+- FREE (in the Team app): $0 — 50 flows free, 10 AI credits (one-time), AI powered by Gemini. No share/export.
+- PRO (the Pro app): $5 ONE-TIME, LIFETIME — no subscription ever. 10 flows included (expandable), 50 AI credits that never expire, AI powered by Claude, share/export, unwatermarked + password-protected sharing. Optional add-ons: $10/month for 100 flows, $20/month for unlimited; one-time 30-day flow packs $10/$20.
 - TEAM (in the Team app): $2/user/month or $20/user/year, 5-seat minimum (5–30 seats) — unlimited flows, Claude AI, real-time chat, roles/invites, admin dashboard.
 - TEAM AI CREDITS SCALE WITH SEATS: monthly plans get 60 credits per seat per month; yearly plans get 800 credits per seat per year (granted upfront). Always compute for the visitor's team size. Examples: 5 seats = 300/month, 10 seats = 600/month, 25 seats = 1,500/month (or 25 × 800 = 20,000/year upfront on yearly). Never quote "300" as a fixed Team allowance — 300 is only the 5-seat minimum.
 - AI credit top-up packs for any plan: $5 → 50, $8 → 100, $15 → 200 credits.

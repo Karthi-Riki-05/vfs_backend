@@ -112,7 +112,7 @@ class ProService {
    * called automatically by ProGuard once a `?app=pro` user is authenticated.
    *
    * Provisions three things atomically and idempotently:
-   *   1. 200 lifetime Pro AI credits (appContext='pro', planResetsAt=NULL —
+   *   1. 50 lifetime Pro AI credits (appContext='pro', planResetsAt=NULL —
    *      Pro never refills; see aiCredit.service getOrCreateBalance).
    *   2. User promotion: hasPro=true, currentVersion='pro', proPurchasedAt set.
    *   3. The user's own Pro team (appContext='pro') so Pro flows get a stable
@@ -176,7 +176,7 @@ class ProService {
     const proTeamName = `${user.name || "My"}'s Pro Team`;
 
     const proTeam = await prisma.$transaction(async (tx) => {
-      // 1. Pro AI credits — 200 lifetime, never resets. `update: {}` keeps any
+      // 1. Pro AI credits — 50 lifetime, never resets. `update: {}` keeps any
       //    existing balance/addons intact so a re-grant can never double them.
       await tx.aiCreditBalance.upsert({
         where: { userId_appContext: { userId, appContext: "pro" } },
@@ -439,23 +439,21 @@ class ProService {
     // personal (teamId:null) flows as Pro usage.
     await this._ensureProTeam(userId);
 
-    // Grant 200 AI credits/month for new Pro ($5) — idempotent, webhook may also do this.
-    const nextReset = new Date();
-    nextReset.setMonth(nextReset.getMonth() + 1);
-    nextReset.setDate(1);
-    nextReset.setHours(0, 0, 0, 0);
+    // Grant 50 LIFETIME AI credits for new Pro ($5) — idempotent, webhook may
+    // also do this. planResetsAt=null: Pro credits never refill (one-time
+    // lifetime purchase, not a monthly allowance) — same on web + mobile (bug-087).
     await prisma.aiCreditBalance.upsert({
       where: { userId_appContext: { userId, appContext: "pro" } },
       create: {
         userId,
         planCredits: 50,
         addonCredits: 0,
-        planResetsAt: nextReset,
+        planResetsAt: null,
         appContext: "pro",
       },
       update: {
         planCredits: 50,
-        planResetsAt: nextReset,
+        planResetsAt: null,
       },
     });
 
@@ -475,6 +473,8 @@ class ProService {
           paymentMethod: session.payment_method_types?.[0] || "card",
           appType: "individual",
           appContext: "pro",
+          // bug-030: tag so a later charge.refunded can match & revoke Pro.
+          purchaseType: "pro_upgrade",
         },
       });
     }
@@ -507,7 +507,7 @@ class ProService {
         return {
           requiresPurchase: true,
           message:
-            "Purchase Pro ($1 one-time) to access this app. Redirecting to checkout.",
+            "Purchase Pro ($5 one-time) to access this app. Redirecting to checkout.",
           ...checkout,
         };
       }
@@ -787,7 +787,7 @@ class ProService {
               <p>Your ValueChart Pro lifetime access is now active.</p>
               <h3 style="margin-top:20px">What you get</h3>
               <ul style="line-height:1.8">
-                <li>200 AI diagram credits per month</li>
+                <li>50 AI diagram credits per month</li>
                 <li>All team features — included</li>
                 <li>Unlimited team members</li>
                 <li>Team chat</li>

@@ -1352,27 +1352,36 @@ class AiAssistantService {
     //   6. AiConsent   — consent record (last, so consent checks during the
     //                    transaction do not see a missing consent mid-flight)
     //
-    // Wrapped in a serialisable transaction so the erasure is atomic.
-    await prisma.$transaction(async (tx) => {
-      // Step 1: collect the user's conversation ids so we can delete messages
-      // by a concrete FK rather than a nested-relation filter (which Prisma
-      // deleteMany does not support and silently skips).
-      const convIds = await tx.aiConversation
-        .findMany({ where: { userId }, select: { id: true } })
-        .then((rows) => rows.map((r) => r.id));
+    // Wrapped in an explicitly Serializable transaction so the erasure is both
+    // atomic and isolation-safe: at the DB default (Read Committed) a row
+    // inserted into one of these tables mid-wipe could survive the deleteMany
+    // scan. Serializable makes the wipe behave as if it ran with no concurrent
+    // writer. Single-user GDPR erasure has near-zero contention, so the rare
+    // Serializable write-conflict (Prisma P2034) is acceptable — the caller can
+    // simply retry the delete.
+    await prisma.$transaction(
+      async (tx) => {
+        // Step 1: collect the user's conversation ids so we can delete messages
+        // by a concrete FK rather than a nested-relation filter (which Prisma
+        // deleteMany does not support and silently skips).
+        const convIds = await tx.aiConversation
+          .findMany({ where: { userId }, select: { id: true } })
+          .then((rows) => rows.map((r) => r.id));
 
-      if (convIds.length > 0) {
-        await tx.aiMessage.deleteMany({
-          where: { conversationId: { in: convIds } },
-        });
-      }
+        if (convIds.length > 0) {
+          await tx.aiMessage.deleteMany({
+            where: { conversationId: { in: convIds } },
+          });
+        }
 
-      await tx.aiConversation.deleteMany({ where: { userId } });
-      await tx.aiJob.deleteMany({ where: { userId } });
-      await tx.aiCreditUsage.deleteMany({ where: { userId } });
-      await tx.aiCreditBalance.deleteMany({ where: { userId } });
-      await tx.aiConsent.deleteMany({ where: { userId } });
-    });
+        await tx.aiConversation.deleteMany({ where: { userId } });
+        await tx.aiJob.deleteMany({ where: { userId } });
+        await tx.aiCreditUsage.deleteMany({ where: { userId } });
+        await tx.aiCreditBalance.deleteMany({ where: { userId } });
+        await tx.aiConsent.deleteMany({ where: { userId } });
+      },
+      { isolationLevel: "Serializable" },
+    );
 
     return { deleted: true };
   }

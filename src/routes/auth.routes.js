@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const authController = require("../controllers/auth.controller");
 const validate = require("../middleware/validate");
+const internalOnly = require("../middleware/internalOnly");
 const { authLimiter, resendLimiter } = require("../middleware/rateLimiter");
 const {
   registerSchema,
@@ -118,8 +119,13 @@ router.post(
   authController.validateUser,
 );
 
+// Server-to-server only: the Next.js server calls this after completing the
+// OAuth handshake. Nothing here is verifiable from the body alone, so the
+// caller itself is authenticated (bug-083). This router is mounted at both
+// /api/v1/auth and /api/auth, so one wiring covers both paths.
 router.post(
   "/oauth-sync",
+  internalOnly,
   authLimiter,
   validate(oauthSyncSchema),
   authController.oauthSync,

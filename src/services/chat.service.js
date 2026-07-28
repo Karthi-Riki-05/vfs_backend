@@ -593,7 +593,12 @@ class ChatService {
       }),
       prisma.chatGroup.findUnique({
         where: { id: groupId },
-        select: { name: true },
+        // bug-089: ChatGroup has `title`, not `name`. Selecting `name` (a
+        // non-existent column) made Prisma THROW here, and since the caller
+        // fires this via setImmediate (unawaited), the rejection was swallowed
+        // — so offline members received NO chat push at all. Also pull
+        // appContext to scope delivery to the right app shell (below).
+        select: { title: true, appContext: true },
       }),
     ]);
     const senderFirstName = (sender?.name || "Someone").split(" ")[0];
@@ -607,16 +612,23 @@ class ChatService {
       const text = (content || "").trim();
       preview = text.length > 50 ? `${text.slice(0, 50)}…` : text;
     }
-    if (group?.name) preview = preview ? `${preview}` : preview;
-
     const push = require("./push.service");
     const notification = push.builders.newMessage({
       senderName: senderFirstName,
       preview,
       groupId,
     });
-    if (group?.name) notification.title = `${senderFirstName} • ${group.name}`;
-    await push.sendPushToMultipleUsers(offlineUserIds, notification);
+    if (group?.title)
+      notification.title = `${senderFirstName} • ${group.title}`;
+    // bug-089: scope delivery to the group's app shell (pro vs team) so a
+    // team-chat push never lands on the Pro app's devices and vice-versa —
+    // mirrors chat's appContext isolation ("pro" vs everything-else).
+    const pushAppContext = group?.appContext === "pro" ? "pro" : "team";
+    await push.sendPushToMultipleUsers(
+      offlineUserIds,
+      notification,
+      pushAppContext,
+    );
   }
 
   async createFileMessage(groupId, userId, fileData) {
