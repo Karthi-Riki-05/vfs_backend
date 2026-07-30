@@ -1,6 +1,12 @@
 const userService = require("../services/user.service");
 const asyncHandler = require("../utils/asyncHandler");
 const { prisma } = require("../lib/prisma");
+const {
+  OWNER_PLAN_SELECT,
+  planFromSubscription,
+  hasProPurchase,
+  resolveOwnedPlan,
+} = require("../utils/planResolver");
 
 class UserController {
   getMe = asyncHandler(async (req, res) => {
@@ -16,7 +22,7 @@ class UserController {
     // stale (e.g. user upgraded from Pro → Team Monthly via Stripe but the
     // sync didn't write back to currentVersion). The subscription row is
     // the source of truth.
-    const [activeSub, dbUser, ownsAnyTeam] = await Promise.all([
+    const [activeSub, dbUser] = await Promise.all([
       prisma.subscription.findFirst({
         where: {
           userId,
@@ -33,15 +39,12 @@ class UserController {
       }),
       prisma.user.findUnique({
         where: { id: userId },
-        select: { currentVersion: true, hasPro: true },
-      }),
-      // bug-033: every user has an implicit "team" shell row per app context
-      // (free/pro/team) to scope flows uniformly — owning a free- or
-      // pro-context row is NOT evidence of a paid Team plan. Only a genuine
-      // appContext="team" row counts here.
-      prisma.team.findFirst({
-        where: { teamOwnerId: userId, deletedAt: null, appContext: "team" },
-        select: { id: true, appContext: true },
+        select: {
+          currentVersion: true,
+          hasPro: true,
+          proPurchasedAt: true,
+          isLegacyPro: true,
+        },
       }),
     ]);
 
@@ -55,32 +58,30 @@ class UserController {
       !!activeSub &&
       (!activeSub.expiresAt || new Date(activeSub.expiresAt) > new Date());
 
-    // Resolve the plan label in priority order:
-    // 1. LIVE subscription product_type → most authoritative
-    // 2. User owns any team             → must be on team plan
-    // 3. DB users.current_version       → fallback
-    // 4. DB users.has_pro                → free/pro fallback
-    let resolvedPlan = "free";
-    let resolvedHasPro = false;
-    if (subIsLive && activeSub?.productType) {
-      const pt = String(activeSub.productType).toLowerCase();
-      if (pt.startsWith("team")) {
-        resolvedPlan = "team";
-        resolvedHasPro = true;
-      } else if (pt.startsWith("pro")) {
-        resolvedPlan = "pro";
-        resolvedHasPro = true;
-      }
-    } else if (ownsAnyTeam) {
-      resolvedPlan = ownsAnyTeam.appContext === "pro" ? "pro" : "team";
-      resolvedHasPro = true;
-    } else if (dbUser?.currentVersion === "team") {
-      resolvedPlan = "team";
-      resolvedHasPro = true;
-    } else if (dbUser?.currentVersion === "pro" || dbUser?.hasPro) {
-      resolvedPlan = "pro";
-      resolvedHasPro = true;
-    }
+    // Resolve the plan label from OWNERSHIP only:
+    // 1. LIVE subscription product_type → team / pro
+    // 2. Genuine Pro lifetime purchase  → pro
+    // 3. otherwise                      → free
+    //
+    // bug-086: three promotions used to sit between (1) and (3) and each one
+    // handed out a paid plan for free:
+    //   • `ownsAnyTeam` — owning an appContext='team' row was taken as proof of
+    //     a Team plan. Nothing deletes a team when its subscription lapses, so
+    //     an owner who stopped paying kept `currentVersion:'team'`, hasPro and
+    //     the whole team feature set PERMANENTLY. It also fired for a free user
+    //     who owns a team row at all, which is what the tester hit.
+    //   • `currentVersion === 'team' | 'pro'` — that column is the ACTIVE
+    //     WORKSPACE, not a receipt (see utils/userTier.js, which deliberately
+    //     never reads it). A stale value re-granted the plan on every load.
+    //   • bare `hasPro` — flippable by team grants, so it is not proof of the
+    //     $1 purchase; resolveOwnedPlan requires proPurchasedAt/isLegacyPro.
+    // The result is that `currentVersion` below can no longer disagree with
+    // GET /subscription/status, which is what showed "Team Plan" in the header
+    // and "Free Plan" on the profile page in the same render.
+    const resolvedPlan =
+      (subIsLive && planFromSubscription({ ...activeSub, deletedAt: null })) ||
+      (hasProPurchase(dbUser) ? "pro" : "free");
+    const resolvedHasPro = resolvedPlan !== "free";
 
     // App-isolation: caller's current workspace decides which teams appear
     // in the switcher. Pro app shows only Pro-context teams; Team app shows
@@ -103,10 +104,11 @@ class UserController {
       id: true,
       name: true,
       image: true,
-      hasPro: true,
       currentVersion: true,
       proUnlimitedFlows: true,
       proFlowLimit: true,
+      // bug-086: the plan a team GRANTS is the owner's live subscription.
+      ...OWNER_PLAN_SELECT,
     };
 
     // Two sources of switchable workspaces:
@@ -134,15 +136,17 @@ class UserController {
     // AppContext consumes (teamId/teamName/owner/plan/hasPro/…). `isOwner`
     // is additive metadata the FE can use to label the entry.
     const toOption = (team, role) => {
-      // Derive the effective plan the team grants. appContext='team' always
-      // means 'team'; otherwise fall back to the owner's hasPro flag, then
-      // their currentVersion (guards against a stale paid-owner 'free' flag).
+      // Derive the effective plan the team grants from the OWNER's live
+      // subscription. bug-086: this used to read `team.appContext` — a
+      // workspace label written at team-creation time and never revoked — so
+      // every appContext='team' row reported plan:'team', hasPro:true even
+      // with no subscription behind it. The old `owner.currentVersion`
+      // fallback had the same defect (active workspace, not a receipt).
       const owner = team.owner;
-      let plan = team.appContext;
-      if (plan !== "team") {
-        plan = owner.hasPro ? "pro" : owner.currentVersion || "free";
-      }
-      if (team.appContext === "team") plan = "team";
+      let plan = resolveOwnedPlan(owner);
+      // A pro-context workspace can never grant more than pro, whatever the
+      // owner's subscription says.
+      if (team.appContext === "pro" && plan === "team") plan = "pro";
 
       return {
         teamId: team.id,
@@ -151,8 +155,9 @@ class UserController {
         isOwner: role === "OWNER",
         owner: { id: owner.id, name: owner.name, image: owner.image },
         plan,
-        hasPro: plan === "pro" || plan === "team" || owner.hasPro,
-        proUnlimitedFlows: owner.proUnlimitedFlows,
+        hasPro: plan !== "free",
+        // Flow perks ride on the plan — an unpaid workspace grants neither.
+        proUnlimitedFlows: plan === "free" ? false : owner.proUnlimitedFlows,
         proFlowLimit: owner.proFlowLimit,
       };
     };

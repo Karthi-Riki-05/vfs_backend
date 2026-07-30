@@ -16,6 +16,7 @@ const {
 } = require("../services/entitlements.service");
 const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
+const { hasProPurchase, paidOwnerWhere } = require("../utils/planResolver");
 
 // Ordered so a higher rank satisfies a lower minimum (both paid tiers use
 // Claude). Pro and Team are distinct containers, not a strict hierarchy — this
@@ -151,14 +152,19 @@ async function requireTeamCreateEntitlement(req, res, next) {
 
 /**
  * Gate chat (a team feature). Allows callers who have team-chat access:
- *   • Pro App owners (hasPro)                  → allow
- *   • Active team workspace (currentVersion)   → allow
- *   • Member of any (non-deleted) team         → allow (can chat in that team)
+ *   • Genuine Pro lifetime purchase            → allow
+ *   • Member/owner of a team whose OWNER holds
+ *     a live paid plan                         → allow (chat inside that team)
  *   • else                                     → 403 UPGRADE_REQUIRED
  *
- * Reads req.user (populated by `authenticate` with hasPro/currentVersion) and,
- * only as a last resort, one teamMember lookup. Intentionally does NOT call the
- * entitlements service so it adds no extra user.findUnique call.
+ * bug-086: this used to allow on `user.hasPro` alone (a flag team grants can
+ * flip), on `user.currentVersion === "team"` (the ACTIVE WORKSPACE column, not
+ * a receipt — see utils/userTier.js), and on the mere EXISTENCE of a membership
+ * row. That last one is why a free user who owned two unpaid teams got 200 from
+ * every chat route: nothing removes teams or memberships when a subscription
+ * lapses, so "has a membership" outlived "someone is paying". The paid intent
+ * is preserved — a free user invited into a PAYING team still chats, because
+ * the plan is resolved from the team owner, not the caller.
  */
 async function requireTeamChatEntitlement(req, res, next) {
   try {
@@ -167,15 +173,22 @@ async function requireTeamChatEntitlement(req, res, next) {
       throw new AppError("Authentication required", 401, "UNAUTHORIZED");
     }
 
-    // Pro App owners and the active team workspace always have chat.
-    if (user.hasPro === true || user.currentVersion === "team") return next();
+    // Pro lifetime buyers get chat. `hasPro` needs proPurchasedAt as proof —
+    // both fields are already on req.user, so this costs no query.
+    if (hasProPurchase(user)) return next();
 
-    // A free user invited to a team can still chat within that team.
-    const membership = await prisma.teamMember.findFirst({
-      where: { userId: user.id, team: { deletedAt: null } },
+    // Chat lives inside a team, so the question is whether ANY team the caller
+    // belongs to (owned or joined) is currently paid for by its OWNER. The
+    // paid-owner test runs inside the query (paidOwnerWhere) so this stays a
+    // single indexed lookup, exactly as cheap as the old membership-only check.
+    const paidMembership = await prisma.teamMember.findFirst({
+      where: {
+        userId: user.id,
+        team: { deletedAt: null, owner: paidOwnerWhere() },
+      },
       select: { id: true },
     });
-    if (membership) return next();
+    if (paidMembership) return next();
 
     throw new AppError(
       "Upgrade required for team chat",

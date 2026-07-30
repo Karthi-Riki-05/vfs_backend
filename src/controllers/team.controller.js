@@ -3,6 +3,10 @@ const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const { prisma } = require("../lib/prisma");
 const aiCreditService = require("../services/aiCredit.service");
+const {
+  OWNER_PLAN_SELECT,
+  resolveOwnedPlan,
+} = require("../utils/planResolver");
 
 class TeamController {
   getTeams = asyncHandler(async (req, res) => {
@@ -192,7 +196,9 @@ class TeamController {
     const [user, memberships, ownedTeams, personalBalance] = await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
-        select: { name: true, email: true },
+        // bug-086: the own-context row must report the plan the caller actually
+        // OWNS, not the X-App-Context header they sent.
+        select: { name: true, email: true, ...OWNER_PLAN_SELECT },
       }),
       prisma.teamMember.findMany({
         where: { userId, team: { deletedAt: null } },
@@ -204,7 +210,15 @@ class TeamController {
               name: true,
               teamOwnerId: true,
               appContext: true,
-              owner: { select: { id: true, name: true, email: true } },
+              owner: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  // bug-086: a joined team grants the OWNER's plan.
+                  ...OWNER_PLAN_SELECT,
+                },
+              },
             },
           },
         },
@@ -242,12 +256,21 @@ class TeamController {
     const teams = await Promise.all(
       joined.map(async ({ team, role }) => {
         const bal = await aiCreditService.getBalance(userId, "team", team.id);
+        // bug-086: `plan` / `hasPro` were never sent, so the frontend's
+        // `matched?.plan || "team"` fallback (AiBillingContext / AppContext)
+        // silently granted TEAM to every switched-into workspace. Send the
+        // truth — derived from the owner's live subscription — so that
+        // fallback can never fire.
+        let plan = resolveOwnedPlan(team.owner);
+        if (team.appContext === "pro" && plan === "team") plan = "pro";
         return {
           teamId: team.id,
           label: team.name || `${team.owner?.name || "Team"}'s Team`,
           ownerName: team.owner?.name || null,
           ownerEmail: team.owner?.email || null,
           role,
+          plan,
+          hasPro: plan !== "free",
           aiCredits: {
             planCredits: bal.planCredits,
             addonCredits: bal.addonCredits,
@@ -269,7 +292,10 @@ class TeamController {
           ownerName: user?.name || null,
           ownerEmail: user?.email || null,
           avatar: ownLabel?.[0]?.toUpperCase() || null,
-          plan: personalCtx,
+          // bug-086: was `personalCtx` — an X-App-Context header value, i.e. a
+          // client claim. `personalCtx` still selects which AI-credit pool to
+          // read (below), but the PLAN reported here is ownership-derived.
+          plan: resolveOwnedPlan(user),
           aiCredits: {
             planCredits: personalBalance.planCredits,
             addonCredits: personalBalance.addonCredits,

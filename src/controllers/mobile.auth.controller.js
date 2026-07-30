@@ -380,10 +380,25 @@ class MobileAuthController {
     res.json({ success: true, data: { message: "FCM token registered" } });
   });
 
-  // Remove a device token on logout. With a specific fcmToken, deletes just
-  // that device; without one, clears every device for the user (logout-all).
+  // Remove a device token on logout. Scoped to ONE device by default; the
+  // caller must opt in explicitly (`allDevices: true`) to clear every device.
+  //
+  // A missing `fcmToken` used to fall through to an unscoped
+  // `deleteMany({ userId })`, so any caller that failed to resolve its own
+  // token silently unregistered the user's OTHER devices too — one browser
+  // logout could kill push on both phones. An absent token is now a 400, not
+  // a logout-all. (Account deletion does its own deleteMany in
+  // superAdmin.controller and does not route through here.)
   unregisterFcmToken = asyncHandler(async (req, res) => {
-    const { fcmToken } = req.body || {};
+    const { fcmToken, allDevices } = req.body || {};
+
+    if (!fcmToken && allDevices !== true) {
+      throw new AppError(
+        "fcmToken is required (or pass allDevices: true to clear every device)",
+        400,
+        "FCM_TOKEN_REQUIRED",
+      );
+    }
 
     const where = fcmToken
       ? { userId: req.user.id, fcmToken }
