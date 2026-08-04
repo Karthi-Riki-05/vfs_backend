@@ -2,6 +2,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const logger = require("../utils/logger");
 const { getUserAiTier, getTierByUserId } = require("../utils/userTier");
 const { logAiRequest } = require("../utils/aiLogger");
+const { applyIconsToXml } = require("../utils/diagramIcons");
 
 const DIAGRAM_SYSTEM_PROMPT = `You are an expert mxGraph XML diagram generator for the ValueCharts platform.
 
@@ -89,11 +90,78 @@ DIAGRAM TYPE LIBRARY — one canonical example per family
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 FLOWCHART ─────────────────────────────────────────
-Process (blue):  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F1FE;strokeColor=#3B82F6;"  (w140 h60)
-Decision (yellow): style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF4E0;strokeColor=#F59E0B;"  (w140 h80)
-Start/End (red): style="ellipse;whiteSpace=wrap;html=1;fillColor=#FDEBEC;strokeColor=#EF4444;"  (w120 h60)
-Edge: style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" source="2" target="3"
-Layout: top-down, first node x=480 y=80, each next y+120. Label decision edges "Yes"/"No".
+THIS IS THE HOUSE STYLE — every flowchart MUST look like a premium modern card flow
+(emoji icon + bold title + small gray subtitle), NOT plain boxes. Works for ANY niche.
+
+• CARD (process / action step) — 2-LINE HTML label: bold emoji+title on line 1,
+  small gray subtitle on line 2. w240 h74 (MUST be at least this big so the icon +
+  two lines fit without overflowing). Keep the TITLE ≤ 4 words and the SUBTITLE
+  ≤ 5 words / ~32 chars so the text never wraps past the card.
+  value="<b>🛒 Order Placed</b><br><span style=&quot;font-size:11px;color:#64748B&quot;>customer checks out</span>"
+  style="rounded=1;arcSize=18;whiteSpace=wrap;html=1;align=left;spacingLeft=14;verticalAlign=middle;shadow=1;fontFamily=Inter;fontSize=13;fontColor=#0F172A;strokeWidth=2;{COLOR ROLE};"
+  {COLOR ROLE} — ROTATE by the step's MEANING so the flow is colourful (not one colour):
+    neutral/step  → fillColor=#E6F7F0;strokeColor=#34A881   (green, brand — the default)
+    user/input    → fillColor=#F1EBFB;strokeColor=#8B5CF6   (purple)
+    system/ship   → fillColor=#E8F1FE;strokeColor=#3B82F6   (blue)
+    warning/wait  → fillColor=#FFF4E0;strokeColor=#F59E0B   (amber)
+    error/reject  → fillColor=#FDEBEC;strokeColor=#EF4444   (rose)
+• DECISION — ALWAYS an amber diamond, question on the label. w150 h100.
+  value="<b>◇ In Stock?</b>"
+  style="rhombus;whiteSpace=wrap;html=1;fontStyle=1;shadow=1;fontFamily=Inter;fontSize=13;fillColor=#FFF4E0;strokeColor=#F59E0B;fontColor=#92580A;strokeWidth=2;"
+• START — light-green pill. w130 h48.
+  value="<b>▶ Start</b>"
+  style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;shadow=1;fontFamily=Inter;fontStyle=1;fillColor=#D1FAE5;strokeColor=#34A881;fontColor=#065F46;strokeWidth=2;"
+• END — solid-green pill, white text. w130 h48.
+  value="<b>✅ End</b>"
+  style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;shadow=1;fontFamily=Inter;fontStyle=1;fillColor=#34A881;strokeColor=#2E9673;fontColor=#FFFFFF;strokeWidth=2;"
+• EDGES — rounded orthogonal, gray.
+  style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#94A3B8;strokeWidth=2;endArrow=block;endFill=1;fontColor=#334155;fontSize=12;fontStyle=1;"
+  EVERY edge leaving a decision diamond MUST carry a NON-EMPTY branch label as a
+  coloured pill. NEVER leave a branch edge's value empty, and NEVER create a
+  separate floating text cell for a label — the label ALWAYS lives in the edge's
+  own value="...".
+    - Yes/No decision → Yes edge: value="Yes";labelBackgroundColor=#34A881;fontColor=#FFFFFF;
+      No edge: value="No";labelBackgroundColor=#EF4444;fontColor=#FFFFFF;
+    - Either/or decision (e.g. "Own Warehouse or 3PL?") → label EACH branch with
+      its ACTUAL option in full (not one word): first/primary option
+      value="Own Warehouse";labelBackgroundColor=#34A881;fontColor=#FFFFFF; the
+      other option value="3PL";labelBackgroundColor=#3B82F6;fontColor=#FFFFFF;
+      (use the real option words from the question, spelled out completely).
+  Non-decision edges have an empty value="" and no pill. Do NOT set fixed
+  exitX/exitY/entryX/entryY — let connections float.
+• ICONS — TWO ways, prefer the first:
+  (1) STATIC line-icon (preferred): add "vcIcon=<name>;" to the card's style,
+      choosing the closest name from this set. The server renders a crisp icon
+      themed to the card colour — you do NOT draw it, just name it. Available:
+        play, flag, shopping-cart, credit-card, dollar-sign, truck, package, box,
+        mail, message-circle, send, bell, phone, clipboard-check, list-checks,
+        file-text, search, calendar, clock, user, users, user-plus, log-in,
+        log-out, triangle-alert, circle-x, circle-check-big, thumbs-up, trash-2,
+        pencil, refresh-cw, settings, wrench, lock, key, shield-check, database,
+        server, cloud, cpu, rocket, zap, upload, download, printer, folder,
+        git-branch, map-pin.
+      Common aliases also work: cart, order, pay, payment, ship, shipping, email,
+      notify, validate, warning, cancel, reject, success, approve, backorder,
+      customer, login, deploy, ai, money, secure, edit, box. Example card style:
+        "rounded=1;arcSize=18;...;fillColor=#E8F1FE;strokeColor=#3B82F6;vcIcon=truck;"
+      When you use vcIcon, do NOT also put an emoji in the label — the icon sits
+      on the left automatically.
+  (2) EMOJI fallback (ONLY when no name above fits): put one emoji at the start
+      of the bold title instead: e.g. <b>🍳 Cook Rice</b>. Emojis to draw from:
+        step ⚙️, doctor 🏥, cook 🍳, plant 🌱, car 🚗, phone 📞, star ⭐, gift 🎁.
+  So a diagram may mix STATIC icons and emoji — that is expected.
+LAYOUT (CRITICAL — nodes MUST NOT overlap or touch):
+- Top-down. Main column at x=460. First node y=60.
+- STACKING RULE: each node's y = previous node's y + previous node's height + 60.
+  So for a 74-tall card the NEXT node starts 134px lower (74 + 60 gap). NEVER place
+  two nodes closer than a 60px clear gap — cramped cards overlap once their text
+  and icons render. When unsure, use MORE space, not less.
+- Sizes: card = 240×74, decision diamond = 160×110, Start/End pill = 140×48.
+- Decision branches: the two branch cards go in a LEFT column (x≈180) and RIGHT
+  column (x≈760), each at least 90px to the side of the centre so branch cards
+  never overlap the main column. Branches then MERGE back into ONE End pill.
+- Canvas may grow tall — that is fine; a readable, well-spaced diagram beats a
+  compact one. Left→right / swimlane variants only if the user asks.
 
 PIE CHART ──────────────────────────────────────────
 One cell PER slice, all same x/y/size, stacked. Angles are FRACTIONS of the
@@ -193,8 +261,10 @@ STRICT RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✓ Every id must be unique — never repeat
 ✓ Every edge source and target must be valid existing ids
-✓ NEVER use & in labels — use "and" or "&amp;"
-✓ NEVER use <, >, ', " in label text
+✓ NEVER use a raw & in labels — write "and" or "&amp;"
+✓ EXCEPTION for flowchart cards: the HTML label tags <b>, <br>, and
+  <span style=&quot;...&quot;> ARE required (see FLOWCHART house style); escape
+  quotes inside them as &quot;. Do NOT put raw <, >, ', " in plain text elsewhere.
 ✓ NEVER truncate — generate complete diagram
 ✓ NEVER add comments or placeholder text
 ✓ All tags must be properly closed
@@ -555,6 +625,21 @@ function sanitizeXml(xml) {
   return xml;
 }
 
+// mxGraph stores HTML labels with ESCAPED angle brackets (&lt;b&gt;Text&lt;/b&gt;).
+// Models frequently emit RAW <b>...</b><br><span> inside value="...", which is
+// INVALID XML — a strict parser (draw.io load/preview) throws "Unescaped '<' not
+// allowed in attribute values", so the user is charged a credit for a diagram
+// that won't open. Escape any raw </> that appears INSIDE a value="..." attribute
+// so the label is valid everywhere and still renders (html=1 unescapes it).
+// Existing entities (&lt; &gt; &amp; &quot; …) contain no raw </> so stay intact.
+function escapeLabelMarkup(xml) {
+  if (!xml || typeof xml !== "string") return xml;
+  return xml.replace(/value="([^"]*)"/g, (m, v) => {
+    if (v.indexOf("<") === -1 && v.indexOf(">") === -1) return m;
+    return 'value="' + v.replace(/</g, "&lt;").replace(/>/g, "&gt;") + '"';
+  });
+}
+
 function validateXml(xml) {
   if (!xml) return { valid: false, error: "Empty XML" };
   if (!xml.includes("<mxGraphModel")) {
@@ -566,6 +651,36 @@ function validateXml(xml) {
   const bareAmp = /&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/;
   if (bareAmp.test(xml)) {
     return { valid: false, error: "Unescaped special characters in XML" };
+  }
+  // A raw '<' inside a value="..." attribute breaks strict XML parsers
+  // (draw.io preview/load) even though lenient ones render it. Catch it so the
+  // retry loop fixes it — and if it can't, the job fails WITHOUT charging a
+  // credit — rather than shipping a diagram the user paid for but can't open.
+  if (/value="[^"]*<[^"]*"/.test(xml)) {
+    return {
+      valid: false,
+      error: "Unescaped '<' in a label (value) attribute",
+    };
+  }
+  // DEFINITIVE backstop: a REAL strict well-formedness check (fast-xml-parser)
+  // catches ANY malformation the regex checks above can't — bad nesting, stray
+  // quotes, unclosed tags, unescaped chars in attributes. If this fails, the
+  // retry loop tries again and, if it still can't produce valid XML,
+  // generateDiagramXml throws so NO credit is deducted. This is what makes
+  // "Not a diagram file" not recur AND guarantees the user is never charged for
+  // a diagram that won't open.
+  try {
+    const { XMLValidator } = require("fast-xml-parser");
+    const res = XMLValidator.validate(xml, { allowBooleanAttributes: false });
+    if (res !== true) {
+      const e = res && res.err ? res.err : {};
+      return {
+        valid: false,
+        error: `Malformed XML (${e.code || "invalid"}) at line ${e.line || "?"}: ${e.msg || "not well-formed"}`,
+      };
+    }
+  } catch (_) {
+    // Validator module unavailable → fall back to the regex checks above.
   }
   return { valid: true };
 }
@@ -618,6 +733,7 @@ async function generateDiagramXml(
   user = null,
   complexity = null,
   context = "",
+  existingXml = "",
 ) {
   // Conversation-aware generation — when the caller supplies recent chat
   // context, prepend it so references like "this business" resolve to what was
@@ -628,6 +744,22 @@ async function generateDiagramXml(
       `Conversation so far:\n${context}\n\n---\n` +
       `Using the conversation above as context (resolve references like "this" ` +
       `or "this business" from it), create the following diagram: ${userMessage}`;
+  }
+
+  // Edit mode — when the caller supplies the diagram currently on the canvas,
+  // MODIFY it in place instead of regenerating from scratch. Preserving ids and
+  // positions is what makes "fix this / adjust the existing diagram" behave like
+  // a real editor rather than replacing the user's work.
+  if (existingXml && String(existingXml).trim()) {
+    userMessage =
+      `${userMessage}\n\n---\n` +
+      `EXISTING DIAGRAM (edit THIS — do NOT start over):\n` +
+      `${String(existingXml).slice(0, 8000)}\n\n` +
+      `Apply the request to the existing diagram above. PRESERVE every existing ` +
+      `cell's id, label, position and style unless the request specifically ` +
+      `changes it. Add new ids only for genuinely new cells, re-stitch edges as ` +
+      `needed, and return the COMPLETE updated mxGraphModel (every cell, not just ` +
+      `the changed ones) in the same house style.`;
   }
 
   // Tier resolution — accepts user object, userId string, or null.
@@ -685,8 +817,11 @@ async function generateDiagramXml(
         result = await generateWithGemini(currentPrompt);
       }
 
-      // Sanitize then validate
+      // Sanitize, swap vcIcon=<name> tokens for real Lucide SVG icons, escape
+      // raw HTML in labels (so strict parsers accept it), then validate.
       result.xml = sanitizeXml(result.xml);
+      result.xml = applyIconsToXml(result.xml);
+      result.xml = escapeLabelMarkup(result.xml);
       const validation = validateXml(result.xml);
 
       if (!validation.valid) {

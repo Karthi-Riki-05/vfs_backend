@@ -2,7 +2,14 @@ const { z } = require("zod");
 
 // Package names of the native shells (fixed app identities, not env config —
 // they match android/app/build.gradle applicationIds).
-const ALLOWED_PACKAGES = ["com.valuecharts.app", "com.valuecharts.app.team"];
+// The two real published Android packages, verified 2026-07-31 against the
+// Play Developer API (both are visible to the service account and own live IAP
+// products): `com.valuecharts.app` = Team app (mth_5/mth_10/yr_5/yr_10),
+// `com.valuecharts.pro` = Pro app (pro.ltd/pro.unltd). Mirrors
+// android/app/build.gradle and _kPackageNames in lib/iap_service.dart.
+// Previously listed `com.valuecharts.app.team` and omitted the Pro package —
+// neither exists on Play, so Pro purchases were rejected before reaching Google.
+const ALLOWED_PACKAGES = ["com.valuecharts.app", "com.valuecharts.pro"];
 
 const validatePurchaseSchema = z.object({
   body: z

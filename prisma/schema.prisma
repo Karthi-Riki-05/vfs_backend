@@ -1673,6 +1673,7 @@ model AiJob {
   messageId      String?   @map("message_id")
   appContext     String?   @map("app_context")
   teamId         String?   @map("team_id")
+  existingXml    String?   @db.Text @map("existing_xml") // canvas XML when editing an existing diagram
   result         String?   @db.Text // generated mxGraph XML
   model          String?
   remainingCredits Int?    @map("remaining_credits")

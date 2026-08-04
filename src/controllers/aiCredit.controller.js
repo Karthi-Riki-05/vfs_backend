@@ -170,11 +170,14 @@ async function processDiagramJob(jobId) {
     }
 
     // generateDiagramXml accepts a userId string and resolves the plan/model.
+    // job.existingXml (when the user asked to edit the current diagram) makes
+    // the generator modify it in place instead of regenerating from scratch.
     const { xml, model, usage } = await aiDetectService.generateDiagramXml(
       job.prompt,
       job.userId,
       complexity,
       context,
+      job.existingXml || "",
     );
 
     const estimate =
@@ -339,7 +342,8 @@ class AiCreditController {
   });
 
   generateDiagram = asyncHandler(async (req, res) => {
-    const { message, confirmed, conversationId, messageId } = req.body || {};
+    const { message, confirmed, conversationId, messageId, existingXml } =
+      req.body || {};
     const userId = req.user.id;
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const appContext = await resolveAppContextForBilling(
@@ -398,6 +402,7 @@ class AiCreditController {
       req.user,
       complexity,
       context,
+      typeof existingXml === "string" && existingXml.trim() ? existingXml : "",
     );
     // Step 7 — charge by actual token usage, clamped to the estimate range.
     const estimate =
@@ -507,7 +512,8 @@ class AiCreditController {
   // Returns a jobId immediately so the request never sits open long enough for
   // a reverse-proxy gateway timeout (the 504). The client polls getDiagramJob.
   startDiagramJob = asyncHandler(async (req, res) => {
-    const { message, confirmed, conversationId, messageId } = req.body || {};
+    const { message, confirmed, conversationId, messageId, existingXml } =
+      req.body || {};
     const userId = req.user.id;
     const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
     const appContext = await resolveAppContextForBilling(
@@ -557,6 +563,10 @@ class AiCreditController {
         messageId: messageId || null,
         appContext,
         teamId: teamId || null,
+        existingXml:
+          typeof existingXml === "string" && existingXml.trim()
+            ? existingXml
+            : null,
       },
     });
 
