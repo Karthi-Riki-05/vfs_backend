@@ -1,37 +1,27 @@
 const { prisma } = require("../lib/prisma");
+const { resolveWorkspaceId } = require("../lib/workspaceScope");
+const {
+  workspaceScope,
+  appScope,
+  canEnterWorkspace,
+  accessibleWorkspaceIds,
+} = require("../lib/workspaceScope");
 const AppError = require("../utils/AppError");
 
 class ProjectService {
   async getAllProjects(userId, options = {}, appContext = "team") {
-    const { search, teamId } = options;
+    const { search, workspaceId: requestedWorkspaceId } = options;
 
-    // Own account (no teamId) shows projects in the active appContext only;
-    // a joined team shows only the projects they created in it.
-    // Never teamId alone (DATA-LOSS-001).
+    // Scoped to the ACTIVE workspace only (owner-as-workspace, 2026-08-07).
+    // `createdBy` is no longer part of the scope — projects are shared across
+    // the workspace. This also closes the leak found on 2026-08-07, where the
+    // personal branch filtered on `appContext` with no workspace term at all,
+    // so a project created inside a team appeared in the creator's PERSONAL
+    // list.
     const where = {
-      createdBy: userId,
+      ...(await workspaceScope(userId, requestedWorkspaceId, appContext)),
       deletedAt: null,
     };
-    if (teamId) {
-      // Mirror flow.service: own team-app team = personal context, include
-      // NULL-teamId projects created before the team existed (upgrade fix).
-      const isOwnTeamAppTeam = await prisma.team.findFirst({
-        where: {
-          id: teamId,
-          teamOwnerId: userId,
-          appContext: { in: ["team", "free"] },
-          deletedAt: null,
-        },
-        select: { id: true },
-      });
-      if (isOwnTeamAppTeam) {
-        where.OR = [{ teamId: null }, { teamId }];
-      } else {
-        where.teamId = teamId;
-      }
-    } else {
-      where.appContext = appContext;
-    }
 
     if (search) {
       where.name = { contains: search, mode: "insensitive" };
@@ -58,7 +48,7 @@ class ProjectService {
       description: p.description,
       coverImage: p.coverImage,
       createdBy: p.createdBy,
-      teamId: p.teamId,
+      workspaceId: p.workspaceId,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
       flowCount: counts[i],
@@ -71,46 +61,31 @@ class ProjectService {
   // — a team-scoped flow was counted but excluded from the list. Both now
   // call this helper, so the count and the list are always identical.
   _projectFlowWhere(project, userId) {
-    return project.teamId
-      ? {
-          projectId: project.id,
-          teamId: project.teamId,
-          deletedAt: null,
-          appContext: { in: ["team", "free"] },
-        }
-      : {
-          projectId: project.id,
-          ownerId: userId,
-          teamId: null,
-          deletedAt: null,
-          appContext:
-            project.appContext === "free"
-              ? { in: ["team", "free"] }
-              : project.appContext,
-        };
+    // owner-as-workspace: every project names its workspace, so the old
+    // personal (workspaceId: null) branch is gone. appScope keeps the Pro app
+    // separate from the Team app without ever narrowing to `team` alone
+    // (DATA-LOSS-001 — that would hide free-era flows after an upgrade).
+    return {
+      projectId: project.id,
+      workspaceId: project.workspaceId,
+      deletedAt: null,
+      ...appScope(project.appContext),
+    };
   }
 
   async getProjectById(id, userId, appContext) {
     // Authorize: either the user is the creator (personal project) or the
     // user is a member/owner of the team that owns this project.
+    // Access is by workspace membership. No appContext gate — filtering by the
+    // live plan tier hid personal projects post-upgrade (DATA-LOSS-001).
     const project = await prisma.project.findFirst({
-      where: {
-        id,
-        deletedAt: null,
-        // No appContext gate — access is by creator/team membership only.
-        // Filtering by the live plan tier hid personal projects post-upgrade
-        // (DATA-LOSS-001).
-        OR: [
-          { createdBy: userId },
-          {
-            team: {
-              OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
-            },
-          },
-        ],
-      },
+      where: { id, deletedAt: null },
     });
     if (!project) throw new AppError("Project not found", 404, "NOT_FOUND");
+    if (!(await canEnterWorkspace(userId, project.workspaceId))) {
+      // 404, not 403 — don't disclose that a foreign project exists.
+      throw new AppError("Project not found", 404, "NOT_FOUND");
+    }
     return project;
   }
 
@@ -152,23 +127,32 @@ class ProjectService {
   }
 
   async createProject(userId, data, appContext) {
-    const teamId = data.teamId || null;
+    // bug-110: `data.workspaceId || null` wrote NULL for a project created in
+    // the caller's own workspace (no X-Workspace-Context is sent there), and
+    // reads scope by `{ workspaceId }` — an equality NULL never matches. Same
+    // fault as createShape/createGroup, same fix: resolve to the caller's own
+    // workspace, verifying any claimed one server-side.
+    const workspaceId = await resolveWorkspaceId(
+      userId,
+      data.workspaceId || null,
+    );
 
-    // Team-scoped: caller must be a member or the owner of that team.
-    if (teamId) {
-      const [team, membership] = await Promise.all([
-        prisma.team.findUnique({ where: { id: teamId } }),
-        prisma.teamMember.findFirst({
-          where: { teamId, userId },
-          select: { id: true },
-        }),
-      ]);
-      if (!team || team.deletedAt) {
-        throw new AppError("Team not found", 404, "NOT_FOUND");
-      }
-      if (!membership && team.teamOwnerId !== userId) {
+    // Workspace-scoped: the caller must own the workspace or hold a seat in it.
+    //
+    // This used to ALSO require `team.findUnique({ id: workspaceId })` to
+    // resolve — but `workspaceId` is a USER id since the owner-as-workspace
+    // rename, so no team ever matched and every member got a hard
+    // 404 "Team not found": creating a project inside a workspace was
+    // impossible. The membership row it already fetched is the real answer, and
+    // is exactly what `canEnterWorkspace` checks everywhere else.
+    if (workspaceId && workspaceId !== userId) {
+      const membership = await prisma.teamMember.findFirst({
+        where: { workspaceId, userId },
+        select: { id: true },
+      });
+      if (!membership) {
         throw new AppError(
-          "You are not a member of this team",
+          "You are not a member of this workspace",
           403,
           "FORBIDDEN",
         );
@@ -180,8 +164,11 @@ class ProjectService {
         name: data.name,
         description: data.description || null,
         createdBy: userId,
-        teamId,
-        appContext: teamId ? "team" : appContext,
+        workspaceId,
+        // `workspaceId` is now always set, so the old `workspaceId ? "team" :
+        // appContext` would have forced every project to "team" and hidden Pro
+        // projects from the Pro app (appScope matches "pro" exactly).
+        appContext,
       },
     });
   }
@@ -222,31 +209,24 @@ class ProjectService {
     // Authorize project access (creator or team member).
     const project = await this.getProjectById(projectId, userId);
 
-    // First locate the flow with broad authorization (caller owns it OR is
-    // a member of its team). 404 only when the flow truly isn't accessible
-    // — workspace mismatches surface as 400 below so the UI can explain.
+    // Locate the flow in any workspace the caller can enter. 404 only when the
+    // flow truly isn't reachable — a workspace mismatch surfaces as 400 below
+    // so the UI can explain it.
     const flow = await prisma.flow.findFirst({
       where: {
         id: flowId,
         deletedAt: null,
-        OR: [
-          { ownerId: userId },
-          {
-            team: {
-              OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
-            },
-          },
-        ],
+        workspaceId: { in: await accessibleWorkspaceIds(userId) },
       },
     });
     if (!flow) throw new AppError("Flow not found", 404, "NOT_FOUND");
 
-    // Reject cross-team assignment. The teamId boundary (personal vs a
+    // Reject cross-team assignment. The workspaceId boundary (personal vs a
     // specific team) is the real workspace boundary — we intentionally do NOT
     // compare appContext, since a personal free-era flow and a personal
     // project created after upgrade legitimately differ in that legacy tag
     // (DATA-LOSS-001) yet both belong to the same personal workspace.
-    if ((flow.teamId || null) !== (project.teamId || null)) {
+    if ((flow.workspaceId || null) !== (project.workspaceId || null)) {
       throw new AppError(
         "Flow and project belong to different teams",
         400,
@@ -263,18 +243,15 @@ class ProjectService {
   async unassignFlow(projectId, userId, flowId) {
     const project = await this.getProjectById(projectId, userId);
 
-    // Team project → any team member's flow can be unassigned by another
-    // team member; personal project → only the owner's flow.
+    // Anyone inside the workspace may unassign — everything in a workspace is
+    // shared, and getProjectById above already proved the caller belongs here.
     const flow = await prisma.flow.findFirst({
-      where: project.teamId
-        ? { id: flowId, projectId, teamId: project.teamId, deletedAt: null }
-        : {
-            id: flowId,
-            projectId,
-            ownerId: userId,
-            teamId: null,
-            deletedAt: null,
-          },
+      where: {
+        id: flowId,
+        projectId,
+        workspaceId: project.workspaceId,
+        deletedAt: null,
+      },
     });
     if (!flow)
       throw new AppError("Flow not found in this project", 404, "NOT_FOUND");

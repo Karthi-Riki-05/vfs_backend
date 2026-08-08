@@ -1,4 +1,5 @@
 const { prisma } = require("../lib/prisma");
+const { addTeamToMember } = require("../lib/teamMembership");
 const {
   getStripe,
   getStripeCurrency,
@@ -9,11 +10,20 @@ const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const { sendEmail, emailTemplates } = require("../utils/email");
 
-// Pricing: per user per period (in smallest currency unit, e.g. cents)
-const PRICING = {
-  monthly: { perUser: 200 }, // $2.00/user/month
-  yearly: { perUser: 2000 }, // $20.00/user/year
-};
+// Pricing: per user per period (in smallest currency unit, e.g. cents).
+// Lives in config/pricing.js — iap.service.js needs the same figures to record
+// a purchase amount when a mobile store does not report the charged amount.
+const { TEAM_PRICING: PRICING } = require("../config/pricing");
+
+// bug-091: this file talks to Stripe using subscription.paymentId. A Play /
+// App Store purchase stores a store id there, which Stripe 404s on — so every
+// entry point below must first establish that the subscription is Stripe's.
+const {
+  assertNotStoreOwned,
+  notStoreOwnedWhere,
+  isStoreOwned,
+  storeLabel,
+} = require("../lib/storeBilling");
 
 const downgradeUser = require("../lib/downgradeUser");
 const notificationService = require("./notification.service");
@@ -438,6 +448,11 @@ class SubscriptionService {
       planName: subscription.plan?.name || null,
       price: subscription.price,
       scheduledChange,
+      // bug-091: lets the UI hide the Stripe-only controls up front instead of
+      // letting the user press them and collect a 409. Purpose-built flags, so
+      // the client never has to sniff `provider`/`paymentId` to work this out.
+      managedByStore: isStoreOwned(subscription),
+      storeName: isStoreOwned(subscription) ? storeLabel(subscription) : null,
     };
   }
 
@@ -450,6 +465,7 @@ class SubscriptionService {
     });
     if (!subscription)
       throw new AppError("No active subscription found", 404, "NOT_FOUND");
+    assertNotStoreOwned(subscription, "cancel");
     if (!subscription.paymentId)
       throw new AppError(
         "No Stripe subscription to cancel",
@@ -497,6 +513,10 @@ class SubscriptionService {
     const subscription = await prisma.subscription.findUnique({
       where: { userId },
     });
+    // Before the no-paymentId fallthrough below: a store-owned row must NOT be
+    // pushed into a Stripe checkout either, or the customer ends up paying
+    // twice for one entitlement (once to Google/Apple, once to us).
+    assertNotStoreOwned(subscription, "change your plan");
     // If there's no Stripe subscription on file (manually-granted row, or
     // old Stripe sub was deleted), fall through to a fresh checkout instead
     // of 404'ing. The UI flow ("Change Plan" button) reaches us here when
@@ -777,6 +797,7 @@ class SubscriptionService {
     });
     if (!subscription)
       throw new AppError("No subscription found", 404, "NOT_FOUND");
+    assertNotStoreOwned(subscription, "change your plan");
     if (!subscription.scheduledPlanType) {
       throw new AppError(
         "No scheduled plan change found",
@@ -839,6 +860,12 @@ class SubscriptionService {
       where: {
         scheduledPlanType: { not: null },
         scheduledActivationDate: { lte: now },
+        // bug-091: never auto-charge a store-owned subscription through Stripe.
+        // Excluded in the QUERY rather than skipped in the loop so such a row
+        // is not claimed (status flipped to "activating") only to be abandoned.
+        // changePlan now refuses to schedule one, so this is belt-and-braces
+        // for rows scheduled before that guard existed.
+        ...notStoreOwnedWhere(),
       },
       include: { user: true },
     });
@@ -1370,10 +1397,10 @@ class SubscriptionService {
       : [];
 
     // ── Team workspace get-or-create ─────────────────────────────────────
-    // The team-context flow/project queries filter by `teamId`
-    // (flow.service.getAllFlows: where = { teamId, deletedAt: null }), so a
+    // The team-context flow/project queries filter by `workspaceId`
+    // (flow.service.getAllFlows: where = { workspaceId, deletedAt: null }), so a
     // real Team row MUST exist and migrated flows MUST carry its id — otherwise
-    // they "disappear" (appContext='team' but teamId=null = visible nowhere).
+    // they "disappear" (appContext='team' but workspaceId=null = visible nowhere).
     // Idempotent: re-uses the user's existing team on plan changes / retries.
     const teamOwner = await prisma.user.findUnique({
       where: { id: userId },
@@ -1396,19 +1423,16 @@ class SubscriptionService {
         },
       });
       // Add the owner as the first team member (mirrors team.service.createTeam).
-      const existingMember = await prisma.teamMember.findFirst({
-        where: { teamId: team.id, userId },
+      // CHANGE-001: addTeamToMember is idempotent — it appends the team id to
+      // the owner's existing workspace row rather than creating a second one.
+      await addTeamToMember(prisma, {
+        userId,
+        workspaceId: userId,
+        teamId: team.id,
+        role: "OWNER",
+        // A Team-plan upgrade grants a TEAM seat.
+        appContext: team.appContext || "team",
       });
-      if (!existingMember) {
-        await prisma.teamMember.create({
-          data: {
-            teamId: team.id,
-            userId,
-            role: "OWNER",
-            appType: "enterprise",
-          },
-        });
-      }
       logger.info(`[Team Upgrade] Created team ${team.id} for user ${userId}`);
     }
 
@@ -1497,12 +1521,12 @@ class SubscriptionService {
       }),
       // DATA-LOSS-001 fix: we intentionally DO NOT migrate/retag the user's
       // existing personal data on upgrade. Previously this block moved every
-      // personal flow/project into the new team (teamId = team.id) and retagged
+      // personal flow/project into the new team (workspaceId = team.id) and retagged
       // shapes/groups to appContext:"team". That had two serious effects:
       //   1. The flows vanished from the user's PERSONAL view (which loads by
       //      default after checkout) → the "No flows yet" data-loss report.
       //   2. Private personal flows were silently exposed to every team member.
-      // Personal data now stays personal (teamId = null) and remains visible in
+      // Personal data now stays personal (workspaceId = null) and remains visible in
       // the personal workspace across all plan tiers; the new team starts empty
       // and the owner moves flows into it deliberately. Personal listing queries
       // no longer filter by appContext, so the legacy 'free' tag is harmless.
@@ -2009,6 +2033,7 @@ class SubscriptionService {
     });
     if (!subscription)
       throw new AppError("No subscription found", 404, "NOT_FOUND");
+    assertNotStoreOwned(subscription, "resume it");
     if (!subscription.paymentId)
       throw new AppError(
         "No Stripe subscription to reactivate",

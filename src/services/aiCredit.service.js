@@ -61,25 +61,35 @@ async function resolveBillingUser(
       ? { userId, appContext: "team" }
       : { userId, appContext: null };
   }
-  const team = await prisma.team.findFirst({
-    where: { id: activeTeamId, deletedAt: null },
-    select: { teamOwnerId: true, appContext: true },
-  });
-  if (!team) return { userId, appContext: null };
-  const [isMember, isOwner] = await Promise.all([
-    prisma.teamMember.findFirst({
-      where: { teamId: activeTeamId, userId },
+  // owner-as-workspace (2026-08-07): `activeTeamId` is a WORKSPACE id — the
+  // tenant owner's USER id — not a team id.
+  //
+  // This function was left half-migrated and the two halves contradicted each
+  // other: it looked the value up as `team.id` while checking membership as
+  // `workspaceId`. The team lookup could therefore never match, every switched-in
+  // member fell through to `{ userId, appContext: null }`, and they were shown
+  // and charged their OWN credits instead of the workspace pool they had
+  // switched into.
+  const isOwner = activeTeamId === userId;
+  if (!isOwner) {
+    const membership = await prisma.teamMember.findFirst({
+      where: { workspaceId: activeTeamId, userId },
       select: { id: true },
-    }),
-    Promise.resolve(team.teamOwnerId === userId),
-  ]);
-  if (!isMember && !isOwner) return { userId, appContext: null };
-  // Bill the workspace's own pool. A Pro team (appContext='pro') draws from the
-  // owner's lifetime Pro balance (200); every other team draws from the Team
-  // pool (300). Previously this was hardcoded to 'team', which mis-billed Pro
-  // teams against the team pool — see Pro-app audit AUDIT 5.
-  const billingContext = team.appContext === "pro" ? "pro" : "team";
-  return { userId: team.teamOwnerId, appContext: billingContext };
+    });
+    // Not a member → never leak the workspace's credits; bill their own.
+    if (!membership) return { userId, appContext: null };
+  }
+  const workspaceOwner = await prisma.user.findUnique({
+    where: { id: activeTeamId },
+    select: { id: true },
+  });
+  if (!workspaceOwner) return { userId, appContext: null };
+  // Bill the workspace owner's pool. Which pool depends on the APP the caller
+  // is in — that is the boundary now (appScope), not a team's stored label. A
+  // Pro workspace draws the owner's lifetime Pro balance; everything else the
+  // Team pool.
+  const billingContext = explicitAppContext === "pro" ? "pro" : "team";
+  return { userId: workspaceOwner.id, appContext: billingContext };
 }
 
 function getNextResetDate() {

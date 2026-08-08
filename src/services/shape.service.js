@@ -1,89 +1,45 @@
 const { prisma } = require("../lib/prisma");
+const { resolveWorkspaceId } = require("../lib/workspaceScope");
+const { visibleTeamsWhere } = require("../lib/teamMembership");
+const { workspaceScope } = require("../lib/workspaceScope");
 const AppError = require("../utils/AppError");
 const { sanitizeShapeContent } = require("../utils/sanitizeSvg");
 
 class ShapeService {
-  async getAllShapes(userId, appContext = "team", teamId = null) {
-    // Public shapes are global. Private shapes follow strict workspace scoping
-    // (DATA-LOSS-001): a joined team shows only shapes the user created in it;
-    // personal shows shapes with NO team OR in a team the user OWNS (owned
-    // teams fold into the personal context — see getMyContexts).
-    let ownedClause;
-    // B51 — team-associated shapes are scoped to the ACTIVE workspace, exactly
-    // like the flow module (owned teams fold into personal; a joined team's
-    // shapes show only inside that team's workspace). Empty = none this context.
-    let libraryTeamIds = [];
-    if (teamId) {
-      // Mirror flow.service._workspaceScope: if the header refers to the user's
-      // OWN team-app/free team, treat it as personal context — include NULL-team
-      // shapes created before the team existed (upgrade data-loss fix).
-      // Joined teams (user is a member, not owner) stay strict.
-      const isOwnTeamAppTeam = await prisma.team.findFirst({
-        where: {
-          id: teamId,
-          teamOwnerId: userId,
-          appContext: { in: ["team", "free"] },
-          deletedAt: null,
-        },
-        select: { id: true },
-      });
-      if (isOwnTeamAppTeam) {
-        ownedClause = {
-          ownerId: userId,
-          OR: [{ teamId: null }, { teamId }],
-        };
-      } else {
-        ownedClause = { ownerId: userId, teamId };
-      }
-      // B51 — strict per-context team library: only THIS team's shared library
-      // shows, and only if the caller actually belongs to it.
-      const belongs = await prisma.team.findFirst({
-        where: {
-          id: teamId,
-          deletedAt: null,
-          OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
-        },
-        select: { id: true },
-      });
-      if (belongs) libraryTeamIds = [teamId];
-    } else if (appContext === "pro") {
-      // Pro user without header — same defense-in-depth as flow.service: never
-      // include teamId=null shapes. Use the user's pro team for strict isolation.
-      const proTeam = await prisma.team.findFirst({
-        where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
-        select: { id: true },
-      });
-      ownedClause = {
-        ownerId: userId,
-        teamId: proTeam?.id ?? "__no_pro_team__",
-      };
-      // B51 — only the pro team's shared library shows in pro context.
-      if (proTeam) libraryTeamIds = [proTeam.id];
-    } else {
-      // Personal context = NULL team + team-app owned teams only.
-      // Pro-app owned teams (appContext='pro') are excluded so pro shapes
-      // don't leak into the team-app personal view (cross-app isolation).
-      const ownedTeams = await prisma.team.findMany({
-        // Free teams fold into the Team-App container (no standalone free shell).
-        where: {
-          teamOwnerId: userId,
-          appContext: { in: ["team", "free"] },
-          deletedAt: null,
-        },
-        select: { id: true },
-      });
-      const ownedTeamIds = ownedTeams.map((t) => t.id);
-      ownedClause = {
-        ownerId: userId,
-        OR: [
-          { teamId: null },
-          ...(ownedTeamIds.length ? [{ teamId: { in: ownedTeamIds } }] : []),
-        ],
-      };
-      // B51 — personal context: only OWNED teams fold in (their libraries show);
-      // JOINED teams' libraries appear only inside that team's own context.
-      libraryTeamIds = ownedTeamIds;
-    }
+  async getAllShapes(userId, appContext = "team", requestedWorkspaceId = null) {
+    // Public shapes are global. Private shapes are scoped to the ACTIVE
+    // workspace, which under the owner-as-workspace model (2026-08-07) is a
+    // single equality on the tenant owner's user id.
+    //
+    // NOTE `ownerId` is deliberately NOT part of the scope any more: it records
+    // who DREW the shape, while `workspaceId` records which workspace it lives
+    // in — and everything inside a workspace is shared. The old
+    // ownerId + owned-team OR-clauses went with the team boundary.
+    const scope = await workspaceScope(userId, requestedWorkspaceId, appContext);
+    const { workspaceId } = scope;
+    // Spread the WHOLE scope, not just the workspace id. `scope` also carries
+    // the app boundary (appScope), and destructuring only `workspaceId` threw
+    // it away — so a Pro-app shape appeared in the Team app and vice-versa,
+    // even though the scope had been computed correctly one line above.
+    const ownedClause = { ...scope };
+
+    // B51 — the shared shape LIBRARY is still TEAM-scoped (`associatedTeamId`
+    // is a real team reference, deliberately left un-renamed). Only teams the
+    // caller actually belongs to, inside this workspace, contribute a library.
+    const libraryTeams = await prisma.team.findMany({
+      where: {
+        teamOwnerId: workspaceId,
+        deletedAt: null,
+        // The library follows the app boundary too — a Pro team's shapes must
+        // not surface in the Team app.
+        ...(appContext === "pro"
+          ? { appContext: "pro" }
+          : { appContext: { not: "pro" } }),
+        ...(await visibleTeamsWhere(userId)),
+      },
+      select: { id: true },
+    });
+    const libraryTeamIds = libraryTeams.map((t) => t.id);
 
     return await prisma.shape.findMany({
       where: {
@@ -114,7 +70,7 @@ class ShapeService {
         where: {
           id: shape.associatedTeamId,
           deletedAt: null,
-          OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
+          ...(await visibleTeamsWhere(userId)),
         },
         select: { id: true },
       });
@@ -141,7 +97,7 @@ class ShapeService {
       prisma.team.findMany({
         where: {
           deletedAt: null,
-          OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
+          ...(await visibleTeamsWhere(userId)),
         },
         select: { id: true },
       }),
@@ -179,29 +135,31 @@ class ShapeService {
   }
 
   async createShape(userId, data, appContext) {
-    let teamId = data.teamId || null;
-
-    // Auto-assign the pro team so pro shapes land in the correct bucket
-    // even when the caller doesn't pass an explicit teamId.
-    if (appContext === "pro" && !teamId) {
-      const proTeam = await prisma.team.findFirst({
-        where: { teamOwnerId: userId, appContext: "pro", deletedAt: null },
-        select: { id: true },
-      });
-      if (proTeam) {
-        teamId = proTeam.id;
-      } else {
-        // B52 (DATA-LOSS-001): never create an orphan Pro shape with teamId=null
-        // — it would surface in the Team-app personal view (which includes
-        // teamId=null). If the Pro workspace grant is still in flight, reject
-        // rather than orphan. Fix is write-side; reads stay scoped by teamId only.
-        throw new AppError(
-          "Your Pro workspace is still being set up. Please try again in a moment.",
-          409,
-          "PRO_TEAM_NOT_READY",
-        );
-      }
-    }
+    // bug-110 (2026-08-08): resolve the workspace the way every other write
+    // does. This used to be `data.workspaceId || null`, so a shape created in
+    // the caller's OWN workspace — where the client sends no
+    // X-Workspace-Context — was written with `workspace_id = NULL`. Reads scope
+    // by `{ workspaceId }`, an equality NULL can never match, so the shape
+    // saved fine and then never appeared. Confirmed live: spiderman123's "gg"
+    // has owner_id set and workspace_id empty.
+    //
+    // owner-as-workspace (2026-08-07) says a personal row carries the user's
+    // OWN id precisely so nothing can silently "become personal" (bug-094);
+    // this write was never moved onto that rule. resolveWorkspaceId verifies a
+    // claimed workspace server-side and falls back to the caller's own, so it
+    // is also the DATA-LOSS-001-safe way to read the header.
+    //
+    // The old Pro branch below it looked up `team.findFirst({ teamOwnerId,
+    // appContext: "pro" })` and stored a TEAM id in this column. After the
+    // rename the column holds USER ids, so that value could never match a read
+    // scope either — and when no such team existed it threw
+    // PRO_TEAM_NOT_READY at a user whose workspace was perfectly ready. The Pro
+    // app is separated by `appContext`, not by a second workspace row, so the
+    // whole branch is gone.
+    const workspaceId = await resolveWorkspaceId(
+      userId,
+      data.workspaceId || null,
+    );
 
     return await prisma.shape.create({
       data: {
@@ -218,7 +176,7 @@ class ShapeService {
         thumbnail: data.thumbnail,
         isPublic: data.isPublic || false,
         ownerId: userId,
-        teamId,
+        workspaceId,
         appContext,
       },
     });
@@ -314,7 +272,7 @@ class ShapeService {
       where: {
         id: teamId,
         deletedAt: null,
-        OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
+        ...(await visibleTeamsWhere(userId)),
       },
       select: { id: true, name: true },
     });
@@ -500,7 +458,7 @@ class ShapeService {
         thumbnail: source.thumbnail,
         isPublic: false,
         ownerId: userId,
-        teamId: source.teamId,
+        workspaceId: source.workspaceId,
         appContext: source.appContext,
         // associations are NOT copied — the duplicate starts unassociated
       },

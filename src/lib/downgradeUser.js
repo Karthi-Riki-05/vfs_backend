@@ -3,7 +3,7 @@ const logger = require("../utils/logger");
 
 /**
  * On team-subscription expiry, a user reverts to the 50-flow team limit.
- * If they hold more than 50 team flows (appContext='team', teamId=null), the
+ * If they hold more than 50 team flows (appContext='team', workspaceId=null), the
  * excess (oldest by updatedAt) is marked for downgrade and the user enters the
  * team-picker phase so they can choose which 50 to keep. With <=50 flows there
  * is nothing at risk — just drop the unlimited flag.
@@ -12,9 +12,9 @@ async function applyTeamFlowPicker(userId) {
   const TEAM_FLOW_LIMIT = 50;
   const teamFlows = await prisma.flow.findMany({
     where: {
-      ownerId: userId,
+      workspaceId: userId,
       appContext: "team",
-      teamId: null,
+      workspaceId: null,
       deletedAt: null,
     },
     select: { id: true, updatedAt: true },

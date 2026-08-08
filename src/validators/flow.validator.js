@@ -10,6 +10,7 @@ const createFlowSchema = z.object({
     thumbnail: z.string().max(500000).optional(),
     projectId: z.string().optional().nullable(),
     // Workspace scoping — null/omitted = personal, string = team workspace.
+    workspaceId: z.string().max(128).optional().nullable(),
     teamId: z.string().max(128).optional().nullable(),
   }),
 });
@@ -64,6 +65,7 @@ const getFlowsQuerySchema = z.object({
     sortDirection: z.enum(["asc", "desc"]).optional().default("desc"),
     isFavorite: z.enum(["true", "false"]).optional(),
     projectId: z.string().max(128).optional(),
+    workspaceId: z.string().max(128).optional(),
     teamId: z.string().max(128).optional(),
   }),
 });

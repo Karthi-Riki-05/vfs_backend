@@ -1,4 +1,6 @@
 const { prisma } = require("../lib/prisma");
+const { addTeamToMember } = require("../lib/teamMembership");
+const { resolveWorkspaceId } = require("../lib/workspaceScope");
 const {
   getStripe,
   getStripeCurrency,
@@ -8,10 +10,14 @@ const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const { personalFlowTeamOr } = require("../lib/personalFlowScope");
 
-const FLOW_PRICING = {
-  50: 1000, // $10.00/month — Standard (100 flows)
-  unlimited: 2000, // $20.00/month — Unlimited
-};
+// Prices live in config/pricing.js — iap.service.js needs the same figures to
+// record a purchase amount when a mobile store does not report the charged
+// amount (Google Play never does).
+const {
+  FLOW_PRICING,
+  FLOW_ADDON_PLAN_PRICE_USD,
+  PRO_LIFETIME_PRICE_CENTS,
+} = require("../config/pricing");
 
 // Stripe moved `current_period_end` off the top-level Subscription object
 // onto each SubscriptionItem in newer API versions. Read the item-level
@@ -28,10 +34,6 @@ function getSubscriptionPeriodEnd(subscription) {
 const FLOW_ADDON_PLAN_LABEL = {
   standard_100: "Standard — 100 Flows",
   unlimited: "Unlimited Flows",
-};
-const FLOW_ADDON_PLAN_PRICE_USD = {
-  standard_100: 10,
-  unlimited: 20,
 };
 
 // Audit trail of flow-addon status transitions (subscribed → active →
@@ -71,7 +73,7 @@ class ProService {
    * Idempotent get-or-create for a user's personal Pro workspace team
    * (appContext='pro'). Every Pro activation path (mobile grant, web
    * verify-purchase, Stripe webhook) MUST call this — without it,
-   * getAppStatus()'s flow-count falls back to teamId:null (the user's
+   * getAppStatus()'s flow-count falls back to workspaceId:null (the user's
    * personal/Team-app flows), which double-counts unrelated flows as Pro
    * usage. See bug-056.
    *
@@ -100,8 +102,16 @@ class ProService {
       },
       select: { id: true, name: true },
     });
-    await tx.teamMember.create({
-      data: { teamId: team.id, userId, role: "OWNER" },
+    // CHANGE-001: append to the owner's workspace row, or create it.
+    await addTeamToMember(tx, {
+      userId,
+      workspaceId: userId,
+      teamId: team.id,
+      role: "OWNER",
+      // A Pro purchase grants a PRO seat. Without this the row would default to
+      // `team` and the buyer's own workspace would be missing from the Pro
+      // switcher — the seat exists but not in the app they just paid for.
+      appContext: "pro",
     });
     return team;
   }
@@ -116,7 +126,7 @@ class ProService {
    *      Pro never refills; see aiCredit.service getOrCreateBalance).
    *   2. User promotion: hasPro=true, currentVersion='pro', proPurchasedAt set.
    *   3. The user's own Pro team (appContext='pro') so Pro flows get a stable
-   *      teamId workspace instead of NULL.
+   *      workspaceId workspace instead of NULL.
    *
    * Safe to call on every app launch: when everything already exists it returns
    * `{ alreadyGranted: true }` without writing. Existing credit balances are
@@ -214,8 +224,13 @@ class ProService {
         },
         select: { id: true, name: true },
       });
-      await tx.teamMember.create({
-        data: { teamId: team.id, userId, role: "OWNER" },
+      // CHANGE-001: append to the owner's workspace row, or create it.
+      await addTeamToMember(tx, {
+        userId,
+        workspaceId: userId,
+        teamId: team.id,
+        role: "OWNER",
+        appContext: "pro",
       });
       return team;
     });
@@ -237,48 +252,79 @@ class ProService {
     };
   }
 
-  async getAppStatus(userId) {
-    console.log("[ProService.getAppStatus] userId:", userId);
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        hasPro: true,
-        proPurchasedAt: true,
-        proFlowLimit: true,
-        proAdditionalFlowsPurchased: true,
-        proUnlimitedFlows: true,
-        currentVersion: true,
-        stripeCustomerId: true,
-        flowAddonStatus: true,
-        flowAddonPlan: true,
-        flowAddonCurrentPeriodEnd: true,
-      },
-    });
+  /**
+   * @param {string} userId              the caller
+   * @param {string|null} requestedWorkspaceId  X-Workspace-Context (a claim)
+   *
+   * Pro entitlements are INHERITED from the workspace owner, exactly as team
+   * entitlements are — a Pro workspace is a tenant like any other. So when the
+   * caller is switched into someone else's workspace, the flow allowance, the
+   * add-on and the usage count all come from that OWNER, not from the caller.
+   *
+   * `createFlow` already enforced it this way (its limit check reads the
+   * workspace owner's row), but these read endpoints did not — so a member
+   * inside a workspace whose owner had bought the Standard 100-flow add-on was
+   * shown "0 / 10" while the server would happily let them create up to 100.
+   * The UI contradicted the rule the server was actually applying.
+   *
+   * resolveWorkspaceId verifies membership server-side and falls back to the
+   * caller's own workspace, so a forged header cannot borrow someone's plan.
+   */
+  async getAppStatus(userId, requestedWorkspaceId = null) {
+    const workspaceId = await resolveWorkspaceId(userId, requestedWorkspaceId);
+    // Entitlements and quotas belong to the WORKSPACE OWNER — Pro flow limits
+    // and the flow count are a shared allowance, so they are read from that
+    // row even when the caller is a member.
+    //
+    // `currentVersion` is NOT one of those. It answers "which app is THIS
+    // PERSON looking at right now?" — a per-caller session fact — so it must
+    // come from the CALLER's row. Reading it off the owner caused an infinite
+    // reload loop for any member inside someone else's workspace: the member
+    // switched to Pro (their own currentVersion → "pro"), the page reloaded
+    // with X-Workspace-Context set to the owner, this endpoint reported the
+    // OWNER's currentVersion ("free"), and DashboardLayout's reconcile effect
+    // saw currentApp !== target, switched again and reloaded — forever, one
+    // switch-app PUT and one full page load every ~6 seconds.
+    const [user, caller] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: workspaceId },
+        select: {
+          hasPro: true,
+          proPurchasedAt: true,
+          proFlowLimit: true,
+          proAdditionalFlowsPurchased: true,
+          proUnlimitedFlows: true,
+          currentVersion: true,
+          stripeCustomerId: true,
+          flowAddonStatus: true,
+          flowAddonPlan: true,
+          flowAddonCurrentPeriodEnd: true,
+        },
+      }),
+      workspaceId === userId
+        ? null
+        : prisma.user.findUnique({
+            where: { id: userId },
+            select: { currentVersion: true },
+          }),
+    ]);
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
-
-    console.log(
-      "[ProService.getAppStatus] user.hasPro:",
-      user.hasPro,
-      "currentVersion:",
-      user.currentVersion,
-    );
+    // Own workspace → `caller` is null and `user` IS the caller.
+    const callerCurrentVersion = (caller || user).currentVersion;
 
     let proFlowsUsed = 0;
     if (user.hasPro) {
-      // Count only flows visible in the Pro app: flows inside the user's Pro
-      // team (appContext='pro'). If no Pro team exists yet, fall back to
-      // personal flows (teamId=null) for users pre-dating Pro team setup.
-      // Team-subscription teams (appContext='team') are excluded — their flows
-      // are a separate workspace and must not affect the Pro limit.
-      const proTeam = await prisma.team.findFirst({
-        where: { teamOwnerId: userId, deletedAt: null, appContext: "pro" },
-        select: { id: true },
-      });
+      // Count only flows visible in the PRO app. Under owner-as-workspace
+      // (2026-08-07) the workspace is the user themself and the app boundary
+      // moved onto appContext — so this is simply "my workspace, pro app".
+      // The old version had to locate a hidden Pro team and match its id;
+      // Team-app flows are excluded by appContext instead of by team.
       proFlowsUsed = await prisma.flow.count({
         where: {
-          ownerId: userId,
+          // The WORKSPACE's pro flows — shared allowance, shared count.
+          workspaceId,
           deletedAt: null,
-          teamId: proTeam ? proTeam.id : null,
+          appContext: "pro",
         },
       });
     }
@@ -320,7 +366,7 @@ class ProService {
       : [];
 
     return {
-      currentApp: user.currentVersion || "free",
+      currentApp: callerCurrentVersion || "free",
       hasPro: user.hasPro,
       proPurchasedAt: user.proPurchasedAt,
       isUnlimited,
@@ -436,7 +482,7 @@ class ProService {
 
     // Bug-056: the Pro workspace team must exist before the user ever hits
     // the Pro dashboard, or getAppStatus() falls back to counting their
-    // personal (teamId:null) flows as Pro usage.
+    // personal (workspaceId:null) flows as Pro usage.
     await this._ensureProTeam(userId);
 
     // Grant 50 LIFETIME AI credits for new Pro ($5) — idempotent, webhook may
@@ -568,7 +614,7 @@ class ProService {
               description:
                 "One-time payment — Lifetime access to all Pro & Team features",
             },
-            unit_amount: 500, // $5.00 one-time
+            unit_amount: PRO_LIFETIME_PRICE_CENTS, // $5.00 one-time
           },
           quantity: 1,
         },
@@ -764,7 +810,7 @@ class ProService {
 
       // Bug-056: create the Pro workspace team in the same transaction so
       // Pro flow-usage never falls back to counting the user's personal
-      // (teamId:null) flows.
+      // (workspaceId:null) flows.
       await this._ensureProTeam(userId, tx);
     });
 
@@ -816,7 +862,7 @@ class ProService {
           userId,
         );
         logger.info(
-          `[handleProUpgradeWebhook] Auto-accepted invite token=${pendingInviteToken} → team=${result?.teamId}`,
+          `[handleProUpgradeWebhook] Auto-accepted invite token=${pendingInviteToken} → team=${result?.workspaceId}`,
         );
       } catch (err) {
         logger.error(
@@ -1003,7 +1049,8 @@ class ProService {
     if (isRenewal || previousActive) {
       const restoreResult = await prisma.flow.updateMany({
         where: {
-          ownerId: userId,
+          // Flow has no ownerId — the workspace IS the owner.
+          workspaceId: userId,
           markedForDowngrade: true,
           deletedAt: { not: null },
         },
@@ -1086,7 +1133,7 @@ class ProService {
     }
 
     const flowCount = await prisma.flow.count({
-      where: { ownerId: userId, deletedAt: null, appContext: "pro" },
+      where: { workspaceId: userId, deletedAt: null, appContext: "pro" },
     });
 
     // Active standard add-on (100 flows) overrides the base limit + one-time packs.
@@ -1279,7 +1326,7 @@ class ProService {
       // direct-charge path was missing both, leaving the flows page locked
       // after a saved-card purchase).
       await prisma.flow.updateMany({
-        where: { ownerId: userId, markedForDowngrade: true },
+        where: { workspaceId: userId, markedForDowngrade: true },
         data: { markedForDowngrade: false, deletedAt: null },
       });
       await prisma.flowLimit.updateMany({
@@ -1524,7 +1571,7 @@ class ProService {
       // null) and ones already trashed by the picker — anything hard-purged
       // (30+ days in trash) is gone and unrecoverable.
       const restoreResult = await tx.flow.updateMany({
-        where: { ownerId: userId, markedForDowngrade: true },
+        where: { workspaceId: userId, markedForDowngrade: true },
         data: { markedForDowngrade: false, deletedAt: null },
       });
       restored = restoreResult.count;
@@ -1697,7 +1744,7 @@ class ProService {
     if (!user) return;
 
     // Unified scope (FLOWPACK Gap #4): same definition of "personal flows"
-    // as createFlow, getPackStatus, and the expiry cron — teamId=null plus
+    // as createFlow, getPackStatus, and the expiry cron — workspaceId=null plus
     // owned teams, never appContext alone.
     const personalScopeOr = await personalFlowTeamOr(user.id);
 
@@ -1718,7 +1765,7 @@ class ProService {
 
       // Mark excess flows for downgrade when user has > 10 personal flows
       const flowCount = await tx.flow.count({
-        where: { ownerId: user.id, deletedAt: null, OR: personalScopeOr },
+        where: { workspaceId: user.id, deletedAt: null, OR: personalScopeOr },
       });
       if (flowCount > 10) {
         await tx.user.update({
@@ -1727,7 +1774,7 @@ class ProService {
         });
         // Mark the flows beyond the 10 most-recently-updated as needing selection
         const excess = await tx.flow.findMany({
-          where: { ownerId: user.id, deletedAt: null, OR: personalScopeOr },
+          where: { workspaceId: user.id, deletedAt: null, OR: personalScopeOr },
           orderBy: { updatedAt: "desc" },
           skip: 10,
           select: { id: true },
@@ -1906,9 +1953,11 @@ class ProService {
     ];
   }
 
-  async getProSubscriptionStatus(userId) {
+  // Same inheritance rule as getAppStatus — see the comment there.
+  async getProSubscriptionStatus(userId, requestedWorkspaceId = null) {
+    const workspaceId = await resolveWorkspaceId(userId, requestedWorkspaceId);
     const user = await prisma.user.findUnique({
-      where: { id: userId },
+      where: { id: workspaceId },
       select: {
         hasPro: true,
         proFlowLimit: true,
@@ -1925,17 +1974,20 @@ class ProService {
       throw new AppError("Pro access required", 403, "PRO_REQUIRED");
     }
 
-    // Count only flows visible in the Pro app (Pro-owned team), matching
-    // getAppStatus and getPackStatus so all three display the same number.
-    const proTeam = await prisma.team.findFirst({
-      where: { teamOwnerId: userId, deletedAt: null, appContext: "pro" },
-      select: { id: true },
-    });
+    // Count only flows visible in the Pro app, matching getAppStatus and
+    // getPackStatus so all three display the same number.
+    //
+    // owner-as-workspace (2026-08-07): Pro flows live in the user's OWN
+    // workspace under `appContext: "pro"` — there is no hidden Pro team any
+    // more. This still looked the team up and scoped by `workspaceId: team.id`
+    // (a team id where a user id belongs) AND filtered on `ownerId`, a column
+    // Flow no longer has — so the whole endpoint 500'd with a Prisma validation
+    // error and the Subscription page rendered "Could not load Pro plan".
     const flowCount = await prisma.flow.count({
       where: {
-        ownerId: userId,
+        workspaceId,
+        appContext: "pro",
         deletedAt: null,
-        teamId: proTeam ? proTeam.id : null,
       },
     });
 

@@ -1,5 +1,6 @@
 const dashboardService = require("../services/dashboard.service");
 const asyncHandler = require("../utils/asyncHandler");
+const { workspaceHeader, workspaceQuery } = require("../lib/workspaceContext");
 
 class DashboardController {
   // Resolve the active workspace context from a request. Headers are the
@@ -18,7 +19,7 @@ class DashboardController {
 
   _teamId(req) {
     return (
-      req.query.teamId || req.headers["x-team-context"] || req.query._tc || null
+      workspaceQuery(req) || workspaceHeader(req) || req.query._tc || null
     );
   }
 

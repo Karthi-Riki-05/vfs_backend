@@ -1,16 +1,17 @@
 const issueService = require("../services/issue.service");
 const asyncHandler = require("../utils/asyncHandler");
+const { workspaceHeader, workspaceQuery, workspaceBody } = require("../lib/workspaceContext");
 
 class IssueController {
   getIssues = asyncHandler(async (req, res) => {
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
     const result = await issueService.getIssues(
       req.user.id,
       {
         ...req.query,
-        teamId,
+        workspaceId,
       },
       appContext,
     );
@@ -23,14 +24,14 @@ class IssueController {
   });
 
   createIssue = asyncHandler(async (req, res) => {
-    const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceBody(req) || workspaceHeader(req) || null;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
     const issue = await issueService.createIssue(
       req.user.id,
       {
         ...req.body,
-        teamId,
+        workspaceId,
       },
       appContext,
     );

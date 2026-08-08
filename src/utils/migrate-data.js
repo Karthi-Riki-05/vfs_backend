@@ -368,8 +368,8 @@ async function migrateTeams() {
   let mCount = 0;
   for (const m of members) {
     const userId = userIdMap.get(m.user_id);
-    const teamId = teamIdMap.get(m.team_id);
-    if (!userId || !teamId) continue;
+    const workspaceId = teamIdMap.get(m.team_id);
+    if (!userId || !workspaceId) continue;
     await prisma.teamMember.create({
       data: {
         userId,
@@ -423,7 +423,7 @@ async function migrateGroups(pool, source, appType) {
         name: g.name || "Untitled Group",
         userId,
         isPredefined: enumToBool(g.is_predefined),
-        teamId: g.team_id || 0,
+        workspaceId: g.team_id || 0,
         appType,
         createdAt: g.created_at || new Date(),
         deletedAt: g.deleted_at,

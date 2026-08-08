@@ -65,6 +65,48 @@ router.get("/my-contexts", teamController.getMyContexts);
 
 /**
  * @swagger
+ * /api/v1/teams/workspace/members:
+ *   get:
+ *     summary: List everyone in the caller's workspace (CHANGE-001)
+ *     description: >
+ *       Workspace-level roster, distinct from a team's member list. Someone
+ *       whose teams have all been deleted stays in the workspace and appears
+ *       ONLY here.
+ *     tags: [Teams]
+ *     responses:
+ *       200:
+ *         description: "{ members[] } with each person's teams (possibly empty)"
+ */
+// NOTE: must precede "/:id" so "workspace" is not captured as an id param.
+router.get("/workspace/members", teamController.listWorkspaceMembers);
+
+/**
+ * @swagger
+ * /api/v1/teams/workspace/members/{uid}:
+ *   delete:
+ *     summary: Remove a user from the caller's workspace (CHANGE-001)
+ *     description: >
+ *       The ONLY way to revoke workspace access. Deleting every team a person
+ *       belongs to does not remove them. Owner-only; the owner cannot remove
+ *       themselves.
+ *     tags: [Teams]
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: User removed from the workspace
+ */
+router.delete(
+  "/workspace/members/:uid",
+  teamController.removeWorkspaceMember,
+);
+
+/**
+ * @swagger
  * /api/v1/teams:
  *   post:
  *     summary: Create a new team

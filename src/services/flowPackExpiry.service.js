@@ -338,7 +338,7 @@ async function downgradeUser(pack, summary) {
   // 2) Decide whether the user needs the picker.
   const flows = await prisma.flow.findMany({
     where: {
-      ownerId: userId,
+      workspaceId: userId,
       deletedAt: null,
       OR: await personalFlowTeamOr(userId),
     },
@@ -454,7 +454,7 @@ async function checkPastDueGrace() {
 
       const personalScopeOr = await personalFlowTeamOr(user.id);
       const flowCount = await prisma.flow.count({
-        where: { ownerId: user.id, deletedAt: null, OR: personalScopeOr },
+        where: { workspaceId: user.id, deletedAt: null, OR: personalScopeOr },
       });
 
       if (flowCount > 10) {
@@ -463,7 +463,7 @@ async function checkPastDueGrace() {
           data: { isInFlowPickerPhase: true },
         });
         const excess = await prisma.flow.findMany({
-          where: { ownerId: user.id, deletedAt: null, OR: personalScopeOr },
+          where: { workspaceId: user.id, deletedAt: null, OR: personalScopeOr },
           orderBy: { updatedAt: "desc" },
           skip: 10,
           select: { id: true },
@@ -586,7 +586,7 @@ async function checkAndApplyExpiry(userId, appContext) {
       const { personalFlowTeamOr } = require("../lib/personalFlowScope");
       const scopeOr = await personalFlowTeamOr(userId);
       const flowCount = await prisma.flow.count({
-        where: { ownerId: userId, deletedAt: null, OR: scopeOr },
+        where: { workspaceId: userId, deletedAt: null, OR: scopeOr },
       });
       const overLimit = flowCount > 10;
 

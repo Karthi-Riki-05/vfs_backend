@@ -1,13 +1,14 @@
 const shapeService = require("../services/shape.service");
 const asyncHandler = require("../utils/asyncHandler");
+const { workspaceHeader, workspaceQuery, workspaceBody } = require("../lib/workspaceContext");
 
 class ShapeController {
   getAllShapes = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
-    const shapes = await shapeService.getAllShapes(userId, appContext, teamId);
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
+    const shapes = await shapeService.getAllShapes(userId, appContext, workspaceId);
     res.json({ success: true, data: shapes });
   });
 
@@ -26,10 +27,10 @@ class ShapeController {
     const userId = req.user.id;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceBody(req) || workspaceHeader(req) || null;
     const shape = await shapeService.createShape(
       userId,
-      { ...req.body, teamId },
+      { ...req.body, workspaceId },
       appContext,
     );
     res.status(201).json({ success: true, data: shape });

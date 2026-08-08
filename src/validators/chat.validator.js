@@ -11,6 +11,9 @@ const createChatGroupSchema = z.object({
     flowId: z.number().int().optional(),
     flowItemId: z.string().optional(),
     appType: z.enum(["enterprise", "individual"]).optional(),
+    // Workspace scoping. `teamId` is the legacy wire name, accepted until the
+    // deployed frontends all send `workspaceId` (see lib/workspaceContext.js).
+    workspaceId: z.string().optional(),
     teamId: z.string().optional(),
     memberIds: z.array(z.string().min(1)).optional(),
     // Alternative to memberIds — emails are resolved to user ids server-side

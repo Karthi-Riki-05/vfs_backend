@@ -264,7 +264,15 @@ model User {
   // --- Relations ---
   accounts             Account[]
   sessions             Session[]
-  flows                Flow[]
+  // Content living in THIS user's workspace. Under the owner-as-workspace
+  // model these replace the old Team back-relations.
+  flows                Flow[]                @relation("FlowWorkspace")
+  workspaceShapes      Shape[]               @relation("ShapeWorkspace")
+  workspaceShapeGroups ShapeGroup[]          @relation("ShapeGroupWorkspace")
+  workspaceChatGroups  ChatGroup[]           @relation("ChatGroupWorkspace")
+  workspaceIssues      IssueItem[]           @relation("IssueItemWorkspace")
+  workspaceProjects    Project[]             @relation("ProjectWorkspace")
+  workspaceNotifications Notification[]      @relation("NotificationWorkspace")
   flowsCreated         Flow[]                @relation("FlowCreator")
   flowsLastModified    Flow[]                @relation("FlowLastModifiedBy")
   shapeGroups          ShapeGroup[]
@@ -274,6 +282,8 @@ model User {
   usersApps            UserApp[]
   ownedTeams           Team[]
   teamMemberships      TeamMember[]
+  // CHANGE-001: the people who belong to THIS user's workspace.
+  workspaceMembers     TeamMember[]          @relation("TeamMemberWorkspace")
   flowGroupUsers       FlowGroupUser[]       @relation("FlowGroupUserUser")
   flowGroupCreated     FlowGroupUser[]       @relation("FlowGroupUserCreator")
   flowLimits           FlowLimit[]
@@ -605,16 +615,12 @@ model Team {
   appContext  UserVersion  @default(free) @map("app_context")
   verifyTeam  String?      @map("verify_team")
   status      PlanStatus   @default(active)
-  members     TeamMember[]
+  // CHANGE-001: `members` is GONE. Membership lives on TeamMember.teamIds (a
+  // scalar array), and Prisma cannot model a relation through one — so a team's
+  // roster is a query (`teamMember.findMany({ where: { teamIds: { has: id } } })`),
+  // never a nested include or a `members: { some: ... }` filter.
   invites     TeamInvite[]
-  flows       Flow[]
-  projects    Project[]
-  chatGroups  ChatGroup[]
-  shapes      Shape[]
   associatedShapes Shape[] @relation("ShapeAssociatedTeam")
-  shapeGroups ShapeGroup[]
-  issueItems  IssueItem[]
-  notifications Notification[]
   createdAt   DateTime     @default(now()) @map("created_at")
   updatedAt   DateTime?    @map("updated_at")
   deletedAt   DateTime?    @map("deleted_at")
@@ -656,19 +662,56 @@ model TeamInvite {
 // Source: value_stream.team_members
 // ============================================================
 
+/// Workspace membership. ONE ROW PER (person, workspace) — not per team.
+///
+/// Owner decision (CHANGE-001, 2026-08-07): a team is a GROUPING OF PEOPLE only,
+/// used by the Team page and Chat. It is not a data boundary and it is not what
+/// makes someone a member of a workspace. `workspaceId` (the tenant owner's user
+/// id) is the membership; `teamIds` are labels on top of it.
+///
+/// Deleting a team strips its id from `teamIds` — the ROW SURVIVES, so the person
+/// stays in the workspace. Removing a person deletes the row. Those are two
+/// different operations and must not be confused.
+///
+/// `role` is per WORKSPACE (Option A), not per team: an ADMIN is an ADMIN across
+/// every team that owner runs.
+///
+/// ⚠️ `teamIds` is a scalar array, so Postgres cannot foreign-key it. Deleting a
+/// team MUST strip the id in application code (same transaction as the delete) or
+/// a ghost id is left behind. This is the one durability cost of the change.
 model TeamMember {
-  id        String    @id @default(cuid())
-  userId    String    @map("user_id")
-  teamId    String    @map("team_id")
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  role      String    @default("MEMBER")
-  appType   AppType?  @map("app_type")
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime? @map("updated_at")
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  workspaceId String    @map("workspace_id")
+  teamIds     String[]  @default([]) @map("team_ids")
+  /// DEPRECATED — CHANGE-001 step 8, not yet executed. The column is retained,
+  /// nullable and UNUSED, purely so `prisma db push` (which runs on every boot
+  /// WITHOUT --accept-data-loss) does not try to drop it and fail. Nothing reads
+  /// or writes it. Dropping it is the one irreversible step and needs an
+  /// explicit go-ahead; do that and delete this field in the same change.
+  teamId      String?   @map("team_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   User      @relation("TeamMemberWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  role        String    @default("MEMBER")
+  /// Which app this seat belongs to (owner decision, 2026-08-08). Buying a plan
+  /// creates the row for that plan's app; an invite stamps the app it was sent
+  /// from. The workspace switcher filters on it directly — `where { userId,
+  /// appContext }` — so it never has to infer the app from a Team lookup, which
+  /// is what produced five silent bugs after the owner-as-workspace rename.
+  ///
+  /// A seat is therefore per-app: being in a workspace in the Team app does NOT
+  /// grant it in the Pro app. Two apps = two rows, which is why the unique key
+  /// below is three-part.
+  appContext  UserVersion @default(team) @map("app_context")
+  appType     AppType?  @map("app_type")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime? @map("updated_at")
 
+  @@unique([userId, workspaceId, appContext])
   @@index([userId])
-  @@index([teamId])
+  @@index([workspaceId])
+  @@index([userId, appContext])
+  @@index([teamIds], type: Gin)
   @@map("team_members")
 }
 
@@ -688,8 +731,11 @@ model Flow {
   diagramData    String?         @default("") @map("diagram_data") @db.Text // was flow_data
   isPublic       Boolean         @default(false) @map("is_public")
   isFavorite     Boolean         @default(false) @map("is_favorite")
-  ownerId        String          @map("owner_id")
-  owner          User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  // The WORKSPACE this flow lives in = the tenant owner's user id. Teams are
+  // no longer data boundaries (owner decision 2026-08-07): membership decides
+  // which workspace you may ENTER, everything inside one is shared.
+  workspaceId    String          @map("workspace_id")
+  workspace      User            @relation("FlowWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   // Original creator — separate from ownerId (which becomes tenantOwnerId in
   // the multi-tenant model). Null on legacy flows; backfilled = ownerId.
   creatorId        String?       @map("creator_id")
@@ -699,10 +745,6 @@ model Flow {
   lastModifiedBy   User?         @relation("FlowLastModifiedBy", fields: [lastModifiedById], references: [id], onDelete: SetNull)
   projectId      String?         @map("project_id")
   project        Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  // Workspace scoping: null = personal, non-null = belongs to that team.
-  // When a team is deleted, team flows fall back to personal (teamId → null).
-  teamId         String?         @map("team_id")
-  team           Team?           @relation(fields: [teamId], references: [id], onDelete: SetNull)
   appType        AppType?        @map("app_type")
   appContext     UserVersion     @default(free) @map("app_context")
   // Flagged true when an expired flow pack pushes the flow into the
@@ -718,12 +760,11 @@ model Flow {
   updatedAt      DateTime        @updatedAt @map("updated_at")
   deletedAt      DateTime?       @map("deleted_at")
 
-  @@index([ownerId])
+  @@index([workspaceId])
   @@index([creatorId])
   @@index([appType])
   @@index([appContext])
   @@index([projectId])
-  @@index([teamId])
   @@index([lastModifiedById])
   @@index([legacyId, legacySource])
   @@map("flows")
@@ -869,8 +910,8 @@ model ShapeGroup {
   isPredefined   Boolean         @default(false) @map("is_predefined")
   legacyTeamId   Int             @default(0) @map("team_id") // legacy MySQL int, unused for routing
   // Workspace scoping (private team buckets): null = personal, non-null = team.
-  teamId         String?         @map("workspace_team_id")
-  team           Team?           @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  workspaceId    String?         @map("workspace_id")
+  workspace           User?           @relation("ShapeGroupWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   appType        AppType?        @map("app_type")
   appContext     UserVersion     @default(free) @map("app_context")
   shapes         Shape[]
@@ -880,7 +921,7 @@ model ShapeGroup {
   deletedAt      DateTime?       @map("deleted_at")
 
   @@index([appContext])
-  @@index([teamId])
+  @@index([workspaceId])
   @@map("shape_groups")
 }
 
@@ -905,8 +946,8 @@ model Shape {
   ownerId       String      @map("owner_id")
   owner         User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   // Workspace scoping (private team buckets): null = personal, non-null = team.
-  teamId        String?     @map("team_id")
-  team          Team?       @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  workspaceId   String?     @map("workspace_id")
+  workspace          User?       @relation("ShapeWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   appType       AppType?    @map("app_type")
   appContext    UserVersion @default(free) @map("app_context")
   category      String?
@@ -926,7 +967,7 @@ model Shape {
 
   @@index([groupId])
   @@index([appContext])
-  @@index([teamId])
+  @@index([workspaceId])
   @@index([associatedTeamId])
   @@index([associatedChatGroupId])
   @@map("shapes")
@@ -945,8 +986,21 @@ model ChatGroup {
   picture      String?
   userId       String            @map("user_id")
   user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId  String?           @map("workspace_id")
+  /// bug-096: the TEAM this room belongs to. NULL for DMs and named groups.
+  ///
+  /// Rooms used to be keyed on the workspace alone, so every team an owner ran
+  /// resolved to ONE conversation: two teams in the Teams tab, one shared
+  /// message history. A member of only one of them could read the other's.
+  ///
+  /// Deliberately NOT a Prisma relation. bug-094 was caused by an
+  /// `onDelete: SetNull` FK here — deleting a team blanked the column and the
+  /// room silently became "personal". Team deletion now soft-deletes the room
+  /// explicitly (team.service.deleteTeam), which is a decision, not a cascade.
   teamId       String?           @map("team_id")
-  team         Team?             @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  // true = this is a canonical team/workspace room; NULL = an ordinary group/DM.
+  isWorkspaceRoom Boolean?       @map("is_workspace_room")
+  workspace         User?             @relation("ChatGroupWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   companyId    Int?              @map("company_id")
   flowId       Int               @default(0) @map("flow_id")
   flowItemId   String            @default("") @map("flow_item_id")
@@ -962,11 +1016,16 @@ model ChatGroup {
 
   @@index([userId])
   @@index([appContext])
+  @@index([workspaceId])
   @@index([teamId])
-  // bug-058: at most one team-wide conversation per (team, app context).
-  // Postgres treats NULL != NULL, so DM/personal groups (teamId: null) are
-  // never constrained by this — only real per-team rows are.
-  @@unique([teamId, appContext])
+  // bug-096: at most one canonical room per (workspace, TEAM, app context).
+  // `teamId` joined this key so a second team in the same workspace gets its
+  // own room instead of colliding onto the first one's.
+  //
+  // `isWorkspaceRoom` stores true or NULL — never false — so Postgres'
+  // NULL != NULL rule leaves DMs and named groups unconstrained, exactly as the
+  // old null-workspace trick did before every row carried a workspace.
+  @@unique([workspaceId, teamId, appContext, isWorkspaceRoom])
   @@map("chat_groups")
 }
 
@@ -1164,14 +1223,14 @@ model IssueItem {
   createdById  String?  @map("created_by")
   createdBy    User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
   // Workspace scoping (private team buckets): null = personal, non-null = team.
-  teamId       String?     @map("team_id")
-  team         Team?       @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  workspaceId  String?     @map("workspace_id")
+  workspace         User?       @relation("IssueItemWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   appType      AppType?    @map("app_type")
   appContext   UserVersion @default(free) @map("app_context")
   createdAt    DateTime    @default(now()) @map("created_at")
 
   @@index([flowId])
-  @@index([teamId])
+  @@index([workspaceId])
   @@index([appContext])
   @@map("issue_list")
 }
@@ -1451,8 +1510,8 @@ model Project {
   coverImage  String?     @map("cover_image")
   createdBy   String      @map("created_by")
   creator     User        @relation(fields: [createdBy], references: [id], onDelete: Cascade)
-  teamId      String?     @map("team_id")
-  team        Team?       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  workspaceId String?     @map("workspace_id")
+  workspace        User?       @relation("ProjectWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   appContext  UserVersion @default(free) @map("app_context")
   flows       Flow[]
   createdAt   DateTime    @default(now()) @map("created_at")
@@ -1460,7 +1519,7 @@ model Project {
   deletedAt   DateTime?   @map("deleted_at")
 
   @@index([createdBy])
-  @@index([teamId])
+  @@index([workspaceId])
   @@index([appContext])
   @@map("projects")
 }
@@ -1512,8 +1571,8 @@ model Notification {
   // Workspace boundary. NULL = a personal notification (scoped by appContext);
   // non-null = belongs to that team's workspace. SetNull on team delete so the
   // notification survives as a personal one rather than vanishing.
-  teamId    String?   @map("team_id")
-  team      Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  workspaceId String? @map("workspace_id")
+  workspace      User?     @relation("NotificationWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   // Examples: flow_pack_7day, flow_pack_3day, flow_pack_1day,
   //           flow_pack_grace, flow_pack_expired, flow_picker_required,
   //           flows_restored.
@@ -1528,10 +1587,10 @@ model Notification {
   expiresAt DateTime?   @map("expires_at")
 
   // Primary access path: a user's notifications within one workspace, by read
-  // state. Mirrors the { ownerId, teamId } boundary used across the app.
-  @@index([userId, teamId, isRead])
+  // state. Mirrors the { ownerId, workspaceId } boundary used across the app.
+  @@index([userId, workspaceId, isRead])
   @@index([userId, isRead])
-  @@index([teamId])
+  @@index([workspaceId])
   @@index([createdAt])
   @@map("notifications")
 }
@@ -1672,7 +1731,7 @@ model AiJob {
   conversationId String?   @map("conversation_id")
   messageId      String?   @map("message_id")
   appContext     String?   @map("app_context")
-  teamId         String?   @map("team_id")
+  workspaceId    String?   @map("workspace_id")
   existingXml    String?   @db.Text @map("existing_xml") // canvas XML when editing an existing diagram
   result         String?   @db.Text // generated mxGraph XML
   model          String?

@@ -2,6 +2,13 @@ const argon2 = require("argon2");
 const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const { prisma } = require("../lib/prisma");
+// CHANGE-001: membership is one row per (person, workspace) with a teamIds array.
+const {
+  addTeamToMember,
+  removeMemberFromTeam,
+  removeTeamFromMembers,
+  teamMemberCount: teamMemberCount_,
+} = require("../lib/teamMembership");
 const { getStripe } = require("../lib/stripe");
 const fcmService = require("../services/fcm.service");
 const notificationRateLimit = require("../services/notificationRateLimit.service");
@@ -614,26 +621,22 @@ class SuperAdminController {
         // Mirrors team.service.js:createTeam so the owner shows up in member
         // lists and the member-count invariant (countMem === teamMember rows)
         // holds.
-        await tx.teamMember.create({
-          data: {
-            teamId: team.id,
-            userId: user.id,
-            role: "OWNER",
-            appType: teamAppType,
-          },
+        await addTeamToMember(tx, {
+          userId: user.id,
+          workspaceId: user.id,
+          teamId: team.id,
+          role: "OWNER",
         });
 
         if (inviteResolved.matches.length > 0) {
           // Create invitee members sequentially (unique constraint catches
           // dupes inside the tx).
           for (const invitee of inviteResolved.matches) {
-            const m = await tx.teamMember.create({
-              data: {
-                teamId: team.id,
-                userId: invitee.id,
-                role: "MEMBER",
-                appType: teamAppType,
-              },
+            const m = await addTeamToMember(tx, {
+              userId: invitee.id,
+              workspaceId: user.id,
+              teamId: team.id,
+              role: "MEMBER",
             });
             addedMembers.push(m);
           }
@@ -879,7 +882,7 @@ class SuperAdminController {
           subscription: { select: { status: true, id: true } },
           ownedTeams: {
             where: { deletedAt: null, status: "active" },
-            select: { id: true, _count: { select: { members: true } } },
+            select: { id: true },
           },
           teamMemberships: { select: { id: true } },
         },
@@ -895,7 +898,10 @@ class SuperAdminController {
 
       if (isDowngradingFromPaid) {
         const ownedTeam = current.ownedTeams[0];
-        const teamMemberCount = ownedTeam?._count.members || 0;
+        // CHANGE-001: roster size is a query now, not a relation count.
+        const teamMemberCount = ownedTeam
+          ? await teamMemberCount_(ownedTeam.id)
+          : 0;
 
         // Guard: if team owner has members, require explicit confirm
         if (ownedTeam && teamMemberCount > 0 && !confirmDowngrade) {
@@ -934,10 +940,10 @@ class SuperAdminController {
             }),
           );
           // Cascade: strip the owned team's members too
+          // CHANGE-001: strip the team label instead of deleting the row —
+          // the people stay in the workspace (see lib/teamMembership).
           downgradeOps.push(
-            prisma.teamMember.deleteMany({
-              where: { teamId: ownedTeam.id },
-            }),
+            (async () => removeTeamFromMembers(prisma, ownedTeam.id))(),
           );
         }
       }
@@ -1058,7 +1064,7 @@ class SuperAdminController {
         // Flows and Teams usually have cascade, but we'll be explicit for safety.
         await tx.teamMember.deleteMany({ where: { userId } });
         await tx.team.deleteMany({ where: { teamOwnerId: userId } });
-        await tx.flow.deleteMany({ where: { ownerId: userId } });
+        await tx.flow.deleteMany({ where: { workspaceId: userId } });
         await tx.project.deleteMany({ where: { createdBy: userId } });
 
         // 4. Delete Auth & System data
@@ -1432,7 +1438,8 @@ class SuperAdminController {
       // so content doesn't "disappear" after an admin upgrade.
       prisma.flow.updateMany({
         where: {
-          ownerId: userId,
+          // Flow has no ownerId — scope by the user's workspace.
+          workspaceId: userId,
           appContext: { not: normalizedPlan },
           deletedAt: null,
         },
@@ -1493,13 +1500,11 @@ class SuperAdminController {
           },
         });
         // Add owner as first TeamMember (role: OWNER).
-        await prisma.teamMember.create({
-          data: {
-            teamId: newTeam.id,
-            userId,
-            role: "OWNER",
-            appType: teamAppType,
-          },
+        await addTeamToMember(prisma, {
+          userId,
+          workspaceId: userId,
+          teamId: newTeam.id,
+          role: "OWNER",
         });
       }
     }
@@ -1564,7 +1569,7 @@ class SuperAdminController {
         }),
         prisma.flow.updateMany({
           where: {
-            ownerId: userId,
+            workspaceId: userId,
             appContext: { not: "free" },
             deletedAt: null,
           },
@@ -1631,7 +1636,8 @@ class SuperAdminController {
       }),
       prisma.flow.updateMany({
         where: {
-          ownerId: userId,
+          // Flow has no ownerId — scope by the user's workspace.
+          workspaceId: userId,
           appContext: { not: "free" },
           deletedAt: null,
         },
@@ -2232,29 +2238,32 @@ class SuperAdminController {
         owner: {
           select: { id: true, name: true, email: true, image: true },
         },
-        members: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                image: true,
-                userStatus: true,
-                suspendedAt: true,
-                lastSeen: true,
-                currentVersion: true,
-              },
-            },
-          },
-          orderBy: { createdAt: "asc" },
-        },
       },
     });
 
     if (!team) {
       return res.json({ success: true, data: { team: null } });
     }
+
+    // CHANGE-001: no Team.members relation — the roster is its own query.
+    team.members = await prisma.teamMember.findMany({
+      where: { teamIds: { has: team.id } },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            image: true,
+            userStatus: true,
+            suspendedAt: true,
+            lastSeen: true,
+            currentVersion: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "asc" },
+    });
 
     res.json({
       success: true,
@@ -2295,7 +2304,6 @@ class SuperAdminController {
 
     const team = await prisma.team.findFirst({
       where: { teamOwnerId: userId, deletedAt: null, status: "active" },
-      include: { _count: { select: { members: true } } },
     });
     if (!team) {
       throw new AppError(
@@ -2305,7 +2313,8 @@ class SuperAdminController {
       );
     }
 
-    if (team._count.members >= team.teamMem) {
+    const seatsUsed = await teamMemberCount_(team.id);
+    if (seatsUsed >= team.teamMem) {
       throw new AppError(
         `Seat limit reached (${team.teamMem}). Upgrade the team plan to add more.`,
         400,
@@ -2344,7 +2353,7 @@ class SuperAdminController {
 
     // Reject if already a member
     const existing = await prisma.teamMember.findFirst({
-      where: { teamId: team.id, userId: memberUser.id },
+      where: { teamIds: { has: team.id }, userId: memberUser.id },
     });
     if (existing) {
       throw new AppError(
@@ -2354,17 +2363,15 @@ class SuperAdminController {
       );
     }
 
-    const member = await prisma.teamMember.create({
-      data: {
-        teamId: team.id,
-        userId: memberUser.id,
-        role: String(role).toUpperCase(),
-        appType: "enterprise",
-      },
+    const member = await addTeamToMember(prisma, {
+      userId: memberUser.id,
+      workspaceId: team.teamOwnerId,
+      teamId: team.id,
+      role: String(role).toUpperCase(),
     });
     await prisma.team.update({
       where: { id: team.id },
-      data: { countMem: team._count.members + 1 },
+      data: { countMem: seatsUsed + 1 },
     });
 
     res.status(201).json({ success: true, data: { member } });
@@ -2375,7 +2382,6 @@ class SuperAdminController {
 
     const team = await prisma.team.findFirst({
       where: { teamOwnerId: userId, deletedAt: null },
-      include: { _count: { select: { members: true } } },
     });
     if (!team) {
       throw new AppError("Team not found", 404, "TEAM_NOT_FOUND");
@@ -2384,14 +2390,18 @@ class SuperAdminController {
     const member = await prisma.teamMember.findUnique({
       where: { id: memberId },
     });
-    if (!member || member.teamId !== team.id) {
+    if (!member || !(member.teamIds || []).includes(team.id)) {
       throw new AppError("Member not found in this team", 404, "NOT_FOUND");
     }
 
-    await prisma.teamMember.delete({ where: { id: memberId } });
+    // CHANGE-001: strip the label; the person stays in the workspace.
+    await removeMemberFromTeam(prisma, {
+      userId: member.userId,
+      teamId: team.id,
+    });
     await prisma.team.update({
       where: { id: team.id },
-      data: { countMem: Math.max(0, team._count.members - 1) },
+      data: { countMem: await teamMemberCount_(team.id) },
     });
 
     res.json({ success: true, data: { message: "Member removed" } });

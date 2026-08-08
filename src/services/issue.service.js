@@ -1,17 +1,19 @@
 const { prisma } = require("../lib/prisma");
+const { workspaceScope } = require("../lib/workspaceScope");
 const AppError = require("../utils/AppError");
 
 class IssueService {
   async getIssues(userId, options = {}, appContext = "free") {
-    const { flowId, page = 1, limit = 20, teamId } = options;
+    const { flowId, page = 1, limit = 20, workspaceId: requestedWorkspaceId } =
+      options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
 
-    // Own account (no teamId) shows issues in the active appContext only; a
-    // joined team shows only the issues the user created in it. Never teamId alone.
-    const where = { createdById: userId };
-    if (teamId) where.teamId = teamId;
-    else where.appContext = appContext;
+    // Scoped to the ACTIVE workspace (owner-as-workspace, 2026-08-07).
+    // `createdById` left the scope with the team boundary; it still records who
+    // raised the issue. Previously the no-team branch filtered on `appContext`
+    // alone, which let a team issue surface in its creator's personal list.
+    const where = await workspaceScope(userId, requestedWorkspaceId, appContext);
     if (flowId) where.flowId = flowId;
 
     const [issues, total] = await Promise.all([
@@ -47,9 +49,9 @@ class IssueService {
         flowId: data.flowId,
         flowItemId: data.flowItemId || "",
         createdById: userId,
-        teamId: data.teamId || null,
+        workspaceId: data.workspaceId || null,
         appType: data.appType || null,
-        appContext: data.teamId ? "team" : appContext,
+        appContext: data.workspaceId ? "team" : appContext,
       },
     });
   }

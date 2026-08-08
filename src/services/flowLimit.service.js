@@ -1,9 +1,13 @@
 "use strict";
 
-const { PrismaClient } = require("@prisma/client");
+const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
+const { appScope } = require("../lib/workspaceScope");
 
-const prisma = new PrismaClient();
+// Was `new PrismaClient()` — a second connection pool alongside lib/prisma's,
+// and the reason this service had no tests at all (the suite mocks
+// ../src/lib/prisma, which this file bypassed, so any test here would have hit
+// a real database). Same client, shared pool, now mockable.
 
 // AppType enum: 'individual' = pro app context, 'enterprise' = team app context
 const toDbAppType = (appContext) =>
@@ -16,9 +20,12 @@ class FlowLimitService {
    * one-time modal fires again on the next login/flows-page visit.
    */
   async setOverLimitLocked(userId, appType) {
-    // Reset markedForDowngrade on all flows so the picker shows the full set
+    // Reset markedForDowngrade on all flows so the picker shows the full set —
+    // and "the full set" is now appScope, matching the picker and the lock
+    // below. With the old exact equality a free-era flow kept a stale
+    // markedForDowngrade from a previous cycle and showed as at-risk forever.
     await prisma.flow.updateMany({
-      where: { ownerId: userId, appContext: appType, deletedAt: null },
+      where: { workspaceId: userId, ...appScope(appType), deletedAt: null },
       data: { markedForDowngrade: false },
     });
     await prisma.flowLimit.updateMany({
@@ -107,11 +114,16 @@ class FlowLimitService {
 
     // Determine all personal flows for this user+appType context that are NOT selected.
     // Pro flows live inside the owner's Pro team; Team flows live in a team-context team.
-    // We scope by ownerId + appContext to isolate each app's flows independently.
+    // We scope by workspaceId + appContext to isolate each app's flows independently.
+    // `appScope`, not `appContext: appType`. The exact equality dropped
+    // free-era flows, which `getPackStatus` DOES count (free-fold) — so a user
+    // told "you have 12, keep 10" was shown 9 in the picker and the 3 invisible
+    // ones were never locked either. The list and the lock must both read the
+    // same set the counter used.
     const flowsToLock = await prisma.flow.findMany({
       where: {
-        ownerId: userId,
-        appContext: appType,
+        workspaceId: userId,
+        ...appScope(appType),
         deletedAt: null,
         id: { notIn: selectedFlowIds },
       },
@@ -152,13 +164,13 @@ class FlowLimitService {
   /**
    * Returns flows for the /dashboard/limitflows picker, pre-sorted by most
    * recently updated (the default selection for the user).
-   * Scoped strictly by ownerId + appContext so Pro and Team are isolated.
+   * Scoped strictly by workspaceId + appContext so Pro and Team are isolated.
    */
   async getFlowsForPicker(userId, appType) {
     return prisma.flow.findMany({
       where: {
-        ownerId: userId,
-        appContext: appType,
+        workspaceId: userId,
+        ...appScope(appType),
         deletedAt: null,
       },
       select: {

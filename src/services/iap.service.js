@@ -30,15 +30,19 @@ const { prisma } = require("../lib/prisma");
 const logger = require("../utils/logger");
 const { grantProCredits } = require("../lib/grantProCredits");
 const { resolveIapProduct } = require("../config/iapProducts");
+const {
+  TEAM_PRICING,
+  PRO_LIFETIME_PRICE_CENTS,
+  FLOW_PRICING,
+  FLOW_ADDON_PLAN_PRICE_USD,
+} = require("../config/pricing");
 
-// Marks paymentId / flowAddonStripeSubId values owned by an IAP provider,
-// keyed on the store's original transaction id so renewals and expirations of
-// the same underlying subscription resolve to the same record.
-const RC_PREFIX = "rc_";
-
-// Every non-Stripe entitlement source. Lifecycle events may only touch
-// records owned by one of these — Stripe records are read-only to IAP.
-const IAP_PROVIDERS = ["revenuecat", "google", "apple"];
+// RC_PREFIX marks paymentId / flowAddonStripeSubId values owned by an IAP
+// provider; IAP_PROVIDERS is every non-Stripe entitlement source. Both now live
+// in lib/storeBilling.js because subscription.service.js needs the same two
+// facts to keep Stripe's hands off store-owned rows (bug-091) — the mirror of
+// the _grantTeam guard below, which keeps IAP's hands off Stripe rows.
+const { RC_PREFIX, IAP_PROVIDERS } = require("../lib/storeBilling");
 
 // Event types that grant (or re-grant) an entitlement.
 const GRANT_EVENTS = new Set([
@@ -158,7 +162,7 @@ class IapService {
   async _grant(userId, product, event, provider) {
     switch (product.type) {
       case "pro_lifetime":
-        return this._grantProLifetime(userId, event);
+        return this._grantProLifetime(userId, product, event);
       case "team":
         return this._grantTeam(userId, product, event, provider);
       case "flow_addon":
@@ -173,7 +177,7 @@ class IapService {
   }
 
   /** One-time lifetime Pro unlock + 200 Pro credits (atomic). */
-  async _grantProLifetime(userId, event) {
+  async _grantProLifetime(userId, product, event) {
     await prisma.$transaction(async (tx) => {
       await tx.user.update({
         where: { id: userId },
@@ -187,8 +191,7 @@ class IapService {
         userId,
         {
           txnId: event.transaction_id || null,
-          amountCharged:
-            event.price != null ? Math.round(event.price * 100) : 500,
+          amountCharged: this._amountCents(event, product),
           currency: (event.currency || "usd").toLowerCase(),
           paymentMethod: "in_app_purchase",
         },
@@ -224,14 +227,18 @@ class IapService {
     const rcSubId = this._rcSubscriptionId(event);
     const subscriptionService = require("./subscription.service");
     await subscriptionService._handleCheckoutComplete(
-      this._synthesizeSession(event, {
-        subscription: rcSubId,
-        metadata: {
-          userId,
-          plan: product.period,
-          teamMembers: String(product.seats),
+      this._synthesizeSession(
+        event,
+        {
+          subscription: rcSubId,
+          metadata: {
+            userId,
+            plan: product.period,
+            teamMembers: String(product.seats),
+          },
         },
-      }),
+        product,
+      ),
     );
 
     // Tag ownership. Store renewals refresh expiry through the same
@@ -270,10 +277,14 @@ class IapService {
     // session.subscription stays null so the handler skips its Stripe
     // period-end lookup; we set the RC period end + owner marker right after.
     await proService.handleFlowAddonCheckoutWebhook(
-      this._synthesizeSession(event, {
-        subscription: null,
-        metadata: { userId, plan: product.plan },
-      }),
+      this._synthesizeSession(
+        event,
+        {
+          subscription: null,
+          metadata: { userId, plan: product.plan },
+        },
+        product,
+      ),
     );
     await prisma.user.update({
       where: { id: userId },
@@ -292,13 +303,17 @@ class IapService {
   async _grantFlowPack(userId, product, event) {
     const proService = require("./pro.service");
     await proService.handleExtraFlowsWebhook(
-      this._synthesizeSession(event, {
-        metadata: {
-          userId,
-          flowPackage: product.flowPackage,
-          flowCount: String(product.flowCount),
+      this._synthesizeSession(
+        event,
+        {
+          metadata: {
+            userId,
+            flowPackage: product.flowPackage,
+            flowCount: String(product.flowCount),
+          },
         },
-      }),
+        product,
+      ),
     );
     logger.info(
       `[iap] Flow pack ${product.flowPackage} credited to user ${userId}`,
@@ -319,8 +334,11 @@ class IapService {
     const { addAddonCredits } = require("./aiCredit.service");
     await addAddonCredits(userId, product.credits, appContext, null);
 
-    const amountCents =
-      event.price != null ? Math.round(event.price * 100) : 0;
+    // Routed through the shared helper like every other grant path. AI credit
+    // packs have no local list price (Stripe Price IDs in env only), so this
+    // still records 0 — but it now WARNS, instead of silently filing a $0
+    // "success" that support cannot distinguish from a free grant.
+    const amountCents = this._amountCents(event, product);
     const currency = (event.currency || "usd").toLowerCase();
     const txnId = event.transaction_id || `iap_${Date.now()}`;
     const planLabel = `AI Credits Addon — ${product.packType} (${product.credits} credits)`;
@@ -469,7 +487,7 @@ class IapService {
    * handlers consume. txn ids flow into their dedup keys, so store-side
    * renewals (new transaction id) process exactly once each.
    */
-  _synthesizeSession(event, overrides = {}) {
+  _synthesizeSession(event, overrides = {}, product = null) {
     const txnId =
       event.transaction_id ||
       event.original_transaction_id ||
@@ -478,13 +496,115 @@ class IapService {
       id: txnId,
       payment_intent: txnId,
       subscription: null,
-      amount_total: event.price != null ? Math.round(event.price * 100) : 0,
+      amount_total: this._amountCents(event, product),
       currency: (event.currency || "usd").toLowerCase(),
       payment_method_types: ["in_app_purchase"],
       customer: null,
       metadata: {},
       ...overrides,
     };
+  }
+
+  /**
+   * The purchase amount in cents for the synthesized session.
+   *
+   * Prefers what the store actually reported. When the store reports nothing,
+   * falls back to OUR list price for the product rather than to 0 — because
+   * "the store didn't tell us" and "the customer paid nothing" are different
+   * statements, and every downstream consumer (transaction_logs.amount_charged,
+   * subscription_history.price, the emailed receipt, the Billing page) treats
+   * this number as a factual charge. Writing 0 turned an unknown into a
+   * documented $0.00 receipt for a customer who had really been charged.
+   *
+   * Every Google Play path currently arrives here with price: null, which is
+   * why before this fallback EVERY Android purchase and renewal recorded as
+   * $0.00. That is our adapter's doing, not entirely Google's — there are four
+   * possible sources, best first:
+   *
+   *   1. `orders.get({packageName, orderId})` → `Order.total`, documented as
+   *      "the final amount paid by the customer, taking into account discounts
+   *      and taxes". The only true receipt, and reachable on ALL FOUR paths —
+   *      it keys on an order id (not a purchase token) and its docs cover "the
+   *      subscription or in-app order", so one-time products included. Every
+   *      path already holds the id: `sub.latestOrderId` (googleplay.service
+   *      :135 validate, :275 RTDN) and `p.orderId` (:210, :315). Not called
+   *      anywhere yet. Note `Order` carries THREE distinct figures for three
+   *      distinct questions — `total` (what the customer paid, incl. tax → this
+   *      field), `tax`, and `developerRevenueInBuyerCurrency` (what we actually
+   *      receive, i.e. the right basis for revenue reporting).
+   *   2. `subscriptionsv2` → `lineItems[].autoRenewingPlan.recurringPrice`
+   *      (a Money: currencyCode + string `units` + nanos). The buyer's real
+   *      currency and region, but Google documents it as EXCLUDING discounts
+   *      and tax — so an intro-offer or promo purchase still reads full price.
+   *      googleplay.service already destructures that line object and drops
+   *      this field; wiring it up is the open follow-up (F1).
+   *   3. Our USD list price — this function. Right ballpark, wrong currency for
+   *      any non-US buyer.
+   *   4. Zero — a factual claim that the customer paid nothing, and never a
+   *      true one for a completed purchase. It remains this function's last
+   *      resort anyway (see the tail of the body) purely because several
+   *      delegated handlers do `session.amount_total || 0`, which would
+   *      collapse a null straight back to 0 while losing the warning. Making
+   *      "unknown" survive end-to-end means fixing those call sites too.
+   *
+   * `products.get` (one-time products) has no price field at all, so for those
+   * this fallback is the best source we currently REACH — but not the best
+   * available: per source 1, orders.get covers one-time purchases too.
+   *
+   * Apple's transaction path does report a real amount (applestore.service
+   * `txn.price` in milliunits); its server-notification path does not.
+   *
+   * Whatever the source, this is a list price and NOT a receipt, so it is
+   * logged as derived, and iap_transactions.price_cents is deliberately left
+   * NULL — that column stays an honest record of what the store itself said.
+   */
+  _amountCents(event, product) {
+    if (event.price != null) return Math.round(event.price * 100);
+
+    const listPrice = this._listPriceCents(product);
+    if (listPrice == null) {
+      logger.warn(
+        `[iap] ${product?.productKey || event.product_id} — store reported no ` +
+          `price and no local list price exists; recording amount 0. The store ` +
+          `receipt is the only record of what was charged.`,
+      );
+      return 0;
+    }
+    logger.info(
+      `[iap] ${product.productKey} — store reported no price; using local list ` +
+        `price ${listPrice} cents (estimate, not the store receipt)`,
+    );
+    return listPrice;
+  }
+
+  /**
+   * Our list price in cents for a resolved catalog product, or null when the
+   * product has no locally-known price. Prices come from config/pricing.js so
+   * they cannot drift from what Stripe charges on the web.
+   *
+   * ai_credits returns null on purpose: those packs are priced only as Stripe
+   * Price IDs held in env vars (see aiCredit.controller getStripePrice), so
+   * there is no amount to read locally and inventing one would be worse than
+   * admitting we do not know.
+   */
+  _listPriceCents(product) {
+    if (!product) return null;
+    switch (product.type) {
+      case "team": {
+        const tier = TEAM_PRICING[product.period];
+        return tier && product.seats ? product.seats * tier.perUser : null;
+      }
+      case "pro_lifetime":
+        return PRO_LIFETIME_PRICE_CENTS;
+      case "flow_pack":
+        return FLOW_PRICING[product.flowPackage] ?? null;
+      case "flow_addon":
+        return FLOW_ADDON_PLAN_PRICE_USD[product.plan] != null
+          ? FLOW_ADDON_PLAN_PRICE_USD[product.plan] * 100
+          : null;
+      default:
+        return null;
+    }
   }
 
   /** Stable per-subscription id (renewals share original_transaction_id). */

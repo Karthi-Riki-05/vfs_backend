@@ -38,10 +38,10 @@ const KNOWN_TYPES = new Set([
  * presenceEvents.js), so emitting to that room reaches every tab/device the
  * user has open and NO ONE ELSE — the targeting the P1 brief requires.
  *
- * We send the notification's own { teamId, appContext } so the client can
+ * We send the notification's own { workspaceId, appContext } so the client can
  * decide whether it belongs to the workspace it is currently viewing before
  * bumping the badge. The client ALSO refetches `/notifications/count`, which
- * is scoped server-side by the X-Team-Context / X-App-Context headers, so the
+ * is scoped server-side by the X-Workspace-Context / X-App-Context headers, so the
  * count stays correct even if the client's local context guess is stale.
  *
  * Best-effort: getIO() is null in tests and before Socket.IO boots, and a
@@ -59,7 +59,7 @@ function emitNotification(notification) {
       title: notification.title,
       message: notification.message,
       actionUrl: notification.actionUrl,
-      teamId: notification.teamId,
+      workspaceId: notification.workspaceId,
       appContext: notification.appContext,
       createdAt: notification.createdAt,
     });
@@ -69,11 +69,11 @@ function emitNotification(notification) {
 }
 
 /**
- * Build the strict { ownerId, teamId } workspace boundary for a query.
+ * Build the strict { ownerId, workspaceId } workspace boundary for a query.
  *
- *   Team context      → { userId, teamId }
- *   Personal (pro)     → { userId, teamId: null, appContext: "pro" }
- *   Personal (team/free) → { userId, teamId: null, appContext: { in: ["free","team"] } }
+ *   Team context      → { userId, workspaceId }
+ *   Personal (pro)     → { userId, workspaceId: null, appContext: "pro" }
+ *   Personal (team/free) → { userId, workspaceId: null, appContext: { in: ["free","team"] } }
  *
  * The Free Fold: in the personal Team-App container, free notifications fold
  * in alongside team ones (matching the flow/shape/project workspace scope in
@@ -82,10 +82,10 @@ function emitNotification(notification) {
  * team-app feed and vice-versa (cross-app isolation).
  *
  * Never userId alone (would leak the other workspace's notifications) and
- * never teamId alone (DATA-LOSS-001 / ISOLATION P0). A caller MUST supply a
+ * never workspaceId alone (DATA-LOSS-001 / ISOLATION P0). A caller MUST supply a
  * context — we fail closed rather than return everything the user owns.
  */
-function buildScope({ userId, teamId = null, appContext = null }) {
+function buildScope({ userId, workspaceId = null, appContext = null }) {
   if (!userId) {
     throw new AppError(
       "userId is required to scope notifications",
@@ -93,22 +93,24 @@ function buildScope({ userId, teamId = null, appContext = null }) {
       "NOTIF_SCOPE_REQUIRED",
     );
   }
-  if (!teamId && !appContext) {
+  if (!workspaceId && !appContext) {
     throw new AppError(
-      "A workspace context (teamId or appContext) is required to read notifications",
+      "A workspace context (workspaceId or appContext) is required to read notifications",
       400,
       "NOTIF_CONTEXT_REQUIRED",
     );
   }
 
+  // owner-as-workspace (2026-08-07): a personal notification carries the
+  // recipient's OWN id rather than null, so there is no null branch any more —
+  // "no workspace supplied" simply means the caller's own workspace.
   const where = { userId };
-  if (teamId) {
-    where.teamId = teamId; // team workspace — strict per-team isolation
+  if (workspaceId) {
+    where.workspaceId = workspaceId; // explicit workspace — strict isolation
     return where;
   }
 
-  // Personal workspace — exclude team notifications.
-  where.teamId = null;
+  where.workspaceId = userId;
   if (appContext === "pro") {
     // Pro app: strict isolation — only the user's pro notifications.
     where.appContext = "pro";
@@ -128,7 +130,7 @@ async function createNotification(
   actionUrl = null,
   metadata = null,
   appContext = "team",
-  teamId = null,
+  workspaceId = null,
 ) {
   // bug-029: warn-only typo catcher — never blocks creation.
   if (!KNOWN_TYPES.has(type)) {
@@ -155,7 +157,13 @@ async function createNotification(
       actionUrl,
       metadata,
       appContext,
-      teamId,
+      // owner-as-workspace (2026-08-07): a personal notification carries the
+      // RECIPIENT'S OWN id, never null — `buildScope` reads personal rows with
+      // `workspaceId = userId`, so a null written here could never be matched
+      // and the notification would be invisible forever. Callers still pass
+      // null to mean "personal"; normalise it at this one choke point rather
+      // than at each of the ~40 call sites.
+      workspaceId: workspaceId || userId,
     },
   });
 
@@ -168,9 +176,9 @@ async function createNotification(
 
 async function getUserNotifications(
   userId,
-  { unreadOnly = false, limit = 20, appContext = null, teamId = null } = {},
+  { unreadOnly = false, limit = 20, appContext = null, workspaceId = null } = {},
 ) {
-  const where = buildScope({ userId, teamId, appContext });
+  const where = buildScope({ userId, workspaceId, appContext });
   if (unreadOnly) where.isRead = false;
   return prisma.notification.findMany({
     where,
@@ -190,11 +198,11 @@ async function markAsRead(notificationId, userId) {
 
 async function markAllAsRead(
   userId,
-  { appContext = null, teamId = null } = {},
+  { appContext = null, workspaceId = null } = {},
 ) {
   // Scope to the active workspace so "mark all read" in one context never
   // clears the other workspace's unread badge.
-  const where = buildScope({ userId, teamId, appContext });
+  const where = buildScope({ userId, workspaceId, appContext });
   where.isRead = false;
   const updated = await prisma.notification.updateMany({
     where,
@@ -205,9 +213,9 @@ async function markAllAsRead(
 
 async function getUnreadCount(
   userId,
-  { appContext = null, teamId = null } = {},
+  { appContext = null, workspaceId = null } = {},
 ) {
-  const where = buildScope({ userId, teamId, appContext });
+  const where = buildScope({ userId, workspaceId, appContext });
   where.isRead = false;
   return prisma.notification.count({ where });
 }
@@ -237,9 +245,9 @@ async function deleteNotification(notificationId, userId) {
  */
 async function deleteAllNotifications(
   userId,
-  { appContext = null, teamId = null } = {},
+  { appContext = null, workspaceId = null } = {},
 ) {
-  const where = buildScope({ userId, teamId, appContext });
+  const where = buildScope({ userId, workspaceId, appContext });
   const deleted = await prisma.notification.deleteMany({ where });
   return { count: deleted.count };
 }

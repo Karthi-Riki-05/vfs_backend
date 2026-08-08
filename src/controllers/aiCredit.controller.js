@@ -4,6 +4,7 @@ const aiCreditService = require("../services/aiCredit.service");
 const aiDetectService = require("../services/aiDetect.service");
 const { getStripe, getStripePrice, isLiveMode } = require("../lib/stripe");
 const { prisma } = require("../lib/prisma");
+const { workspaceHeader, workspaceQuery } = require("../lib/workspaceContext");
 
 // When the Team-app header is sent without a specific team selection, verify the
 // user actually owns an active team subscription before billing the team pool.
@@ -12,10 +13,10 @@ const { prisma } = require("../lib/prisma");
 async function resolveAppContextForBilling(
   userId,
   headerCtx,
-  teamId,
+  workspaceId,
   currentVersion,
 ) {
-  if (headerCtx === "team" && !teamId) {
+  if (headerCtx === "team" && !workspaceId) {
     const ownsTeamPlan = await prisma.subscription.findFirst({
       where: {
         userId,
@@ -24,7 +25,12 @@ async function resolveAppContextForBilling(
       },
       select: { id: true },
     });
-    if (!ownsTeamPlan) return currentVersion || "free";
+    // FREE, not `currentVersion`. currentVersion holds the user's strongest
+    // plan across BOTH apps, so a Pro user opening the Team app resolved to
+    // "pro" — the Team dashboard showed their 50 Pro credits, and worse, a
+    // team-app AI action DEDUCTED from the Pro pool. The apps bill separately;
+    // no team plan in the team app means the free pool.
+    if (!ownsTeamPlan) return "free";
   }
   return headerCtx || currentVersion || "free";
 }
@@ -189,7 +195,7 @@ async function processDiagramJob(jobId) {
       "diagram_generation",
       model,
       job.appContext || "free",
-      job.teamId || null,
+      job.workspaceId || null,
       {
         inputTokens: usage?.inputTokens,
         outputTokens: usage?.outputTokens,
@@ -271,19 +277,19 @@ class AiCreditController {
     // Allow callers to read a specific workspace's balance via query
     // (used by tests / admin tools). Otherwise resolve from the header,
     // guarding against free users claiming the team pool.
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const appContext = req.query?.appContext
       ? req.query.appContext
       : await resolveAppContextForBilling(
           userId,
           req.headers["x-app-context"],
-          teamId,
+          workspaceId,
           req.user.currentVersion,
         );
     const balance = await aiCreditService.getBalance(
       userId,
       appContext,
-      teamId,
+      workspaceId,
     );
     res.json({ success: true, data: balance });
   });
@@ -295,16 +301,16 @@ class AiCreditController {
     }
 
     const userId = req.user.id;
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const appContext = await resolveAppContextForBilling(
       userId,
       req.headers["x-app-context"],
-      teamId,
+      workspaceId,
       req.user.currentVersion,
     );
     const [isDiagram, balance] = await Promise.all([
       aiDetectService.isDiagramRequest(message),
-      aiCreditService.getBalance(userId, appContext, teamId),
+      aiCreditService.getBalance(userId, appContext, workspaceId),
     ]);
 
     // Step 3 — classify complexity so the UI can (Step 4) show a credit
@@ -345,11 +351,11 @@ class AiCreditController {
     const { message, confirmed, conversationId, messageId, existingXml } =
       req.body || {};
     const userId = req.user.id;
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const appContext = await resolveAppContextForBilling(
       userId,
       req.headers["x-app-context"],
-      teamId,
+      workspaceId,
       req.user.currentVersion,
     );
 
@@ -364,11 +370,11 @@ class AiCreditController {
       );
     }
 
-    if (!(await aiCreditService.hasCredits(userId, appContext, teamId))) {
+    if (!(await aiCreditService.hasCredits(userId, appContext, workspaceId))) {
       const balance = await aiCreditService.getBalance(
         userId,
         appContext,
-        teamId,
+        workspaceId,
       );
       return res.status(402).json({
         success: false,
@@ -414,7 +420,7 @@ class AiCreditController {
       "diagram_generation",
       model,
       appContext,
-      teamId,
+      workspaceId,
       {
         inputTokens: usage?.inputTokens,
         outputTokens: usage?.outputTokens,
@@ -515,11 +521,11 @@ class AiCreditController {
     const { message, confirmed, conversationId, messageId, existingXml } =
       req.body || {};
     const userId = req.user.id;
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const appContext = await resolveAppContextForBilling(
       userId,
       req.headers["x-app-context"],
-      teamId,
+      workspaceId,
       req.user.currentVersion,
     );
 
@@ -537,11 +543,11 @@ class AiCreditController {
     // Pre-check credits so the user gets an immediate 402 instead of starting a
     // job that fails. The credit is actually deducted in the background only on
     // successful generation (mirrors the synchronous path).
-    if (!(await aiCreditService.hasCredits(userId, appContext, teamId))) {
+    if (!(await aiCreditService.hasCredits(userId, appContext, workspaceId))) {
       const balance = await aiCreditService.getBalance(
         userId,
         appContext,
-        teamId,
+        workspaceId,
       );
       return res.status(402).json({
         success: false,
@@ -562,7 +568,7 @@ class AiCreditController {
         conversationId: conversationId || null,
         messageId: messageId || null,
         appContext,
-        teamId: teamId || null,
+        workspaceId: workspaceId || null,
         existingXml:
           typeof existingXml === "string" && existingXml.trim()
             ? existingXml
@@ -608,7 +614,7 @@ class AiCreditController {
     // user's current workspace.
     const appContext =
       req.body?.appContext || req.user.currentVersion || "team";
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const amount = parseInt(credits, 10);
 
     if (!amount || amount <= 0) {
@@ -618,7 +624,7 @@ class AiCreditController {
     // Grant credits + write audit + history rows in one transaction so a
     // partial failure can't leave the records out of sync (matches what
     // the Stripe webhook does for a real purchase).
-    await aiCreditService.addAddonCredits(userId, amount, appContext, teamId);
+    await aiCreditService.addAddonCredits(userId, amount, appContext, workspaceId);
 
     const txnId = `manual_${userId}_${Date.now()}`;
     const planLabel = `AI Credits Addon${packType ? ` — ${packType}` : ""} (${amount} credits)`;
@@ -658,7 +664,7 @@ class AiCreditController {
     const balance = await aiCreditService.getBalance(
       userId,
       appContext,
-      teamId,
+      workspaceId,
     );
 
     res.json({
@@ -675,7 +681,7 @@ class AiCreditController {
     const userId = req.user.id;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
 
     const pack = ADDON_PACK_MAP[packType];
     if (!pack) {
@@ -732,7 +738,7 @@ class AiCreditController {
         credits: String(pack.credits),
         packType,
         appContext,
-        ...(teamId ? { teamId } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
       },
       // BUG-PAY-002: save card for future charges after one-time payment
       payment_intent_data: { setup_future_usage: "off_session" },
@@ -792,7 +798,7 @@ class AiCreditController {
     }
 
     const appContext = meta.appContext || req.user.currentVersion || "free";
-    const metaTeamId = meta.teamId || null;
+    const metaTeamId = meta.workspaceId || null;
 
     if (session.payment_status !== "paid") {
       return res.json({

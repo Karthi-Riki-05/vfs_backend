@@ -1,9 +1,15 @@
 const proService = require("../services/pro.service");
 const asyncHandler = require("../utils/asyncHandler");
+const { workspaceHeader } = require("../lib/workspaceContext");
 
 class ProController {
   getAppStatus = asyncHandler(async (req, res) => {
-    const result = await proService.getAppStatus(req.user.id);
+    // Pro entitlements are inherited from the workspace owner, so the active
+    // workspace decides which allowance is reported.
+    const result = await proService.getAppStatus(
+      req.user.id,
+      workspaceHeader(req) || null,
+    );
     res.json({ success: true, data: result });
   });
 
@@ -39,7 +45,10 @@ class ProController {
   });
 
   getSubscriptionStatus = asyncHandler(async (req, res) => {
-    const result = await proService.getProSubscriptionStatus(req.user.id);
+    const result = await proService.getProSubscriptionStatus(
+      req.user.id,
+      workspaceHeader(req) || null,
+    );
     res.json({ success: true, data: result });
   });
 

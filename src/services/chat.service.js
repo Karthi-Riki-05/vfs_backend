@@ -1,21 +1,61 @@
 const { prisma } = require("../lib/prisma");
+const { visibleTeamsWhere } = require("../lib/teamMembership");
+
+/**
+ * Re-attach `members` + `_count.members` to Team rows.
+ *
+ * CHANGE-001 removed the Team.members relation (membership is a scalar
+ * `teamIds` array now, which Prisma cannot join through), so every place that
+ * used to `include: { members: ... }` has to fetch the roster and stitch it
+ * back on. One query for the whole set, not one per team.
+ */
+async function attachTeamMembers(teams) {
+  const list = Array.isArray(teams) ? teams : [teams];
+  const ids = list.map((t) => t?.id).filter(Boolean);
+  if (!ids.length) return teams;
+  const rows = await prisma.teamMember.findMany({
+    where: { teamIds: { hasSome: ids } },
+    include: {
+      user: { select: { id: true, name: true, email: true, image: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const byTeam = new Map(ids.map((id) => [id, []]));
+  for (const r of rows) {
+    for (const tid of r.teamIds || []) {
+      if (byTeam.has(tid)) byTeam.get(tid).push(r);
+    }
+  }
+  const out = list.map((t) => {
+    const members = byTeam.get(t.id) || [];
+    return { ...t, members, _count: { ...(t._count || {}), members: members.length } };
+  });
+  return Array.isArray(teams) ? out : out[0];
+}
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
+// bug-093: shared with team.service so "does this team already have a room?"
+// is answered the same way on both the create-with-team and open-it-lazily paths.
+const { findTeamRoom } = require("../lib/teamChatRoom");
+const {
+  canEnterWorkspace,
+  resolveWorkspaceId,
+} = require("../lib/workspaceScope");
 
 // Simple in-memory link preview cache (URL -> preview data, expires after 1 hour)
 const linkPreviewCache = new Map();
 const CACHE_TTL = 60 * 60 * 1000;
 
 class ChatService {
-  async getChatGroups(userId, appContext = "team", teamId = null) {
+  async getChatGroups(userId, appContext = "team", workspaceId = null) {
     const groups = await prisma.chatGroup.findMany({
       where: {
         appContext,
-        // Own account (no teamId) shows ALL the user's groups in this app
+        // Own account (no workspaceId) shows ALL the user's groups in this app
         // context; a team context shows that team's conversation(s) PLUS the
-        // user's personal groups/DMs (teamId null) — matching getSidebarData.
+        // user's personal groups/DMs (workspaceId null) — matching getSidebarData.
         // Access still requires creator/membership (the OR below).
-        ...(teamId ? { AND: [{ OR: [{ teamId }, { teamId: null }] }] } : {}),
+        ...(workspaceId ? { AND: [{ OR: [{ workspaceId }, { workspaceId: null }] }] } : {}),
         deletedAt: null,
         OR: [{ userId }, { members: { some: { userId } } }],
       },
@@ -70,61 +110,126 @@ class ChatService {
   }
 
   async createChatGroup(userId, data, appContext, activeTeamId = null) {
-    // CSV-51 permission gate: in a TEAM workspace, only the team OWNER or an
-    // ADMIN-role member may create a group and invite others — plain members
-    // cannot. The governing team is the explicit body.teamId (team-wide
-    // conversation) OR the active workspace (X-Team-Context). DMs and personal
-    // (no-team) groups are exempt — a user may always start their own DMs/
-    // personal groups.
-    const governingTeamId = data.teamId || activeTeamId || null;
-    if (governingTeamId && !data.isDirect) {
-      const govTeam = await prisma.team.findFirst({
-        where: { id: governingTeamId, deletedAt: null },
-        select: { id: true, teamOwnerId: true },
+    // CSV-51 permission gate: inside a workspace, only the workspace OWNER or
+    // an ADMIN-role member may create a group and invite others — plain members
+    // cannot. The governing workspace is the explicit body.workspaceId (the
+    // workspace-wide conversation) OR the active workspace
+    // (X-Workspace-Context). DMs are exempt — anyone may start their own.
+    //
+    // owner-as-workspace (2026-08-07): the workspace id IS the owner's user id,
+    // so "is the caller the owner?" is a plain comparison, and ADMIN is
+    // resolved across every team that owner runs.
+    // bug-096: a room belongs to a TEAM. When the caller names one, the
+    // workspace is that team's owner — not the header, and not the caller.
+    let roomTeam = null;
+    if (data.teamId) {
+      roomTeam = await prisma.team.findFirst({
+        where: { id: data.teamId, deletedAt: null },
+        select: { id: true, teamOwnerId: true, name: true, appContext: true },
       });
-      if (govTeam && govTeam.teamOwnerId !== userId) {
-        const membership = await prisma.teamMember.findFirst({
-          where: { userId, teamId: governingTeamId },
-          select: { role: true },
-        });
-        if (membership?.role !== "ADMIN") {
-          throw new AppError(
-            "Only team owners and admins can create groups in this workspace.",
-            403,
-            "TEAM_GROUP_CREATE_FORBIDDEN",
-          );
-        }
+      if (!roomTeam) throw new AppError("Team not found", 404, "NOT_FOUND");
+    }
+    const governingWorkspaceId =
+      roomTeam?.teamOwnerId || data.workspaceId || activeTeamId || null;
+    // The workspace EVERY group in this request lands in — named groups and DMs
+    // included. Resolved (membership-verified) so a forged header cannot plant
+    // a conversation in someone else's workspace.
+    const groupWorkspaceId = await resolveWorkspaceId(userId, governingWorkspaceId);
+    // Only an explicit body.workspaceId means "the workspace's canonical room".
+    // A named group created while inside a workspace belongs TO that workspace
+    // but is not its room — flagging it would collide on
+    // @@unique([workspaceId, appContext, isWorkspaceRoom]) and would also
+    // replace the real room in the Teams strip.
+    const wantsWorkspaceRoom = !!roomTeam;
+    // bug-093: set when a plain MEMBER is allowed through solely to materialise
+    // the workspace room. Such a caller may bring the room into existence but
+    // must not get to shape it — see where this is applied below.
+    let memberMaterialisingTeamRoom = false;
+    if (governingWorkspaceId && !data.isDirect && governingWorkspaceId !== userId) {
+      const isAdmin = await prisma.teamMember.findFirst({
+        where: {
+          userId,
+          role: "ADMIN",
+          // CHANGE-001: membership names its workspace directly.
+          workspaceId: governingWorkspaceId,
+        },
+        select: { role: true },
+      });
+      // bug-093: one exemption — the workspace's OWN room. It belongs to the
+      // workspace, not to whoever clicked first, and any member is entitled to
+      // it. Without this a plain member clicking first got a 403 and could
+      // never open chat at all. Narrow on purpose: it applies only when the
+      // request names this workspace AND no room exists yet, so it cannot be
+      // used to create a second group.
+      // Opening the workspace's OWN room is not "creating a group" — the room
+      // is part of the workspace and every member is entitled to it, whether it
+      // already exists (the dedup below returns it) or is being materialised
+      // for the first time. Requiring it to be ABSENT was wrong: a plain member
+      // clicking an existing room hit this 403 instead of simply being handed
+      // the room.
+      const canEnter = await canEnterWorkspace(userId, governingWorkspaceId);
+      const isTeamRoomRequest = !!roomTeam && canEnter;
+      const isFirstTeamRoom =
+        isTeamRoomRequest &&
+        !(await findTeamRoom(prisma, governingWorkspaceId, roomTeam.id));
+      if (!isTeamRoomRequest && !isAdmin) {
+        throw new AppError(
+          "Only team owners and admins can create groups in this workspace.",
+          403,
+          "TEAM_GROUP_CREATE_FORBIDDEN",
+        );
+      }
+      if (isFirstTeamRoom && !isAdmin) {
+        // Allowed through only to open the workspace's chat. Left
+        // unconstrained, that same call would let a plain member name the
+        // canonical room whatever they liked and populate it with whoever they
+        // liked — a bigger privilege than the CSV-51 rule they just bypassed.
+        // Pin both to the workspace itself.
+        memberMaterialisingTeamRoom = true;
+        // Pin the title to the TEAM the room belongs to — a member may open the
+        // room, not name it.
+        data.title = roomTeam?.name || "Team Chat";
       }
     }
 
-    // Explicit teamId = team-wide conversation. Verify the creator actually
-    // belongs to (or owns) that team — otherwise anyone could plant a
-    // conversation inside an arbitrary team.
-    if (data.teamId) {
-      const allowed = await prisma.team.findFirst({
-        where: {
-          id: data.teamId,
-          deletedAt: null,
-          OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
-        },
-        select: { id: true },
-      });
-      if (!allowed) {
+    // Explicit workspaceId = the workspace-wide conversation. Verify the caller
+    // may actually enter that workspace — otherwise anyone could plant a
+    // conversation inside someone else's.
+    if (roomTeam) {
+      if (!(await canEnterWorkspace(userId, governingWorkspaceId))) {
         throw new AppError("Not a member of this team", 403, "FORBIDDEN");
       }
 
-      // ── Team chat dedup ──────────────────────────────────────────────────
-      // If a team conversation already exists for this teamId, return it and
-      // add the requesting user as a member (idempotent). This prevents
-      // duplicate ChatGroup records when multiple users each click "open team
-      // chat" before the other's sidebar has refreshed — the extras would
-      // otherwise spill into the Group tab (bug: ghost groups).
+      // ── Workspace chat dedup ─────────────────────────────────────────────
+      // If the workspace room already exists, return it and add the requester
+      // (idempotent). Prevents duplicate ChatGroup rows when several people
+      // click "open team chat" before the others' sidebars refresh — the
+      // extras would otherwise spill into the Group tab (ghost groups).
+      //
+      // Matches on isWorkspaceRoom, NOT on workspaceId alone: every DM and
+      // named group now carries a workspaceId too, so the old query would have
+      // returned whichever group happened to be oldest and handed the caller
+      // somebody else's conversation.
+      //
+      // includeDeleted — a soft-deleted room still occupies the unique slot, so
+      // treating it as absent meant the INSERT below died on the constraint and
+      // the workspace's chat could never come back. Revive it instead.
       const existingTeamGroup = await prisma.chatGroup.findFirst({
-        where: { teamId: data.teamId, deletedAt: null },
-        orderBy: { createdAt: "asc" }, // oldest = the canonical group
+        where: {
+          workspaceId: governingWorkspaceId,
+          teamId: roomTeam.id,
+          isWorkspaceRoom: true,
+        },
+        orderBy: { createdAt: "asc" }, // oldest = the canonical room
       });
       if (existingTeamGroup) {
-        // Ensure the requesting user is in the existing group.
+        if (existingTeamGroup.deletedAt) {
+          await prisma.chatGroup.update({
+            where: { id: existingTeamGroup.id },
+            data: { deletedAt: null, updatedAt: new Date() },
+          });
+          existingTeamGroup.deletedAt = null;
+        }
         await prisma.chatGroupUser.createMany({
           data: [{ userId, groupId: existingTeamGroup.id }],
           skipDuplicates: true,
@@ -143,12 +248,28 @@ class ChatService {
       emailMemberIds = users.map((u) => u.id);
     }
 
-    // Build the unique member set up-front (creator + recipients, deduped)
+    // Build the unique member set up-front (creator + recipients, deduped).
+    // bug-093: when a plain member is only materialising their team's room, the
+    // roster comes from the TEAM, not from the request body — otherwise the
+    // exemption would double as a way to pull arbitrary users into a team
+    // conversation.
+    const requestedMemberIds = memberMaterialisingTeamRoom
+      ? (
+          await prisma.teamMember.findMany({
+            // bug-096: the room belongs to ONE team, so its roster is that
+            // team's members — not everyone in the workspace.
+            where: { teamIds: { has: roomTeam.id } },
+            select: { userId: true },
+          })
+        ).map((m) => m.userId)
+      : [
+          ...(data.memberIds || []),
+          ...emailMemberIds,
+        ];
     const memberIds = Array.from(
       new Set([
         userId,
-        ...(data.memberIds || []).filter((id) => id && id !== userId),
-        ...emailMemberIds.filter((id) => id !== userId),
+        ...requestedMemberIds.filter((id) => id && id !== userId),
       ]),
     );
 
@@ -157,12 +278,12 @@ class ChatService {
     // otherwise a user creating a 2-person named group via the modal
     // would silently get an existing DM back. The contact-click flow
     // sets isDirect; the "+ Create" group flow does not.
-    if (data.isDirect && !data.teamId && memberIds.length === 2) {
+    if (data.isDirect && !data.workspaceId && memberIds.length === 2) {
       const otherId = memberIds.find((id) => id !== userId);
       const candidates = await prisma.chatGroup.findMany({
         where: {
           deletedAt: null,
-          teamId: null,
+          workspaceId: null,
           AND: [
             { members: { some: { userId } } },
             { members: { some: { userId: otherId } } },
@@ -182,7 +303,7 @@ class ChatService {
     }
 
     const isDmCreate =
-      !!data.isDirect && !data.teamId && memberIds.length === 2;
+      !!data.isDirect && !data.workspaceId && memberIds.length === 2;
     let group;
     try {
       group = await prisma.chatGroup.create({
@@ -196,7 +317,15 @@ class ChatService {
           flowItemId: data.flowItemId || "",
           appType: data.appType || null,
           appContext,
-          teamId: data.teamId || null,
+          workspaceId: groupWorkspaceId,
+          // bug-096: the TEAM this room belongs to. NULL for named groups/DMs,
+          // which keeps them outside the partial unique.
+          teamId: roomTeam?.id || null,
+          // A group created against an explicit TEAM is that team's canonical
+          // room (the dedup above already returned any existing one).
+          // true / NULL only — never false — so the partial unique leaves DMs
+          // and named groups unconstrained.
+          isWorkspaceRoom: wantsWorkspaceRoom ? true : null,
           // Schema columns are nullable with no @default — set explicitly so
           // sidebar ordering (updatedAt desc) doesn't push new groups last.
           createdAt: new Date(),
@@ -204,14 +333,20 @@ class ChatService {
         },
       });
     } catch (err) {
-      // bug-058: the findFirst dedup check above is not atomic — a
-      // concurrent request for the same (teamId, appContext) can win the
-      // race and create its group first. The `@@unique([teamId, appContext])`
-      // constraint makes the loser's create() fail instead of silently
-      // producing a duplicate; recover by joining the winner's group.
-      if (err.code === "P2002" && data.teamId) {
+      // bug-058: the findFirst dedup check above is not atomic — a concurrent
+      // request for the same room can win the race and create it first. The
+      // unique makes the loser's create() fail instead of silently producing a
+      // duplicate; recover by joining the winner's room.
+      // bug-096: the key includes the TEAM now, so the winner must be looked up
+      // by team too — otherwise the loser could join a DIFFERENT team's room.
+      if (err.code === "P2002" && roomTeam) {
         const winner = await prisma.chatGroup.findFirst({
-          where: { teamId: data.teamId, appContext, deletedAt: null },
+          where: {
+            workspaceId: groupWorkspaceId,
+            teamId: roomTeam.id,
+            appContext,
+            deletedAt: null,
+          },
         });
         if (winner) {
           await prisma.chatGroupUser.createMany({
@@ -914,90 +1049,59 @@ class ChatService {
         ? { appContext: "pro" }
         : { appContext: { not: "pro" } };
 
-    // Workspace isolation (CSV-51) — the sidebar scopes to the ACTIVE
-    // workspace, mirroring flow.service._workspaceScope / the shape B51 fix, so
-    // switching workspace switches the chat bucket:
-    //   • active JOINED team (member, not owner) → ONLY that team's chat; no
-    //     personal (teamId=null) standalone groups, no other teams.
-    //   • active OWNED team-app/free team, or personal (no active team) →
-    //     personal container: owned teams fold in + teamId=null standalone
-    //     groups. JOINED teams are hidden here.
-    // System-created billing shells (verifyTeam='system') stay hidden. The
-    // app-context filter (appCtxFilter) still applies on top.
-    const ownedTeams = await prisma.team.findMany({
+    // Workspace isolation — the sidebar scopes to the ACTIVE workspace, which
+    // under owner-as-workspace (2026-08-07) is the tenant OWNER's user id. One
+    // equality replaces the old union of "owned team ids + standalone nulls":
+    // there are no standalone rows any more, every group names its workspace.
+    //
+    // System-created billing shells (verifyTeam='system') stay hidden from the
+    // Teams strip, and the app-context filter still applies on top.
+    const workspaceId = await resolveWorkspaceId(userId, activeTeamId);
+    const isOwnWorkspace = workspaceId === userId;
+
+    // canCreateGroups mirrors the createChatGroup gate: own workspace → always;
+    // someone else's → only OWNER or ADMIN. The frontend uses this to hide
+    // "+ Create Group" from plain members (the backend still enforces it).
+    let canCreateGroups = true;
+    if (!isOwnWorkspace) {
+      const adminHere = await prisma.teamMember.findFirst({
+        where: {
+          userId,
+          role: "ADMIN",
+          workspaceId,
+        },
+        select: { id: true },
+      });
+      canCreateGroups = !!adminHere;
+    }
+
+    // Teams shown in this workspace: every non-system team the workspace owner
+    // runs that the caller actually belongs to (or owns).
+    const visibleTeams = await prisma.team.findMany({
       where: {
         deletedAt: null,
         ...appCtxFilter,
-        teamOwnerId: userId,
-        OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }],
+        teamOwnerId: workspaceId,
+        AND: [
+          { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
+          (await visibleTeamsWhere(userId)),
+        ],
       },
       select: { id: true },
     });
-    const ownedTeamIds = ownedTeams.map((t) => t.id);
+    const myTeamIds = visibleTeams.map((t) => t.id);
 
-    let scopedTeamIds;
-    let includeStandalone;
-    // canCreateGroups mirrors the createChatGroup gate: personal / owned →
-    // always; a JOINED team workspace → only OWNER or ADMIN. The frontend uses
-    // this to hide "+ Create Group" from plain members (backend still enforces).
-    let canCreateGroups = true;
-    if (activeTeamId) {
-      // Validate the active workspace: a non-system team in this app context
-      // that the caller owns or belongs to.
-      const activeTeam = await prisma.team.findFirst({
-        where: {
-          id: activeTeamId,
-          deletedAt: null,
-          ...appCtxFilter,
-          AND: [
-            { OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] },
-            { OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }] },
-          ],
-        },
-        select: { id: true, teamOwnerId: true },
-      });
-      if (!activeTeam || activeTeam.teamOwnerId === userId) {
-        // Owned team folds into personal; stale/invalid active team → personal.
-        scopedTeamIds = ownedTeamIds;
-        includeStandalone = true;
-        // owner (or personal fallback) → can create.
-      } else {
-        // Joined team → strict: only that team's chat.
-        scopedTeamIds = [activeTeamId];
-        includeStandalone = false;
-        // Joined team: only an ADMIN member may create groups here.
-        const membership = await prisma.teamMember.findFirst({
-          where: { userId, teamId: activeTeamId },
-          select: { role: true },
-        });
-        canCreateGroups = membership?.role === "ADMIN";
-      }
-    } else {
-      // Personal context.
-      scopedTeamIds = ownedTeamIds;
-      includeStandalone = true;
-    }
-    const myTeamIds = scopedTeamIds;
-
+    // No teams AND no groups in this workspace → the locked empty state.
     if (myTeamIds.length === 0) {
-      // B48: no NON-SYSTEM team in the scoped workspace — but a standalone
-      // (teamId=null) group/DM in this appContext still counts (only when the
-      // personal container is in scope; a joined-team workspace never shows
-      // standalone groups). A standalone Pro user's only "pro team" is the
-      // system billing shell (excluded above), so the old hard lock hid the
-      // pro groups they created. Only lock when there are ALSO no standalone
-      // groups here; otherwise fall through so the main query surfaces them.
-      const standaloneCount = includeStandalone
-        ? await prisma.chatGroup.count({
-            where: {
-              deletedAt: null,
-              teamId: null,
-              appContext,
-              OR: [{ userId }, { members: { some: { userId } } }],
-            },
-          })
-        : 0;
-      if (standaloneCount === 0) {
+      const groupCount = await prisma.chatGroup.count({
+        where: {
+          deletedAt: null,
+          workspaceId,
+          appContext,
+          OR: [{ userId }, { members: { some: { userId } } }],
+        },
+      });
+      if (groupCount === 0) {
         return {
           teams: [],
           groups: [],
@@ -1018,8 +1122,11 @@ class ChatService {
     // Steps 1–3 below only depend on myTeamIds (resolved above) and are
     // independent of each other, so they run in one batch instead of three
     // serial round-trips — cuts sidebar TTFB to a single DB wait.
-    const [teams, chatGroups, unreadCounts] = await Promise.all([
+    const [rawTeams, chatGroups, unreadCounts] = await Promise.all([
       // 1. Fetch all of the user's teams (filtered above).
+      //    CHANGE-001: `members` / `_count.members` were relation includes and
+      //    the relation is gone — attachTeamMembers puts them back in the same
+      //    shape from the membership rows (see below).
       prisma.team.findMany({
         where: {
           id: { in: myTeamIds },
@@ -1029,40 +1136,22 @@ class ChatService {
           owner: {
             select: { id: true, name: true, email: true, image: true },
           },
-          members: {
-            include: {
-              user: {
-                select: { id: true, name: true, email: true, image: true },
-              },
-            },
-          },
-          _count: { select: { members: true } },
         },
         orderBy: { createdAt: "desc" },
       }),
       // 2. Fetch the user's chat groups for this workspace:
-      //   • teamId in myTeamIds → the team-wide conversation(s)
-      //   • teamId = null + matching appContext → named groups and DMs
+      //   • workspaceId in myTeamIds → the team-wide conversation(s)
+      //   • workspaceId = null + matching appContext → named groups and DMs
       //     (workspace-app isolation: pro groups never show in the team app
       //     and vice-versa; membership is the ACL within an app context).
       // The user must be creator or member of the group (the OR below).
       prisma.chatGroup.findMany({
         where: {
           deletedAt: null,
+          workspaceId,
+          appContext,
+          // Membership is the ACL within a workspace.
           OR: [{ userId }, { members: { some: { userId } } }],
-          AND: [
-            {
-              OR: [
-                { teamId: { in: myTeamIds } },
-                // Standalone (teamId=null) groups/DMs belong to the personal
-                // container only — hidden when a JOINED team is the active
-                // workspace (CSV-51 workspace isolation).
-                ...(includeStandalone
-                  ? [{ teamId: null, appContext }]
-                  : []),
-              ],
-            },
-          ],
         },
         include: {
           _count: { select: { messages: true, members: true } },
@@ -1089,6 +1178,9 @@ class ChatService {
       }),
     ]);
 
+    // CHANGE-001: stitch the roster back on (no Team.members relation).
+    const teams = await attachTeamMembers(rawTeams);
+
     const unreadMap = {};
     for (const uc of unreadCounts) {
       unreadMap[uc.groupId] = uc._count.id;
@@ -1097,11 +1189,14 @@ class ChatService {
     // 4. Classify groups: team-linked vs DM vs named group
     //
     // STRUCTURAL DM detection (no longer relies on title === other.name):
-    //   teamId IS NULL && distinct membership ⊆ {self, otherUser} (size ≤ 2)
+    //   workspaceId IS NULL && distinct membership ⊆ {self, otherUser} (size ≤ 2)
     //
     // For each DM we compute a per-user displayName/displayImage taken from
     // the OTHER member, so the recipient never sees their own name as the
     // group title. Named non-team group chats keep their original title.
+    // bug-096: keyed by TEAM id, not workspace. Keying it by workspace made
+    // every team in a workspace resolve to the same conversation — two rows in
+    // the Teams tab, one shared history.
     const teamConvoMap = {}; // teamId -> chatGroup
     const regularGroups = []; // Named non-team groups (NOT DMs)
     const dmGroups = []; // 1-on-1 DM groups (used to link contacts)
@@ -1124,29 +1219,22 @@ class ChatService {
         memberCount: distinctMembers.length,
       };
 
-      if (group.teamId) {
-        // One team-wide conversation per team. Legacy data (header-injected
-        // teamIds) may carry several groups for the same team — prefer the
-        // one titled after the team (handleTeamChatOpen creates it that way),
-        // never overwrite an existing match, and surface the rest as regular
-        // named groups so they don't silently vanish.
-        const teamName = teams.find((t) => t.id === group.teamId)?.name;
-        const isTeamConvo = !teamConvoMap[group.teamId] || g.title === teamName;
-        if (isTeamConvo) {
-          const displaced = teamConvoMap[group.teamId];
-          if (displaced && displaced.id !== g.id) {
-            displaced.isDirect = false;
-            displaced.displayName = displaced.title || "Group";
-            displaced.displayImage = null;
-            regularGroups.push(displaced);
-          }
-          teamConvoMap[group.teamId] = g;
-        } else {
-          g.isDirect = false;
-          g.displayName = g.title || "Group";
-          g.displayImage = null;
-          regularGroups.push(g);
+      // owner-as-workspace: EVERY group now carries a workspaceId, so that can
+      // no longer be the test for "is this the team-wide conversation" — it
+      // would have classified every named group and DM as one. The canonical
+      // room is flagged explicitly instead.
+      if (group.isWorkspaceRoom) {
+        const displaced = teamConvoMap[group.teamId];
+        if (displaced && displaced.id !== g.id) {
+          displaced.isDirect = false;
+          displaced.displayName = displaced.title || "Group";
+          displaced.displayImage = null;
+          regularGroups.push(displaced);
         }
+        teamConvoMap[group.teamId] = g;
+        // The room is surfaced in the Teams strip, never as a group as well —
+        // without this it fell through to the DM/named-group classification
+        // below and appeared twice.
         continue;
       }
 
@@ -1175,6 +1263,9 @@ class ChatService {
           otherMember?.name || otherMember?.email || "Direct Message";
         g.displayImage = otherMember?.image || null;
         g.otherUserId = otherMember?.id || null;
+        // The thread header subtitles a DM with the person's email; a member
+        // COUNT is meaningless for a two-person conversation.
+        g.otherUserEmail = otherMember?.email || null;
         dmGroups.push(g);
       } else {
         g.isDirect = false;
@@ -1200,6 +1291,7 @@ class ChatService {
       ownerName: team.owner?.name,
       memberCount: team._count.members,
       members: team.members.map((m) => m.user),
+      // One room per WORKSPACE — every team the owner runs links to it.
       conversationId: teamConvoMap[team.id]?.id || null,
       lastMessage: teamConvoMap[team.id]?.messages?.[0] || null,
       unreadCount: teamConvoMap[team.id]?.unreadCount || 0,
@@ -1271,8 +1363,18 @@ class ChatService {
           distinctMembers.some(
             (m) => m.name === rawTitle || m.email === rawTitle,
           );
+        // Must match the classification used for `groups`/`contacts` above.
+        // This copy still carried `!g.workspaceId`, the pre-owner-as-workspace
+        // test. Since that refactor EVERY group carries a workspaceId (a DM
+        // created inside a workspace inherits it from X-Workspace-Context), so
+        // the clause was never true and no conversation here was ever a DM.
+        // The two lists then disagreed: the sidebar showed a direct message
+        // under Personal, while the thread header — which resolves the opened
+        // conversation from this flat list — saw a "group" and subtitled a
+        // two-person DM "2 members". The canonical room is excluded explicitly
+        // instead, exactly as the classification above does it.
         const isDm =
-          !g.teamId &&
+          !g.isWorkspaceRoom &&
           (!hasMeaningfulTitle || titleLooksLikeMemberName) &&
           distinctMembers.length <= 2 &&
           distinctMembers.some((m) => m.id !== userId);
@@ -1290,6 +1392,7 @@ class ChatService {
             : g.title || "Group",
           displayImage: isDm ? otherMember?.image || null : null,
           otherUserId: isDm ? otherMember?.id || null : null,
+          otherUserEmail: isDm ? otherMember?.email || null : null,
         };
       }),
     };
@@ -1369,24 +1472,15 @@ class ChatService {
     const teams = await prisma.team.findMany({
       where: {
         deletedAt: null,
-        OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
-      },
-      include: {
-        members: {
-          include: {
-            user: {
-              select: { id: true, name: true, email: true, image: true },
-            },
-          },
-        },
+        ...(await visibleTeamsWhere(userId)),
       },
       orderBy: { name: "asc" },
-    });
+    }).then(attachTeamMembers);
 
     // Group members by team, marking who's already in the group
     const teamGroups = teams
       .map((team) => ({
-        teamId: team.id,
+        workspaceId: team.id,
         teamName: team.name,
         members: team.members
           .filter((m) => m.userId !== userId) // Exclude current user
@@ -1419,10 +1513,9 @@ class ChatService {
     const teams = await prisma.team.findMany({
       where: {
         deletedAt: null,
-        OR: [{ teamOwnerId: userId }, { members: { some: { userId } } }],
+        ...(await visibleTeamsWhere(userId)),
       },
-      include: { members: { select: { userId: true } } },
-    });
+    }).then(attachTeamMembers);
     const validTeamMemberIds = new Set();
     for (const team of teams) {
       for (const m of team.members) validTeamMemberIds.add(m.userId);

@@ -115,16 +115,18 @@ class UserController {
     //   1. Teams the user was INVITED into (TeamMember row, role != OWNER).
     //   2. Teams the user OWNS — owners need a workspace entry too so they
     //      can reach their team's shared flows/projects/chat, not just their
-    //      personal (teamId IS NULL) workspace. Previously owned teams were
+    //      personal (workspaceId IS NULL) workspace. Previously owned teams were
     //      excluded, leaving owners unable to see member-contributed data.
-    const [memberTeams, ownedTeams] = await Promise.all([
+    // CHANGE-001: a membership row carries `teamIds`, not a `team` relation, so
+    // the teams are fetched by id and stitched back on to keep the downstream
+    // mapper (which reads `mt.team`) unchanged.
+    const [membershipRows, ownedTeams] = await Promise.all([
       prisma.teamMember.findMany({
         where: {
           userId,
           role: { not: "OWNER" }, // exclude OWNER membership rows
-          team: appCtxTeamFilter,
         },
-        include: { team: { include: { owner: { select: ownerSelect } } } },
+        select: { role: true, teamIds: true },
       }),
       prisma.team.findMany({
         where: { teamOwnerId: userId, ...appCtxTeamFilter },
@@ -132,8 +134,25 @@ class UserController {
       }),
     ]);
 
+    const memberTeamIdList = [
+      ...new Set(membershipRows.flatMap((m) => m.teamIds || [])),
+    ];
+    const memberTeamRows = memberTeamIdList.length
+      ? await prisma.team.findMany({
+          where: { id: { in: memberTeamIdList }, ...appCtxTeamFilter },
+          include: { owner: { select: ownerSelect } },
+        })
+      : [];
+    const memberTeamById = new Map(memberTeamRows.map((t) => [t.id, t]));
+    const memberTeams = membershipRows.flatMap((m) =>
+      (m.teamIds || [])
+        .map((id) => memberTeamById.get(id))
+        .filter(Boolean)
+        .map((team) => ({ role: m.role, team })),
+    );
+
     // Shared mapper → the exact TeamContextOption shape the frontend
-    // AppContext consumes (teamId/teamName/owner/plan/hasPro/…). `isOwner`
+    // AppContext consumes (workspaceId/teamName/owner/plan/hasPro/…). `isOwner`
     // is additive metadata the FE can use to label the entry.
     const toOption = (team, role) => {
       // Derive the effective plan the team grants from the OWNER's live
@@ -149,7 +168,7 @@ class UserController {
       if (team.appContext === "pro" && plan === "team") plan = "pro";
 
       return {
-        teamId: team.id,
+        workspaceId: team.id,
         teamName: team.name,
         role,
         isOwner: role === "OWNER",
@@ -174,7 +193,7 @@ class UserController {
       .map((mt) => toOption(mt.team, mt.role));
 
     // Dedup: never list an owned team twice if a stray membership row exists.
-    const memberTeamIds = new Set(memberOptions.map((o) => o.teamId));
+    const memberTeamIds = new Set(memberOptions.map((o) => o.workspaceId));
     const ownedOptions = ownedTeams
       .filter((t) => !memberTeamIds.has(t.id))
       .map((t) => toOption(t, "OWNER"));
@@ -301,7 +320,7 @@ class UserController {
 
   setActiveContext = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const { teamId } = req.body || {};
+    const { workspaceId } = req.body || {};
     // App mode decides WHICH context field to write. Prefer the explicit body
     // value (ProGuard posts via raw fetch with appMode:'pro'); fall back to the
     // X-App-Context header (axios attaches it on every request). The Pro app
@@ -316,14 +335,14 @@ class UserController {
 
     // Validate: when selecting a team, the caller must be a member OR the
     // owner of it — otherwise we'd let someone bill a team they can't access.
-    if (teamId) {
+    if (workspaceId) {
       const [membership, ownedTeam] = await Promise.all([
         prisma.teamMember.findFirst({
-          where: { teamId, userId },
+          where: { workspaceId, userId },
           select: { id: true },
         }),
         prisma.team.findFirst({
-          where: { id: teamId, teamOwnerId: userId, deletedAt: null },
+          where: { id: workspaceId, teamOwnerId: userId, deletedAt: null },
           select: { id: true },
         }),
       ]);
@@ -342,11 +361,11 @@ class UserController {
       where: { id: userId },
       data:
         appMode === "pro"
-          ? { lastActiveProTeamId: teamId || null }
-          : { lastActiveTeamId: teamId || null },
+          ? { lastActiveProTeamId: workspaceId || null }
+          : { lastActiveTeamId: workspaceId || null },
     });
 
-    res.json({ success: true, data: { teamId: teamId || null } });
+    res.json({ success: true, data: { workspaceId: workspaceId || null } });
   });
 
   getActiveContext = asyncHandler(async (req, res) => {
@@ -360,13 +379,13 @@ class UserController {
       where: { id: req.user.id },
       select: { lastActiveTeamId: true, lastActiveProTeamId: true },
     });
-    const teamId =
+    const workspaceId =
       appMode === "pro"
         ? user?.lastActiveProTeamId || null
         : user?.lastActiveTeamId || null;
     res.json({
       success: true,
-      data: { teamId },
+      data: { workspaceId },
     });
   });
 }

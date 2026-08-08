@@ -1,15 +1,16 @@
 const shapeGroupService = require("../services/shapeGroup.service");
 const asyncHandler = require("../utils/asyncHandler");
+const { workspaceHeader, workspaceQuery, workspaceBody } = require("../lib/workspaceContext");
 
 class ShapeGroupController {
   getAllGroups = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const groups = await shapeGroupService.getAllGroups(
       userId,
       appContext,
-      teamId,
+      workspaceId,
     );
     res.json({ success: true, data: groups });
   });
@@ -25,10 +26,10 @@ class ShapeGroupController {
   createGroup = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceBody(req) || workspaceHeader(req) || null;
     const group = await shapeGroupService.createGroup(
       userId,
-      { ...req.body, teamId },
+      { ...req.body, workspaceId },
       appContext,
     );
     res.status(201).json({ success: true, data: group });

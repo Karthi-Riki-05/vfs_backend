@@ -49,3 +49,9 @@ next-env.d.ts
 
 # Runtime logs (regenerated; not deployable artifacts)
 logs/
+
+# Stray files that are NOT part of this project: a Laravel .env (holds a live
+# APP_KEY + DB_PASSWORD) and a WordPress config for site1.valueflowsoft.com.
+# The `.env` rule above does NOT match a file literally named `env`.
+env
+wp-config.php

@@ -2,6 +2,7 @@ const rateLimit = require("express-rate-limit");
 const { ipKeyGenerator } = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 const securityAlert = require("../services/securityAlert.service");
+const { workspaceHeader } = require("../lib/workspaceContext");
 
 // In-process rate limiters share state across an entire Jest worker.
 // That makes tests flaky (the 11th request in a 10/15-min window is 429).
@@ -100,7 +101,7 @@ const inviteLimiter = isTest
           teamId:
             req.params?.teamId ||
             req.body?.teamId ||
-            req.headers["x-team-context"] ||
+            workspaceHeader(req) ||
             null,
           ip: req.ip,
           route: req.originalUrl,

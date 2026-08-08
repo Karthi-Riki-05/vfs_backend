@@ -298,7 +298,7 @@ router.delete(
 // ==================== SHARING ROUTES ====================
 
 // Share a flow with users. canShareFlows is a paid entitlement (free tier:
-// false) — inherited from the tenant owner when X-Team-Context is a paid
+// false) — inherited from the tenant owner when X-Workspace-Context is a paid
 // team, so free members inside a paid team can still share with teammates.
 router.post(
   "/:id/share",

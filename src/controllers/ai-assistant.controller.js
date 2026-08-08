@@ -1,5 +1,6 @@
 const asyncHandler = require("../utils/asyncHandler");
 const aiAssistantService = require("../services/ai-assistant.service");
+const { workspaceHeader, workspaceQuery } = require("../lib/workspaceContext");
 
 exports.chat = asyncHandler(async (req, res) => {
   const { message, conversationId, userContext } = req.body;
@@ -22,8 +23,8 @@ exports.getContext = asyncHandler(async (req, res) => {
 });
 
 exports.getConsent = asyncHandler(async (req, res) => {
-  const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
-  const result = await aiAssistantService.getConsent(req.user.id, teamId);
+  const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
+  const result = await aiAssistantService.getConsent(req.user.id, workspaceId);
   res.json({ success: true, data: result });
 });
 
@@ -32,12 +33,12 @@ exports.setConsent = asyncHandler(async (req, res) => {
   const ipAddress = req.ip || req.headers["x-forwarded-for"] || "";
   // Pass the active team context so a member's action in a team workspace
   // never mutates their PERSONAL consent row (Issue #5).
-  const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+  const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
   const result = await aiAssistantService.setConsent(
     req.user.id,
     consented,
     ipAddress,
-    teamId,
+    workspaceId,
   );
   res.json({ success: true, data: result });
 });

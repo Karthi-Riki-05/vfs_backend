@@ -17,6 +17,7 @@ const {
 const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 const { hasProPurchase, paidOwnerWhere } = require("../utils/planResolver");
+const { workspaceHeader } = require("../lib/workspaceContext");
 
 // Ordered so a higher rank satisfies a lower minimum (both paid tiers use
 // Claude). Pro and Team are distinct containers, not a strict hierarchy — this
@@ -25,10 +26,15 @@ const TIER_RANK = { free: 0, pro: 1, team: 2 };
 
 async function _ensure(req) {
   if (!req.entitlements && req.user?.id) {
-    // Pass X-Team-Context so members inside a paid tenant inherit the tenant
+    // Pass X-Workspace-Context so members inside a paid tenant inherit the tenant
     // owner's entitlements (§5.2 Inherited Subscription Power).
-    const teamId = req.headers["x-team-context"] || null;
-    req.entitlements = await getEntitlements(req.user.id, teamId);
+    const workspaceId = workspaceHeader(req) || null;
+    const appContext = req.headers["x-app-context"] || null;
+    req.entitlements = await getEntitlements(
+      req.user.id,
+      workspaceId,
+      appContext,
+    );
   }
   return req.entitlements;
 }
@@ -64,7 +70,7 @@ function requireTier(minTier) {
 
 /**
  * Require a boolean feature flag on the resolved entitlements payload
- * (e.g. requireFeature("canShareFlows")). Same X-Team-Context inheritance
+ * (e.g. requireFeature("canShareFlows")). Same X-Workspace-Context inheritance
  * as every other gate: a free member inside a paid tenant inherits the
  * tenant owner's flags.
  */
@@ -112,7 +118,7 @@ function requireModule(moduleKey) {
  * remains ownership-based (header only selects WHICH tier minimum applies).
  *
  * bug-085 (Option A): a caller acting INSIDE another owner's tenant
- * (X-Team-Context points to a team they do NOT own — the only kind the profile
+ * (X-Workspace-Context points to a team they do NOT own — the only kind the profile
  * switcher ever selects, since an owned team folds into the personal context)
  * may only be invited into / invite within that tenant team. They must NOT
  * mint a new, caller-owned top-level team: it would escape the tenant owner's
@@ -123,22 +129,54 @@ function requireModule(moduleKey) {
  * of role. (This replaces the former §5 GAP-04 ADMIN allow-branch, which let
  * ADMINs — and, via inheritance, ordinary members — create caller-owned teams.)
  * Team owners and the personal/no-context case fall through to the own-tier
- * gate below (getEntitlements resolves to the caller: no teamId, or caller==owner).
+ * gate below (getEntitlements resolves to the caller: no workspaceId, or caller==owner).
  */
 async function requireTeamCreateEntitlement(req, res, next) {
   try {
-    const teamId = req.headers["x-team-context"] || null;
-    if (teamId && req.user?.id) {
-      const tenant = await prisma.team.findFirst({
-        where: { id: teamId, deletedAt: null },
-        select: { teamOwnerId: true },
-      });
-      if (tenant && tenant.teamOwnerId !== req.user.id) {
-        throw new AppError(
-          "Members cannot create new teams inside a workspace they do not own. Switch to your personal workspace to create a team.",
-          403,
-          "TEAM_CREATE_FORBIDDEN",
-        );
+    const workspaceId = workspaceHeader(req) || null;
+    if (workspaceId && req.user?.id) {
+      // The workspace id IS the owner's user id (owner-as-workspace,
+      // 2026-08-07), so ownership is a comparison — no lookup.
+      //
+      // This used to resolve the owner with `team.findFirst({ id: workspaceId })`,
+      // which stopped matching after the rename: `tenant` was always null, the
+      // block never fired, and bug-085's rule silently lapsed — any member could
+      // mint a team inside someone else's workspace again. Comparing ids cannot
+      // fail open the way a lookup can.
+      if (workspaceId !== req.user.id) {
+        // bug-112 (owner decision, 2026-08-09): ADMINs may create teams inside
+        // the workspace they administer. Plain MEMBERs still cannot — that half
+        // of bug-085 stands.
+        //
+        // The escape bug-085 actually closed was a CALLER-OWNED team escaping
+        // the tenant and inheriting the caller's (often free) tier. That is
+        // fixed in createTeam instead: the team is owned by the WORKSPACE
+        // OWNER, so an admin creating one cannot downgrade or detach it.
+        // ⚠️ Seats are PER-APP (`team_members.app_context`, 2026-08-08), so this
+        // must match the app the request is in. Without the filter, an ADMIN in
+        // the Team app was allowed to create teams in the PRO app of the same
+        // workspace, where they are only a MEMBER — caught live, exactly the
+        // bug-085 hole reopening through the back door.
+        const reqApp =
+          (req.headers["x-app-context"] || req.user?.currentVersion) === "pro"
+            ? "pro"
+            : "team";
+        const adminSeat = await prisma.teamMember.findFirst({
+          where: {
+            userId: req.user.id,
+            workspaceId,
+            role: "ADMIN",
+            appContext: reqApp,
+          },
+          select: { id: true },
+        });
+        if (!adminSeat) {
+          throw new AppError(
+            "Members cannot create new teams inside a workspace they do not own. Switch to your personal workspace to create a team.",
+            403,
+            "TEAM_CREATE_FORBIDDEN",
+          );
+        }
       }
     }
     const appContext =
@@ -181,10 +219,13 @@ async function requireTeamChatEntitlement(req, res, next) {
     // belongs to (owned or joined) is currently paid for by its OWNER. The
     // paid-owner test runs inside the query (paidOwnerWhere) so this stays a
     // single indexed lookup, exactly as cheap as the old membership-only check.
+    // CHANGE-001: membership no longer joins through a team — the row names its
+    // workspace directly, and the workspace IS its owner. So "is any workspace
+    // I belong to paid for by its owner" is a single hop through `workspace`.
     const paidMembership = await prisma.teamMember.findFirst({
       where: {
         userId: user.id,
-        team: { deletedAt: null, owner: paidOwnerWhere() },
+        workspace: paidOwnerWhere(),
       },
       select: { id: true },
     });

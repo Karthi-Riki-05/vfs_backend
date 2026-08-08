@@ -3,12 +3,13 @@ const notificationPreferenceService = require("../services/notificationPreferenc
 const notificationQuietHoursService = require("../services/notificationQuietHours.service");
 const notificationTestService = require("../services/notificationTest.service");
 const asyncHandler = require("../utils/asyncHandler");
+const { workspaceHeader } = require("../lib/workspaceContext");
 
-// Resolve the active { teamId, appContext } workspace boundary from the
-// request. X-Team-Context (set on every /api call by the profile switcher)
+// Resolve the active { workspaceId, appContext } workspace boundary from the
+// request. X-Workspace-Context (set on every /api call by the profile switcher)
 // is the team boundary; X-App-Context / currentVersion is the personal one.
 function resolveContext(req) {
-  const teamId = req.headers["x-team-context"] || null;
+  const workspaceId = workspaceHeader(req) || null;
   // Fallback is the platform default "team" — NOT req.user.currentVersion.
   // currentVersion is a base-tier column ("free" for most Team subscribers,
   // can be "pro" for users browsing the Team app), not a which-app-is-this-
@@ -16,27 +17,27 @@ function resolveContext(req) {
   // across app containers (bug-052). The axios interceptor always sends
   // X-App-Context, so this fallback only fires for non-browser callers.
   const appContext = req.headers["x-app-context"] || "team";
-  return { teamId, appContext };
+  return { workspaceId, appContext };
 }
 
 class NotificationController {
   list = asyncHandler(async (req, res) => {
     const unreadOnly = req.query.unreadOnly === "true";
     const limit = Number(req.query.limit) || 20;
-    const { teamId, appContext } = resolveContext(req);
+    const { workspaceId, appContext } = resolveContext(req);
     const items = await notificationService.getUserNotifications(req.user.id, {
       unreadOnly,
       limit,
-      teamId,
+      workspaceId,
       appContext,
     });
     res.json({ success: true, data: items });
   });
 
   count = asyncHandler(async (req, res) => {
-    const { teamId, appContext } = resolveContext(req);
+    const { workspaceId, appContext } = resolveContext(req);
     const unread = await notificationService.getUnreadCount(req.user.id, {
-      teamId,
+      workspaceId,
       appContext,
     });
     res.json({ success: true, data: { unread } });
@@ -51,22 +52,22 @@ class NotificationController {
   });
 
   markAllRead = asyncHandler(async (req, res) => {
-    const { teamId, appContext } = resolveContext(req);
+    const { workspaceId, appContext } = resolveContext(req);
     const result = await notificationService.markAllAsRead(req.user.id, {
-      teamId,
+      workspaceId,
       appContext,
     });
     res.json({ success: true, data: result });
   });
 
   // Delete every notification in the caller's active workspace. Reuses the
-  // same resolved { teamId, appContext } boundary as list/count so it can
+  // same resolved { workspaceId, appContext } boundary as list/count so it can
   // never spill across the Pro / Team-App divide.
   deleteAll = asyncHandler(async (req, res) => {
-    const { teamId, appContext } = resolveContext(req);
+    const { workspaceId, appContext } = resolveContext(req);
     const result = await notificationService.deleteAllNotifications(
       req.user.id,
-      { teamId, appContext },
+      { workspaceId, appContext },
     );
     res.json({ success: true, data: result });
   });

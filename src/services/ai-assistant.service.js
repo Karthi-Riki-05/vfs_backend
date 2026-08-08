@@ -374,7 +374,7 @@ class AiAssistantService {
       if (team) {
         const [member, isOwner] = await Promise.all([
           prisma.teamMember.findFirst({
-            where: { teamId: activeTeamId, userId },
+            where: { workspaceId: activeTeamId, userId },
             select: { id: true },
           }),
           Promise.resolve(team.teamOwnerId === userId),
@@ -408,7 +408,7 @@ class AiAssistantService {
       });
       if (team && team.teamOwnerId !== userId) {
         const member = await prisma.teamMember.findFirst({
-          where: { teamId: activeTeamId, userId },
+          where: { workspaceId: activeTeamId, userId },
           select: { id: true },
         });
         if (member) {
@@ -482,24 +482,25 @@ class AiAssistantService {
       sharedWithMeCount,
       sharedByMeCount,
     ] = await Promise.all([
+      // Flow has no ownerId — the workspace IS the owner (owner-as-workspace).
       prisma.flow.count({
-        where: { ownerId: userId, deletedAt: null },
+        where: { workspaceId: userId, deletedAt: null },
       }),
       prisma.flow.count({
         where: {
-          ownerId: userId,
+          workspaceId: userId,
           deletedAt: null,
           createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
         },
       }),
       prisma.flow.findMany({
-        where: { ownerId: userId, deletedAt: null },
+        where: { workspaceId: userId, deletedAt: null },
         orderBy: { updatedAt: "desc" },
         take: 5,
         select: { name: true, updatedAt: true, createdAt: true },
       }),
       prisma.flow.count({
-        where: { ownerId: userId, deletedAt: { not: null } },
+        where: { workspaceId: userId, deletedAt: { not: null } },
       }),
       prisma.flowShare.count({
         where: { sharedWithId: userId },
@@ -519,10 +520,11 @@ class AiAssistantService {
           plan: { select: { name: true, duration: true, price: true } },
         },
       }),
-      // Teams
+      // Teams — CHANGE-001: no `team` relation on TeamMember any more, so the
+      // ids come out of the `teamIds` array and the teams are fetched by id.
       prisma.teamMember.findMany({
         where: { userId },
-        include: { team: true },
+        select: { teamIds: true, role: true, workspaceId: true },
       }),
       // Projects
       prisma.project.findMany({
@@ -534,15 +536,41 @@ class AiAssistantService {
       }),
     ]);
 
-    const teamIds = teamMemberships.map((tm) => tm.team?.id).filter(Boolean);
-    const teamMemberCounts =
-      teamIds.length > 0
-        ? await prisma.teamMember.groupBy({
-            by: ["teamId"],
-            where: { teamId: { in: teamIds } },
-            _count: { id: true },
-          })
-        : [];
+    // CHANGE-001: teamIds is a scalar array, so `groupBy(["teamId"])` has
+    // nothing to group on. Count per team by fetching the membership rows that
+    // mention each id and tallying in JS — the same shape the caller expects.
+    const myTeamIds = [
+      ...new Set(teamMemberships.flatMap((tm) => tm.teamIds || [])),
+    ];
+    let teamMemberCounts = [];
+    if (myTeamIds.length > 0) {
+      const rows = await prisma.teamMember.findMany({
+        where: { teamIds: { hasSome: myTeamIds } },
+        select: { teamIds: true },
+      });
+      const tally = new Map(myTeamIds.map((id) => [id, 0]));
+      for (const r of rows) {
+        for (const tid of r.teamIds || []) {
+          if (tally.has(tid)) tally.set(tid, tally.get(tid) + 1);
+        }
+      }
+      teamMemberCounts = [...tally].map(([teamId, n]) => ({
+        teamId,
+        _count: { id: n },
+      }));
+    }
+    // Names, since the `team` relation that used to supply them is gone. Also
+    // the caller's role per team, which now lives on the workspace row.
+    const myTeams = myTeamIds.length
+      ? await prisma.team.findMany({
+          where: { id: { in: myTeamIds }, deletedAt: null },
+          select: { id: true, name: true },
+        })
+      : [];
+    const roleForTeam = new Map();
+    for (const tm of teamMemberships) {
+      for (const tid of tm.teamIds || []) roleForTeam.set(tid, tm.role);
+    }
 
     // Shapes
     const shapeCount = await prisma.shape.count({
@@ -620,11 +648,12 @@ class AiAssistantService {
             unlimitedFlows: user.proUnlimitedFlows,
           }
         : null,
-      teams: teamMemberships.map((tm) => {
-        const countEntry = teamMemberCounts.find((c) => c.teamId === tm.teamId);
+      // One entry per TEAM (a single membership row can carry several).
+      teams: myTeams.map((t) => {
+        const countEntry = teamMemberCounts.find((c) => c.teamId === t.id);
         return {
-          name: tm.team?.name || "Unnamed Team",
-          role: tm.role,
+          name: t.name || "Unnamed Team",
+          role: roleForTeam.get(t.id) || "MEMBER",
           memberCount: countEntry?._count?.id || 0,
         };
       }),

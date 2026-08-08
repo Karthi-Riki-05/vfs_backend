@@ -8,6 +8,7 @@ const { docUpload } = require("../middleware/docUpload");
 const aiCreditService = require("../services/aiCredit.service");
 const aiDetectService = require("../services/aiDetect.service");
 const { resolveAppContextForBilling } = require("./aiCredit.controller");
+const { workspaceHeader, workspaceQuery, workspaceBody } = require("../lib/workspaceContext");
 
 class FlowController {
   getAllFlows = asyncHandler(async (req, res) => {
@@ -24,9 +25,9 @@ class FlowController {
       isFavorite,
       projectId,
     } = req.query;
-    // teamId may arrive as a query param or via the X-Team-Context header
+    // workspaceId may arrive as a query param or via the X-Workspace-Context header
     // set by the frontend axios interceptor.
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const result = await flowService.getAllFlows(
       userId,
       {
@@ -34,7 +35,7 @@ class FlowController {
         page,
         limit,
         nonEmpty,
-        teamId,
+        workspaceId,
         sort,
         sortDirection,
         // Query params arrive as strings — normalize to a real boolean.
@@ -46,28 +47,39 @@ class FlowController {
     const shared = await flowService.getSharedFlows(
       userId,
       appContext,
-      teamId || null,
+      workspaceId || null,
     );
     res.json({ success: true, data: { ...result, shared } });
   });
 
   getMasterViewFlows = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const teamId = req.headers["x-team-context"] || null;
-    // Require a team context — without it there is nothing to show.
-    if (!teamId) {
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    // Default to the caller's OWN workspace when no header is present. The old
+    // code returned empty here, which broke the panel for an owner sitting in
+    // their personal context (the switcher does not always send a header for
+    // it) — the one caller this endpoint exists for.
+    const workspaceId = workspaceHeader(req) || userId;
+    // Only the workspace OWNER sees this. The workspace id IS the owner's user
+    // id (owner-as-workspace, 2026-08-07), so ownership is a comparison.
+    //
+    // This was `team.findFirst({ id: workspaceId, teamOwnerId: userId })`, which
+    // could not match any row after that rename: workspaceId is a USER id, so
+    // `team` was always null and the endpoint returned an empty list to
+    // EVERYONE, the owner included. Nobody noticed because it fails to `[]`
+    // rather than a 403 — which is still deliberate (see below).
+    if (workspaceId !== userId) {
+      // Empty, not 403: a member switched into someone else's workspace has a
+      // legitimate reason to hit this, and the response must not reveal whether
+      // that workspace has member-created flows in it.
       return res.json({ success: true, data: { flows: [], total: 0 } });
     }
-    // Verify caller OWNS the team — non-owners get an empty list, not a 403,
-    // to avoid leaking team existence.
-    const team = await prisma.team.findFirst({
-      where: { id: teamId, teamOwnerId: userId, deletedAt: null },
-      select: { id: true },
-    });
-    if (!team) {
-      return res.json({ success: true, data: { flows: [], total: 0 } });
-    }
-    const flows = await flowService.getOwnerMasterFlows(userId, teamId);
+    const flows = await flowService.getOwnerMasterFlows(
+      userId,
+      workspaceId,
+      appContext,
+    );
     res.json({ success: true, data: { flows, total: flows.length } });
   });
 
@@ -75,12 +87,12 @@ class FlowController {
     const userId = req.user.id;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.headers["x-team-context"] || null;
+    const workspaceId = workspaceHeader(req) || null;
     const flow = await flowService.getFlowByIdWithAccess(
       req.params.id,
       userId,
       appContext,
-      teamId,
+      workspaceId,
     );
     if (!flow) {
       return res.status(404).json({
@@ -95,12 +107,12 @@ class FlowController {
     const userId = req.user.id;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    // teamId may also come from a header (axios interceptor) so both are
+    // workspaceId may also come from a header (axios interceptor) so both are
     // accepted.
-    const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceBody(req) || workspaceHeader(req) || null;
     const flow = await flowService.createFlow(
       userId,
-      { ...req.body, teamId: teamId || null },
+      { ...req.body, workspaceId: workspaceId || null },
       appContext,
     );
     res.status(201).json({ success: true, data: flow });
@@ -108,7 +120,14 @@ class FlowController {
 
   updateFlow = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    await flowService.updateFlowWithAccess(req.params.id, userId, req.body);
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    await flowService.updateFlowWithAccess(
+      req.params.id,
+      userId,
+      req.body,
+      appContext,
+    );
     res.json({ success: true, data: { message: "Flow updated successfully" } });
   });
 
@@ -145,11 +164,11 @@ class FlowController {
   getFavorites = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const flows = await flowService.getFavorites(
       req.user.id,
       appContext,
-      teamId,
+      workspaceId,
     );
     res.json({ success: true, data: flows });
   });
@@ -157,18 +176,30 @@ class FlowController {
   getTrash = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const result = await flowService.getTrash(
       req.user.id,
       req.query,
       appContext,
-      teamId,
+      workspaceId,
     );
     res.json({ success: true, data: result });
   });
 
+  // Both take the SAME appContext + workspace as getTrash — the row you can
+  // see in the trash is the row you can act on. Neither passed either before,
+  // so the service fell back to `workspaceId: userId` and a member could never
+  // restore or purge their own deleted flow (bug-114).
   restoreFlow = asyncHandler(async (req, res) => {
-    await flowService.restoreFlow(req.params.id, req.user.id);
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
+    await flowService.restoreFlow(
+      req.params.id,
+      req.user.id,
+      appContext,
+      workspaceId,
+    );
     res.json({
       success: true,
       data: { message: "Flow restored successfully" },
@@ -176,14 +207,29 @@ class FlowController {
   });
 
   permanentDeleteFlow = asyncHandler(async (req, res) => {
-    await flowService.permanentDeleteFlow(req.params.id, req.user.id);
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
+    await flowService.permanentDeleteFlow(
+      req.params.id,
+      req.user.id,
+      appContext,
+      workspaceId,
+    );
     res.json({ success: true, data: { message: "Flow permanently deleted" } });
   });
 
   emptyTrash = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const result = await flowService.emptyTrash(req.user.id, appContext);
+    // Same workspace resolution as getTrash — the list and the wipe must read
+    // the identical scope or the wipe exceeds what was shown.
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
+    const result = await flowService.emptyTrash(
+      req.user.id,
+      appContext,
+      workspaceId,
+    );
     res.json({
       success: true,
       data: { message: "Trash emptied", deleted: result.count },
@@ -239,16 +285,16 @@ class FlowController {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
     const { search, page, limit, nonEmpty } = req.query;
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const own = await flowService.getAllFlows(
       userId,
-      { search, page, limit, nonEmpty, teamId },
+      { search, page, limit, nonEmpty, workspaceId },
       appContext,
     );
     const shared = await flowService.getSharedFlows(
       userId,
       appContext,
-      teamId || null,
+      workspaceId || null,
     );
     res.json({ success: true, data: { ...own, shared } });
   });
@@ -256,12 +302,12 @@ class FlowController {
   getFlowByIdWithAccess = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.headers["x-team-context"] || null;
+    const workspaceId = workspaceHeader(req) || null;
     const flow = await flowService.getFlowByIdWithAccess(
       req.params.id,
       req.user.id,
       appContext,
-      teamId,
+      workspaceId,
     );
     if (!flow) {
       return res.status(404).json({
@@ -273,10 +319,13 @@ class FlowController {
   });
 
   updateFlowWithAccess = asyncHandler(async (req, res) => {
+    const appContext =
+      req.headers["x-app-context"] || req.user.currentVersion || "team";
     await flowService.updateFlowWithAccess(
       req.params.id,
       req.user.id,
       req.body,
+      appContext,
     );
     res.json({ success: true, data: { message: "Flow updated successfully" } });
   });
@@ -338,15 +387,15 @@ class FlowController {
 
       // Resolve billing context (shared with aiCredit.controller) and ensure
       // the user has at least one diagram credit BEFORE spending an AI call.
-      const teamId = req.headers["x-team-context"] || null;
+      const workspaceId = workspaceHeader(req) || null;
       const appContext = await resolveAppContextForBilling(
         req.user.id,
         req.headers["x-app-context"],
-        teamId,
+        workspaceId,
         req.user.currentVersion,
       );
       if (
-        !(await aiCreditService.hasCredits(req.user.id, appContext, teamId))
+        !(await aiCreditService.hasCredits(req.user.id, appContext, workspaceId))
       ) {
         return res.status(402).json({
           success: false,
@@ -416,7 +465,7 @@ class FlowController {
         "diagram_generation",
         model,
         appContext,
-        teamId,
+        workspaceId,
         {
           inputTokens: usage?.inputTokens,
           outputTokens: usage?.outputTokens,
@@ -455,9 +504,9 @@ class FlowController {
           where: { flowId, sharedWithId: userId },
           select: { id: true },
         }),
-        flow.teamId
+        flow.workspaceId
           ? prisma.teamMember.findFirst({
-              where: { teamId: flow.teamId, userId },
+              where: { workspaceId: flow.workspaceId, userId },
               select: { id: true },
             })
           : Promise.resolve(null),
@@ -500,6 +549,7 @@ class FlowController {
     const flows = await flowService.getPickerList(
       req.user.id,
       req.query.teamPicker === "true",
+      workspaceQuery(req) || workspaceHeader(req) || null,
     );
     res.json({ success: true, data: flows });
   });
@@ -509,17 +559,18 @@ class FlowController {
       req.user.id,
       req.body?.selectedFlowIds || [],
       !!req.body?.teamPicker,
+      workspaceBody(req) || workspaceHeader(req) || null,
     );
     res.json({ success: true, data: result });
   });
 
   packStatus = asyncHandler(async (req, res) => {
-    const teamId = req.headers["x-team-context"] || null;
+    const workspaceId = workspaceHeader(req) || null;
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
     const status = await flowService.getPackStatus(
       req.user.id,
-      teamId,
+      workspaceId,
       appContext,
     );
     res.json({ success: true, data: status });

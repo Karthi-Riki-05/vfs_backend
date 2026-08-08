@@ -5,16 +5,21 @@ const path = require("path");
 const fs = require("fs");
 const { uploadFile: uploadToStorage } = require("../services/storage.service");
 const { sanitizeSvg, isSvgDangerous } = require("../utils/sanitizeSvg");
+const {
+  workspaceHeader,
+  workspaceQuery,
+  workspaceBody,
+} = require("../lib/workspaceContext");
 
 class ChatController {
   getSidebar = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const data = await chatService.getSidebarData(
       req.user.id,
       appContext,
-      teamId || null,
+      workspaceId || null,
     );
     res.json({ success: true, data });
   });
@@ -22,11 +27,11 @@ class ChatController {
   getChatGroups = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const teamId = req.query?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const groups = await chatService.getChatGroups(
       req.user.id,
       appContext,
-      teamId,
+      workspaceId,
     );
     res.json({ success: true, data: groups });
   });
@@ -34,18 +39,24 @@ class ChatController {
   createChatGroup = asyncHandler(async (req, res) => {
     const appContext =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    // teamId is ONLY taken from the body — an explicit body.teamId means
+    // workspaceId is ONLY taken from the body — an explicit body.workspaceId means
     // "this is the team-wide conversation" (handleTeamChatOpen). Injecting
-    // the X-Team-Context header here gave every modal-created group/DM a
-    // teamId, which getSidebarData classifies as a team conversation —
+    // the X-Workspace-Context header here gave every modal-created group/DM a
+    // workspaceId, which getSidebarData classifies as a team conversation —
     // collapsing them into one slot and making new groups "disappear".
-    // Named groups and DMs stay teamId:null and are scoped by appContext.
-    // The active workspace (X-Team-Context) is passed SEPARATELY (not as the
-    // group's teamId) purely for the owner/admin-only create gate below.
-    const activeTeamId = req.headers["x-team-context"] || null;
+    // Named groups and DMs stay workspaceId:null and are scoped by appContext.
+    // The active workspace (X-Workspace-Context) is passed SEPARATELY (not as the
+    // group's workspaceId) purely for the owner/admin-only create gate below.
+    const activeTeamId = workspaceHeader(req) || null;
+    // bug-096: `body.teamId` is a real TEAM id here (the Teams tab sends it when
+    // opening that team's chat) and must stay one. `workspaceBody` aliases
+    // teamId→workspaceId for the legacy wire name, which meant the team id
+    // arrived as a WORKSPACE id: it never resolved, so the create silently fell
+    // back to the caller's own workspace — a member opening a team chat would
+    // have created the room in their own workspace instead of the team's.
     const group = await chatService.createChatGroup(
       req.user.id,
-      { ...req.body, teamId: req.body?.teamId || null },
+      { ...req.body, workspaceId: req.body?.workspaceId || null },
       appContext,
       activeTeamId,
     );

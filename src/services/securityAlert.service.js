@@ -51,16 +51,18 @@ async function getTeamEscalationTargets(teamId) {
       select: {
         teamOwnerId: true,
         owner: { select: { id: true, email: true, name: true } },
-        members: {
-          where: { role: { in: ["OWNER", "ADMIN"] } },
-          select: { user: { select: { id: true, email: true, name: true } } },
-        },
       },
     });
     if (!team) return [];
+    // CHANGE-001: no Team.members relation — admins come from the membership
+    // rows that carry this team's id.
+    const admins = await prisma.teamMember.findMany({
+      where: { teamIds: { has: teamId }, role: { in: ["OWNER", "ADMIN"] } },
+      select: { user: { select: { id: true, email: true, name: true } } },
+    });
     const targets = new Map();
     if (team.owner) targets.set(team.owner.id, team.owner);
-    for (const m of team.members || []) {
+    for (const m of admins) {
       if (m.user) targets.set(m.user.id, m.user);
     }
     return [...targets.values()];

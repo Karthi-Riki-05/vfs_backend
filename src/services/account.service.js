@@ -19,12 +19,13 @@ class AccountService {
         subscription: {
           select: { id: true, paymentId: true },
         },
+        // CHANGE-001: `_count.members` was a relation count and the relation is
+        // gone; the roster size is attached below from the membership rows.
         ownedTeams: {
           where: { deletedAt: null },
           select: {
             id: true,
             name: true,
-            _count: { select: { members: true } },
           },
         },
       },
@@ -43,10 +44,27 @@ class AccountService {
 
     // 3. Split owned teams: block only teams with other members.
     //    Sole-owner teams (only the owner is a member) are auto-dissolved.
+    //    CHANGE-001: roster sizes come from the membership rows, not a
+    //    relation count — one query for all of the user's teams.
+    const ownedTeamIds = user.ownedTeams.map((t) => t.id);
+    const memberRows = ownedTeamIds.length
+      ? await prisma.teamMember.findMany({
+          where: { teamIds: { hasSome: ownedTeamIds } },
+          select: { teamIds: true },
+        })
+      : [];
+    const sizeOf = new Map(ownedTeamIds.map((id) => [id, 0]));
+    for (const r of memberRows) {
+      for (const tid of r.teamIds || []) {
+        if (sizeOf.has(tid)) sizeOf.set(tid, sizeOf.get(tid) + 1);
+      }
+    }
     const teamsWithOtherMembers = user.ownedTeams.filter(
-      (t) => t._count.members > 1,
+      (t) => (sizeOf.get(t.id) || 0) > 1,
     );
-    const soleOwnerTeams = user.ownedTeams.filter((t) => t._count.members <= 1);
+    const soleOwnerTeams = user.ownedTeams.filter(
+      (t) => (sizeOf.get(t.id) || 0) <= 1,
+    );
 
     if (teamsWithOtherMembers.length > 0) {
       const teamNames = teamsWithOtherMembers.map((t) => t.name).join(", ");

@@ -1,17 +1,18 @@
 const projectService = require("../services/project.service");
 const asyncHandler = require("../utils/asyncHandler");
+const { workspaceHeader, workspaceQuery, workspaceBody } = require("../lib/workspaceContext");
 
 class ProjectController {
   getAllProjects = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     // Active workspace: team header takes precedence over the user's
-    // billing-tier currentVersion. Personal projects scope to teamId=null.
-    const teamId = req.query.teamId || req.headers["x-team-context"] || null;
+    // billing-tier currentVersion. Personal projects scope to workspaceId=null.
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
     const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const { search } = req.query;
     const projects = await projectService.getAllProjects(
       userId,
-      { search, teamId },
+      { search, workspaceId },
       appContext,
     );
     res.json({ success: true, data: projects });
@@ -29,11 +30,11 @@ class ProjectController {
 
   createProject = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const teamId = req.body?.teamId || req.headers["x-team-context"] || null;
+    const workspaceId = workspaceBody(req) || workspaceHeader(req) || null;
     const appContext = req.headers["x-app-context"] || req.user.currentVersion || "team";
     const project = await projectService.createProject(
       userId,
-      { ...req.body, teamId },
+      { ...req.body, workspaceId },
       appContext,
     );
     res.status(201).json({ success: true, data: project });
