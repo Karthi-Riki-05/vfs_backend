@@ -1,4 +1,5 @@
 const { prisma } = require("../lib/prisma");
+const { setDowngradeFlagByIds } = require("../lib/flowDowngradeFlag");
 const { addTeamToMember } = require("../lib/teamMembership");
 const { resolveWorkspaceId } = require("../lib/workspaceScope");
 const {
@@ -1780,10 +1781,11 @@ class ProService {
           select: { id: true },
         });
         if (excess.length > 0) {
-          await tx.flow.updateMany({
-            where: { id: { in: excess.map((f) => f.id) } },
-            data: { markedForDowngrade: true },
-          });
+          await setDowngradeFlagByIds(
+            tx,
+            excess.map((f) => f.id),
+            true,
+          );
         }
       }
     });

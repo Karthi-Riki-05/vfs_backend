@@ -21,6 +21,9 @@ const KNOWN_TYPES = new Set([
   "flow_pack_3day",
   "flow_pack_1day",
   "flow_picker_required",
+  // bug-120: an owner resolving their over-limit lock can lock a MEMBER's flow;
+  // the member is told rather than left with silently read-only work.
+  "flow_locked_by_owner",
   "flow_updated",
   "subscription_activated",
   "subscription_cancelled",

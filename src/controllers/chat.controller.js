@@ -218,7 +218,14 @@ class ChatController {
       req.query.appContext ||
       req.user.currentVersion ||
       "team";
-    const counts = await chatService.getUnreadCounts(req.user.id, appContext);
+    // Scope the badge to the active workspace — same resolution getChatGroups
+    // uses — so the count matches the list the user is looking at.
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
+    const counts = await chatService.getUnreadCounts(
+      req.user.id,
+      appContext,
+      workspaceId,
+    );
     res.json({ success: true, data: counts });
   });
 

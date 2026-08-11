@@ -1013,12 +1013,36 @@ class ChatService {
     }
   }
 
-  async getUnreadCounts(userId, appContext = "team") {
-    // Scope to the requested app context — Pro and Team badges must not mix.
-    const appCtxFilter =
-      appContext === "pro"
+  async getUnreadCounts(userId, appContext = "team", workspaceId = null) {
+    // The badge must count exactly what the chat PANEL shows, so it mirrors
+    // getSidebarData's scoping — NOT getChatGroups (a second list function with
+    // looser, OR-null semantics the panel does not use).
+    //
+    // App context: Pro vs not-Pro, same fold as getSidebarData.
+    // Workspace: resolve the active workspace (owner-as-workspace → the tenant
+    // owner's user id; null/absent → the caller's OWN workspace) and match it
+    // EXACTLY. Every group names its workspace now, so exact match is right:
+    //   • team context   → that workspace's groups only
+    //   • personal        → the caller's own groups only
+    // bug-129 first added a workspace clause but mirrored getChatGroups' OR-null
+    // form, which in personal context applied NO filter and counted messages in
+    // OTHER workspaces' groups that the personal-context panel never lists — a
+    // badge you could not open or clear until you switched workspace (bug-134).
+    // resolveWorkspaceId verifies the seat server-side, so a forged/stale header
+    // can only fall back to the caller's own workspace, never invent a count.
+    const resolvedWorkspaceId = await resolveWorkspaceId(userId, workspaceId);
+    const appCtxFilter = {
+      ...(appContext === "pro"
         ? { appContext: "pro" }
-        : { appContext: { not: "pro" } };
+        : { appContext: { not: "pro" } }),
+      workspaceId: resolvedWorkspaceId,
+      // Exclude soft-deleted groups — getSidebarData/getChatGroups both do, and
+      // WITHOUT it an unread message in a deleted conversation is counted here
+      // but never listed in the panel, so the badge shows a number the user can
+      // never open or clear (bug-135). deletedAt:null aligns the count with the
+      // list on this last axis too.
+      deletedAt: null,
+    };
 
     // Total unread
     const totalUnread = await prisma.chatMessageUser.count({

@@ -5,6 +5,7 @@
 // activeFlowPackId) so re-runs don't double-send or double-process.
 
 const { prisma } = require("../lib/prisma");
+const { setDowngradeFlagByIds } = require("../lib/flowDowngradeFlag");
 const logger = require("../utils/logger");
 const { sendEmail, emailTemplates } = require("../utils/email");
 const notificationService = require("./notification.service");
@@ -380,10 +381,7 @@ async function downgradeUser(pack, summary) {
   const downgradeIds = flows.slice(10).map((f) => f.id);
 
   if (downgradeIds.length > 0) {
-    await prisma.flow.updateMany({
-      where: { id: { in: downgradeIds } },
-      data: { markedForDowngrade: true },
-    });
+    await setDowngradeFlagByIds(prisma, downgradeIds, true);
   }
 
   await prisma.user.update({
@@ -469,10 +467,11 @@ async function checkPastDueGrace() {
           select: { id: true },
         });
         if (excess.length > 0) {
-          await prisma.flow.updateMany({
-            where: { id: { in: excess.map((f) => f.id) } },
-            data: { markedForDowngrade: true },
-          });
+          await setDowngradeFlagByIds(
+            prisma,
+            excess.map((f) => f.id),
+            true,
+          );
         }
         summary.pickerTriggered++;
       }

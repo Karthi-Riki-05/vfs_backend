@@ -8,7 +8,11 @@ const { docUpload } = require("../middleware/docUpload");
 const aiCreditService = require("../services/aiCredit.service");
 const aiDetectService = require("../services/aiDetect.service");
 const { resolveAppContextForBilling } = require("./aiCredit.controller");
-const { workspaceHeader, workspaceQuery, workspaceBody } = require("../lib/workspaceContext");
+const {
+  workspaceHeader,
+  workspaceQuery,
+  workspaceBody,
+} = require("../lib/workspaceContext");
 
 class FlowController {
   getAllFlows = asyncHandler(async (req, res) => {
@@ -395,7 +399,11 @@ class FlowController {
         req.user.currentVersion,
       );
       if (
-        !(await aiCreditService.hasCredits(req.user.id, appContext, workspaceId))
+        !(await aiCreditService.hasCredits(
+          req.user.id,
+          appContext,
+          workspaceId,
+        ))
       ) {
         return res.status(402).json({
           success: false,
@@ -580,7 +588,13 @@ class FlowController {
   getLockState = asyncHandler(async (req, res) => {
     const appType =
       req.headers["x-app-context"] || req.user.currentVersion || "team";
-    const state = await flowLimitService.getLockState(req.user.id, appType);
+    // Pass the active workspace so a member sees the OWNER's lock (bug-125).
+    const workspaceId = workspaceQuery(req) || workspaceHeader(req) || null;
+    const state = await flowLimitService.getLockState(
+      req.user.id,
+      appType,
+      workspaceId,
+    );
     res.json({ success: true, data: { ...state, appType } });
   });
 

@@ -154,7 +154,13 @@ class FlowService {
         where,
         skip,
         take,
-        orderBy: { [sortField]: sortDir },
+        // bug-119: locked (over-limit) flows sort LAST, whatever the chosen
+        // sort field. Owner decision 2026-08-09: after resolving an over-limit
+        // lock, the flows you can no longer open must not sit above the ones you
+        // chose to keep. `false` sorts before `true` in Postgres ascending, so
+        // this is "unlocked first" — a stable secondary grouping, applied ahead
+        // of the user's sort rather than replacing it.
+        orderBy: [{ markedForDowngrade: "asc" }, { [sortField]: sortDir }],
         include: {
           project: {
             select: { id: true, name: true },
@@ -262,7 +268,8 @@ class FlowService {
     };
     const flows = await prisma.flow.findMany({
       where,
-      orderBy: { updatedAt: "desc" },
+      // Same locked-last grouping as MY FLOWS (bug-119).
+      orderBy: [{ markedForDowngrade: "asc" }, { updatedAt: "desc" }],
       take: 200,
       include: {
         creator: {
@@ -297,7 +304,12 @@ class FlowService {
     }));
   }
 
-  async getFlowById(id, userId, appContext = null, requestedWorkspaceId = null) {
+  async getFlowById(
+    id,
+    userId,
+    appContext = null,
+    requestedWorkspaceId = null,
+  ) {
     const scopeWhere = appContext
       ? await this._workspaceScope(userId, appContext, requestedWorkspaceId)
       : {};
@@ -545,7 +557,12 @@ class FlowService {
     throw new AppError("Flow not found", 404, "NOT_FOUND");
   }
 
-  async getTrash(userId, options = {}, appContext = "team", requestedWorkspaceId = null) {
+  async getTrash(
+    userId,
+    options = {},
+    appContext = "team",
+    requestedWorkspaceId = null,
+  ) {
     const { page = 1, limit = 20 } = options;
     const take = Math.min(Number(limit) || 20, 100);
     const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
@@ -770,7 +787,9 @@ class FlowService {
           requestedWorkspaceId,
         )),
       },
-      orderBy: { updatedAt: "desc" },
+      // Favourites is a filter over MY FLOWS, so it carries the same
+      // locked-last grouping (bug-119).
+      orderBy: [{ markedForDowngrade: "asc" }, { updatedAt: "desc" }],
       select: {
         id: true,
         name: true,
@@ -848,9 +867,7 @@ class FlowService {
         where: { userId },
         select: { workspaceId: true },
       });
-      const wsIds = [
-        ...new Set([userId, ...myRows.map((r) => r.workspaceId)]),
-      ];
+      const wsIds = [...new Set([userId, ...myRows.map((r) => r.workspaceId)])];
       const validMembers = await prisma.teamMember.findMany({
         where: { workspaceId: { in: wsIds }, userId: { not: userId } },
         select: { userId: true },
@@ -1212,37 +1229,102 @@ class FlowService {
     return { ...flow, permission: "view" };
   }
 
-  async getFlowByIdWithAccess(id, userId, appContext = null, requestedWorkspaceId = null) {
+  /**
+   * The ONE place a locked flow is refused. Two independent locks:
+   *
+   *  1. `flowLimit.overLimitLocked` — the WORKSPACE is over its plan and the
+   *     owner has not resolved the picker yet. Keyed on `flow.workspaceId`, so
+   *     it blocks the owner, members and share recipients alike.
+   *  2. `flow.markedForDowngrade` — THIS flow was not among the ones the owner
+   *     chose to keep.
+   *
+   * bug-121: (2) was enforced NOWHERE on the server. Every read and write path
+   * ignored it, so the padlock existed only in the client — the card was greyed
+   * out and the click blocked, but pasting the flow's URL opened it and saving
+   * worked. A plan limit that a bookmark bypasses is not a limit: a user over
+   * their cap could keep using all of their flows indefinitely and had no
+   * reason to upgrade.
+   *
+   * Applied to opening (`getFlowByIdWithAccess`) AND saving
+   * (`updateFlowWithAccess`) — blocking only the read would leave a direct PUT
+   * wide open, which is the same hole one layer down.
+   *
+   * Super-admin bypasses both, for support.
+   */
+  async _assertFlowUnlocked(flow, userId) {
+    const requester = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (requester?.role === "super_admin") return;
+
+    if (flow.markedForDowngrade) {
+      throw this._flowLockedError(flow);
+    }
+
+    // bug-126: the lock that governs THIS flow is the lock of the app the flow
+    // belongs to — `flow.appContext` — NOT the caller's `X-App-Context`.
+    //
+    // It was `appContext || flow.appContext`. A bare editor tab (a pasted URL)
+    // establishes no app context, so axios defaults `X-App-Context: team`
+    // (bug-124's root cause). A PRO flow opened in such a tab was then checked
+    // against the caller's *team* limit record — unlocked / nonexistent — so the
+    // workspace-wide pro lock was missed and the flow opened with no modal,
+    // while `/dashboard/flows` (reached via the switcher, which sets pro
+    // context) correctly showed it locked. The flow's own app_context is the
+    // only authoritative answer here; the caller's header must not be able to
+    // pick which lock applies to a fixed flow.
+    const lockAppType = flow.appContext;
+    if (lockAppType !== "pro" && lockAppType !== "team") return;
+    const limitRecord = await prisma.flowLimit.findFirst({
+      where: {
+        userId: flow.workspaceId,
+        appType: lockAppType === "pro" ? "individual" : "enterprise",
+      },
+      select: { overLimitLocked: true },
+    });
+    if (limitRecord?.overLimitLocked) {
+      throw this._flowLockedError(flow);
+    }
+  }
+
+  /**
+   * bug-124: the FLOW_LOCKED error carries the flow's `appContext` and
+   * `workspaceId` in `details`. The editor is opened in a bare tab
+   * (`/dashboard/flows/:id`), where nothing establishes the per-tab app
+   * context — `appFromPathname` only matches `/dashboard/pro|team`, so the tab
+   * defaults to "team", which then makes `getAiBillingTeamId()` read the wrong
+   * (team) billing key too. When the locked modal redirected to the flows list,
+   * that wrong context came with it (owner-reported leak). The client now reads
+   * these back off the 403 and pins the correct context BEFORE navigating.
+   * errorHandler already forwards `err.details`.
+   */
+  _flowLockedError(flow) {
+    const err = new AppError(
+      "This flow is locked because the workspace is over its plan limit. " +
+        "Upgrade, or choose it in Limit Flows, to use it again.",
+      403,
+      "FLOW_LOCKED",
+    );
+    err.details = {
+      appContext: flow.appContext,
+      workspaceId: flow.workspaceId,
+    };
+    return err;
+  }
+
+  async getFlowByIdWithAccess(
+    id,
+    userId,
+    appContext = null,
+    requestedWorkspaceId = null,
+  ) {
     const flow = await prisma.flow.findFirst({
       where: { id, deletedAt: null },
     });
     if (!flow) return null;
 
-    // Over-limit lock check: block ALL callers (owner, shared, team members)
-    // when the flow owner has overLimitLocked=true for the relevant appContext.
-    // Super-admin bypasses this check for support purposes.
-    const requesterForLock = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true },
-    });
-    if (requesterForLock?.role !== "super_admin") {
-      const lockAppType = appContext || flow.appContext;
-      if (lockAppType === "pro" || lockAppType === "team") {
-        const dbLockAppType =
-          lockAppType === "pro" ? "individual" : "enterprise";
-        const limitRecord = await prisma.flowLimit.findFirst({
-          where: { userId: flow.workspaceId, appType: dbLockAppType },
-          select: { overLimitLocked: true },
-        });
-        if (limitRecord?.overLimitLocked) {
-          throw new AppError(
-            "This flow is locked because the owner exceeded their plan limit.",
-            403,
-            "FLOW_LOCKED",
-          );
-        }
-      }
-    }
+    await this._assertFlowUnlocked(flow, userId);
 
     // Owner path — enforce appContext workspace scope when context is known.
     // A Pro flow cannot be opened from a Team context and vice-versa.
@@ -1340,6 +1422,11 @@ class FlowService {
       where: { id, deletedAt: null },
     });
     if (!flow) throw new AppError("Flow not found", 404, "NOT_FOUND");
+
+    // Same guard as the read path (bug-121). Without it a locked flow could not
+    // be opened but could still be written to by a direct PUT — the editor's
+    // autosave would happily keep saving into it.
+    await this._assertFlowUnlocked(flow, userId);
 
     // Owner can always edit
     if (flow.workspaceId === userId) {
@@ -1569,11 +1656,7 @@ class FlowService {
   // recently updated. Only PERSONAL flows (requestedWorkspaceId null) are at risk.
   // teamPicker=true scopes to team flows (the team-subscription-expired
   // picker) instead of personal Pro flows.
-  async getPickerList(
-    userId,
-    teamPicker = false,
-    requestedWorkspaceId = null,
-  ) {
+  async getPickerList(userId, teamPicker = false, requestedWorkspaceId = null) {
     // The picker MUST show the same set `getPackStatus` counts — that count is
     // what told the user "you have 12 flows, keep 10". So: the resolved
     // workspace + `appScope`, and NOT creator-scoped (a member's flow consumes
@@ -1724,7 +1807,11 @@ class FlowService {
   }
 
   // Pack-status snapshot used by the frontend banner.
-  async getPackStatus(userId, requestedWorkspaceId = null, appContext = "team") {
+  async getPackStatus(
+    userId,
+    requestedWorkspaceId = null,
+    appContext = "team",
+  ) {
     // §5: a member inside someone else's workspace inherits that owner's flow
     // limits (same rule as getEntitlements).
     //

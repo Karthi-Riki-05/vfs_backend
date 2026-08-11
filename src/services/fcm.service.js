@@ -20,9 +20,18 @@ function init() {
 }
 
 // FCM error codes that mean the token is permanently dead — purge on sight.
+//
+// `mismatched-credential` ("SenderId mismatch") is included because an FCM
+// token is permanently bound to the Firebase sender id that issued it. If the
+// project ever changes (as it did 2026-08-10, valuecharts-185f0 →
+// value-charts-6b9c6), every pre-existing token becomes undeliverable. Without
+// treating it as stale those rows are never cleaned up and fail on EVERY send
+// forever, because the device only re-registers into a row that no longer
+// collides. Purging lets the next app launch write a fresh, valid token.
 const STALE_TOKEN_CODES = new Set([
   "messaging/registration-token-not-registered",
   "messaging/invalid-registration-token",
+  "messaging/mismatched-credential",
 ]);
 
 function isStaleTokenError(e) {
@@ -121,14 +130,13 @@ async function broadcastToAll(title, body, data = {}) {
     webpush: data.url ? { fcmOptions: { link: data.url } } : undefined,
   });
 
-  // Clean up tokens FCM says are no longer registered
+  // Clean up tokens FCM says are permanently dead. Uses the shared
+  // STALE_TOKEN_CODES via isStaleTokenError so this path can never drift from
+  // the single-send path above — it previously hardcoded its own two codes and
+  // so missed `mismatched-credential`.
   const stale = [];
   res.responses.forEach((r, i) => {
-    if (
-      !r.success &&
-      (r.error?.code === "messaging/registration-token-not-registered" ||
-        r.error?.code === "messaging/invalid-registration-token")
-    ) {
+    if (!r.success && isStaleTokenError(r.error)) {
       stale.push(rows[i].id);
     }
   });

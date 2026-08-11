@@ -1,4 +1,5 @@
 const { prisma } = require("./prisma");
+const { setDowngradeFlagByIds } = require("./flowDowngradeFlag");
 const logger = require("../utils/logger");
 
 /**
@@ -23,10 +24,7 @@ async function applyTeamFlowPicker(userId) {
 
   if (teamFlows.length > TEAM_FLOW_LIMIT) {
     const excessIds = teamFlows.slice(TEAM_FLOW_LIMIT).map((f) => f.id);
-    await prisma.flow.updateMany({
-      where: { id: { in: excessIds } },
-      data: { markedForDowngrade: true },
-    });
+    await setDowngradeFlagByIds(prisma, excessIds, true);
     await prisma.user.update({
       where: { id: userId },
       data: { isInTeamPickerPhase: true },
