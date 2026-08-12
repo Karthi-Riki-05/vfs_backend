@@ -139,6 +139,29 @@ class IapService {
     );
 
     // ── Dispatch ─────────────────────────────────────────────────────────
+    // The ledger row above is deliberately written BEFORE the entitlement, so
+    // concurrent redeliveries collide on the unique constraint rather than
+    // double-granting. The cost is that a grant which THROWS leaves the row
+    // behind, and every retry then short-circuits to `skipped: "duplicate"` —
+    // which the controller reports to the client as `granted: true`.
+    //
+    // That is exactly how a crashed grant permanently poisoned transaction
+    // ap:2000001219997091 (2026-08-12): the store had charged, nothing was
+    // entitled, and each retry cheerfully claimed success. So a failed dispatch
+    // now releases its own ledger row, which keeps the delivery retryable and
+    // keeps "duplicate" a truthful claim that a grant actually COMPLETED.
+    try {
+      return await this._dispatch(type, userId, product, event, provider);
+    } catch (err) {
+      await this._releaseLedgerRow(eventId, err);
+      throw err;
+    }
+  }
+
+  /** Routes a verified event to its handler. Split out so handleIapEvent can
+   * wrap every path in the ledger-release guard above — a `return` inside the
+   * switch would otherwise escape it. */
+  async _dispatch(type, userId, product, event, provider) {
     if (GRANT_EVENTS.has(type) || type === "PRODUCT_CHANGE") {
       return this._grant(userId, product, event, provider);
     }
@@ -154,6 +177,27 @@ class IapService {
       default:
         logger.info(`[iap] Unhandled event type ${type} — ignored`);
         return { skipped: "unhandled_type" };
+    }
+  }
+
+  /**
+   * Removes a dedup row whose grant failed, so the store's next delivery (or a
+   * user-triggered Restore) can try again instead of being told it already
+   * happened. Best-effort: a cleanup failure must never mask the real error,
+   * but it IS loud, because the transaction is then stuck reporting success
+   * while granting nothing and needs the row deleted by hand.
+   */
+  async _releaseLedgerRow(eventId, cause) {
+    try {
+      await prisma.iapTransaction.deleteMany({ where: { eventId } });
+      logger.warn(
+        `[iap] Grant failed for ${eventId} (${cause && cause.message}) — ledger row released so a retry can re-grant`,
+      );
+    } catch (err) {
+      logger.error(
+        `[iap] Could not release ledger row ${eventId} after a failed grant: ${err.message}. ` +
+          `That transaction will now report "duplicate" and never grant — delete the row manually.`,
+      );
     }
   }
 
