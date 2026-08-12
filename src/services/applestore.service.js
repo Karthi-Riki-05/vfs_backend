@@ -6,18 +6,25 @@
  *
  * Two entry points, both normalizing Apple payloads into the ONE internal
  * event shape consumed by iap.service.handleIapEvent():
- *   - validatePurchase()       — verifies the app receipt with Apple's
- *     verifyReceipt endpoint (shared secret) right after purchase.
- *     NOTE: verifyReceipt is deprecated by Apple but fully operational; a
- *     future migration to the App Store Server API (JWT + .p8 key) plugs in
- *     here without touching the entitlement engine.
+ *   - validatePurchase()       — verifies the client's proof of purchase right
+ *     after purchase. Accepts BOTH shapes the Flutter plugin can produce:
+ *       · StoreKit 2 signed transaction (JWS) — the DEFAULT from
+ *         in_app_purchase_storekit (`_useStoreKit2 = true`). Verified locally
+ *         against the pinned Apple root; no network call, no shared secret.
+ *       · legacy base64 app receipt — verified via Apple's verifyReceipt
+ *         endpoint (shared secret). Deprecated by Apple but operational.
+ *     See isSignedTransaction() for why both must be handled.
  *   - handleNotification()     — App Store Server Notifications V2: verifies
  *     the JWS signature chain (x5c → pinned Apple Root CA) and maps
  *     notification types to internal lifecycle events.
  *
  * Config (backend .env):
  *   APPLE_SHARED_SECRET          — app-specific shared secret (App Store
- *                                  Connect → App Information → Shared Secret)
+ *                                  Connect → App Information → Shared Secret).
+ *                                  Needed ONLY for the legacy receipt path.
+ *   APPLE_BUNDLE_ID              — expected bundle id (com.valuecharts.flow.chart);
+ *                                  when set, signed transactions from any other
+ *                                  app are rejected
  *   APPLE_ROOT_CA_FINGERPRINT    — optional override of the pinned SHA-256
  *                                  fingerprint of Apple's root certificate
  *
@@ -173,15 +180,62 @@ async function verifyReceiptWithApple(receiptData) {
 }
 
 /**
- * Verifies an app receipt for [productId] and returns the normalized event.
- * The authenticated caller IS the attribution — the resulting ledger row
- * (originalTransactionId ↔ userId) is what later notifications resolve
- * against.
+ * True when the client's proof of purchase is a StoreKit 2 *signed
+ * transaction* (JWS) rather than a legacy base64 app receipt.
+ *
+ * This distinction is not academic: in_app_purchase_storekit ships with
+ * `_useStoreKit2 = true` by DEFAULT (verified in 0.4.10+1), and on that path
+ * `PurchaseVerificationData.serverVerificationData` is the JWS representation
+ * of the transaction — NOT the app receipt. Feeding a JWS to verifyReceipt
+ * makes Apple answer `21002 malformed`, which is exactly how every iOS sandbox
+ * purchase failed on 2026-08-12 before this branch existed.
+ *
+ * A JWS is three base64url segments joined by dots; a PKCS#7 app receipt is a
+ * single base64 blob and never contains a dot, so the shape is a safe
+ * discriminator. Both are accepted so the server keeps working whichever
+ * StoreKit generation a given app build uses.
  */
-async function validatePurchase({ userId, productId, receiptData }) {
-  if (!productId || !receiptData) {
-    throw new AppError("Missing purchase fields", 400, "INVALID_PURCHASE");
+function isSignedTransaction(proof) {
+  return String(proof).split(".").length === 3;
+}
+
+/**
+ * Normalizes a StoreKit 2 signed transaction into the shared shape below.
+ * The JWS signature is verified against the pinned Apple root, so the decoded
+ * fields are trustworthy — no round-trip to Apple is needed (and no shared
+ * secret, which verifyReceipt required).
+ */
+function normalizeSignedTransaction(proof) {
+  const txn = verifyAppleJws(proof);
+  const expected = process.env.APPLE_BUNDLE_ID;
+  if (expected && txn.bundleId && txn.bundleId !== expected) {
+    throw new AppError(
+      "Transaction belongs to a different app",
+      400,
+      "BUNDLE_MISMATCH",
+    );
   }
+  if (!expected) {
+    // Logged with the observed value so the env var can be set to the right
+    // bundle id without guessing, then this check starts enforcing.
+    logger.warn(
+      `[iap-apple] APPLE_BUNDLE_ID unset — bundle id check skipped; ` +
+        `transaction reports bundleId=${txn.bundleId} env=${txn.environment}`,
+    );
+  }
+  return {
+    productId: txn.productId,
+    transactionId: String(txn.transactionId),
+    originalTransactionId: String(
+      txn.originalTransactionId || txn.transactionId,
+    ),
+    expiresMs: txn.expiresDate ? Number(txn.expiresDate) : null,
+    revokedMs: txn.revocationDate ? Number(txn.revocationDate) : null,
+  };
+}
+
+/** Normalizes the newest legacy-receipt transaction for [productId]. */
+async function normalizeLegacyReceipt(receiptData, productId) {
   const result = await verifyReceiptWithApple(receiptData);
 
   // Newest transaction for this product across both receipt sections.
@@ -200,32 +254,70 @@ async function validatePurchase({ userId, productId, receiptData }) {
       "PURCHASE_NOT_FOUND",
     );
   }
+  return {
+    productId: txn.product_id,
+    transactionId: String(txn.transaction_id),
+    originalTransactionId: String(
+      txn.original_transaction_id || txn.transaction_id,
+    ),
+    expiresMs: txn.expires_date_ms ? Number(txn.expires_date_ms) : null,
+    revokedMs: txn.cancellation_date_ms
+      ? Number(txn.cancellation_date_ms)
+      : null,
+  };
+}
+
+/**
+ * Verifies a purchase for [productId] and returns the normalized event.
+ * Accepts either proof shape — see isSignedTransaction().
+ * The authenticated caller IS the attribution — the resulting ledger row
+ * (originalTransactionId ↔ userId) is what later notifications resolve
+ * against.
+ */
+async function validatePurchase({ userId, productId, receiptData }) {
+  if (!productId || !receiptData) {
+    throw new AppError("Missing purchase fields", 400, "INVALID_PURCHASE");
+  }
+
+  const txn = isSignedTransaction(receiptData)
+    ? normalizeSignedTransaction(receiptData)
+    : await normalizeLegacyReceipt(receiptData, productId);
+
+  // The signed/verified product id is authoritative; a client asking us to
+  // grant a DIFFERENT product than the one Apple actually sold must be
+  // refused (server-is-authoritative — see docs/xc-security.md).
+  if (txn.productId && txn.productId !== productId) {
+    throw new AppError(
+      `Purchase is for ${txn.productId}, not ${productId}`,
+      400,
+      "PRODUCT_MISMATCH",
+    );
+  }
 
   const product = resolveIapProduct(productId);
   const isSubscription =
     !!product && (product.type === "team" || product.type === "flow_addon");
-  const expiresMs = txn.expires_date_ms ? Number(txn.expires_date_ms) : null;
 
-  if (isSubscription && expiresMs && expiresMs < Date.now()) {
+  if (isSubscription && txn.expiresMs && txn.expiresMs < Date.now()) {
     throw new AppError("Subscription already expired", 400, "PURCHASE_EXPIRED");
   }
-  if (txn.cancellation_date_ms) {
+  if (txn.revokedMs) {
     throw new AppError("Purchase was refunded", 400, "PURCHASE_REFUNDED");
   }
 
   return {
-    id: `ap:${txn.transaction_id}`,
+    id: `ap:${txn.transactionId}`,
     type: isSubscription ? "INITIAL_PURCHASE" : "NON_RENEWING_PURCHASE",
     app_user_id: userId,
     product_id: productId,
     // Record the ORIGINAL transaction id so Server Notifications (which key
     // on it) can resolve the user through the ledger.
-    transaction_id: txn.original_transaction_id || txn.transaction_id,
-    original_transaction_id: txn.original_transaction_id || txn.transaction_id,
+    transaction_id: txn.originalTransactionId,
+    original_transaction_id: txn.originalTransactionId,
     price: null,
     currency: null,
     store: "APP_STORE",
-    expiration_at_ms: expiresMs,
+    expiration_at_ms: txn.expiresMs,
   };
 }
 
