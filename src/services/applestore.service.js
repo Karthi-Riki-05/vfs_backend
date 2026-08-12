@@ -22,9 +22,11 @@
  *   APPLE_SHARED_SECRET          — app-specific shared secret (App Store
  *                                  Connect → App Information → Shared Secret).
  *                                  Needed ONLY for the legacy receipt path.
- *   APPLE_BUNDLE_ID              — expected bundle id (com.valuecharts.flow.chart);
+ *   APPLE_BUNDLE_ID              — COMMA-SEPARATED list of accepted bundle ids
+ *                                  (com.valuecharts.flow.chart for Team,
+ *                                  com.valuecharts.pro.flow.chart for Pro);
  *                                  when set, signed transactions from any other
- *                                  app are rejected
+ *                                  app are rejected. See allowedBundleIds().
  *   APPLE_ROOT_CA_FINGERPRINT    — optional override of the pinned SHA-256
  *                                  fingerprint of Apple's root certificate
  *
@@ -102,7 +104,11 @@ function verifyAppleJws(signedPayload) {
       ),
   );
   if (chain.length < 2) {
-    throw new AppError("Apple JWS missing certificate chain", 400, "INVALID_JWS");
+    throw new AppError(
+      "Apple JWS missing certificate chain",
+      400,
+      "INVALID_JWS",
+    );
   }
 
   // Each certificate must be signed by its issuer (the next in the chain);
@@ -119,7 +125,9 @@ function verifyAppleJws(signedPayload) {
   }
   const rootFingerprint = (
     process.env.APPLE_ROOT_CA_FINGERPRINT || DEFAULT_APPLE_ROOT_FINGERPRINT
-  ).replace(/:/g, "").toUpperCase();
+  )
+    .replace(/:/g, "")
+    .toUpperCase();
   const actualRoot = chain[chain.length - 1].fingerprint256
     .replace(/:/g, "")
     .toUpperCase();
@@ -205,17 +213,38 @@ function isSignedTransaction(proof) {
  * fields are trustworthy — no round-trip to Apple is needed (and no shared
  * secret, which verifyReceipt required).
  */
+/**
+ * Bundle ids this backend will accept a signed transaction from.
+ *
+ * A LIST, not one value: the two iOS variants are separate App Store apps with
+ * separate bundle ids — `com.valuecharts.flow.chart` (Team, the live app) and
+ * `com.valuecharts.pro.flow.chart` (Pro) — that share this one backend. With a
+ * single value every Pro purchase would be refused as BUNDLE_MISMATCH, i.e. the
+ * store takes the money and we grant nothing. Note the Pro bundle deliberately
+ * does NOT match the Android package `com.valuecharts.pro`; the platforms have
+ * independent namespaces, so never assume one id covers both.
+ *
+ * Empty/unset disables the check (and logs the observed id, so the var can be
+ * set from fact rather than guessed).
+ */
+function allowedBundleIds() {
+  return (process.env.APPLE_BUNDLE_ID || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function normalizeSignedTransaction(proof) {
   const txn = verifyAppleJws(proof);
-  const expected = process.env.APPLE_BUNDLE_ID;
-  if (expected && txn.bundleId && txn.bundleId !== expected) {
+  const allowed = allowedBundleIds();
+  if (allowed.length > 0 && txn.bundleId && !allowed.includes(txn.bundleId)) {
     throw new AppError(
       "Transaction belongs to a different app",
       400,
       "BUNDLE_MISMATCH",
     );
   }
-  if (!expected) {
+  if (allowed.length === 0) {
     // Logged with the observed value so the env var can be set to the right
     // bundle id without guessing, then this check starts enforcing.
     logger.warn(
