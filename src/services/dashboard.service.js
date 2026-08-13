@@ -216,9 +216,20 @@ class DashboardService {
     });
     if (!ownedTeams.length) return 0;
 
-    const workspaceIds = ownedTeams.map((t) => t.id);
+    // owner-as-workspace (2026-08-07): a member of any of the owner's teams
+    // carries `workspaceId = the OWNER's id` (NOT a team id) and names the
+    // specific teams in the `teamIds[]` array. The old query matched
+    // `workspaceId IN (team ids)`, which can never hit — so the count read 0
+    // whenever no single workspace was active (the aggregate/personal dashboard
+    // context). Scope by the owner's workspace and intersect `teamIds` with the
+    // appContext-filtered owned teams instead (bug-136).
+    const teamIds = ownedTeams.map((t) => t.id);
     const members = await prisma.teamMember.findMany({
-      where: { workspaceId: { in: workspaceIds }, userId: { not: userId } },
+      where: {
+        workspaceId: userId,
+        userId: { not: userId },
+        teamIds: { hasSome: teamIds },
+      },
       select: { userId: true },
     });
     return new Set(members.map((m) => m.userId)).size;

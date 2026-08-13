@@ -80,15 +80,21 @@ const IAP_PRODUCTS = {
   addon_flows_standard_monthly: { type: "flow_addon", plan: "standard_100" },
   addon_flows_unlimited_monthly: { type: "flow_addon", plan: "unlimited" },
 
-  // ── Legacy ANDROID Pro subscriptions (live in Play Console under
-  // com.valuecharts.pro) ── the ONLY two products that app owns, both
-  // monthly (basePlan p1m), verified 2026-07-31 via the Play Developer API.
-  // Same Phase-1 purpose as the legacy team/iOS sets: real products that can
-  // be purchase-tested before the new addon_flows_* catalog exists.
-  //   .ltd   → limited flow allowance  → standard_100 entitlement
-  //   .unltd → unlimited flows         → unlimited entitlement
+  // ── Legacy Pro flow-addon subscriptions ── real products that can be
+  // purchase-tested before the new addon_flows_* catalog exists.
+  //   ltd   → limited flow allowance  → standard_100 entitlement
+  //   unltd → unlimited flows         → unlimited entitlement
+  //
+  // ANDROID (live in Play Console under com.valuecharts.pro, basePlan p1m,
+  // verified 2026-07-31 via the Play Developer API):
   "com.valuecharts.pro.ltd": { type: "flow_addon", plan: "standard_100" },
   "com.valuecharts.pro.unltd": { type: "flow_addon", plan: "unlimited" },
+  // iOS (App Store Connect, subscription group "Value Charts Pro
+  // Subscription", both Approved 2026-08-12) — Apple's product IDs carry a
+  // `_flows` suffix that Android's do not; do not assume the two stores
+  // share a string here.
+  "com.valuecharts.pro.ltd_flows": { type: "flow_addon", plan: "standard_100" },
+  "com.valuecharts.pro.unltd_flows": { type: "flow_addon", plan: "unlimited" },
 
   // ── AI credit packs (consumables, both apps) ───────────────────────────
   aicredits_50: { type: "ai_credits", credits: 50, packType: "starter" },
