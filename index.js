@@ -199,9 +199,18 @@ app.use("/api/iap", require("./src/routes/iap.routes"));
 app.use("/api/v1/public", require("./src/routes/public.routes"));
 app.use("/api/public", require("./src/routes/public.routes"));
 app.use("/api/v1/auth/mobile", require("./src/routes/mobile.auth.routes"));
+// Biometric login for the native shell. Mounted UNDER /auth but separate from
+// mobile.auth: that surface issues bearer JWTs for a native-login app, whereas
+// this one hands a biometric unlock back to NextAuth so it can mint the web
+// session cookie the WebView actually uses. See docs/be-auth-biometric.md.
+app.use(
+  "/api/v1/auth/biometric",
+  require("./src/routes/biometric.auth.routes"),
+);
 
 // Backwards-compatible aliases (old /api/ routes -> /api/v1/)
 app.use("/api/auth/mobile", require("./src/routes/mobile.auth.routes"));
+app.use("/api/auth/biometric", require("./src/routes/biometric.auth.routes"));
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/flows", flowRoutes);
