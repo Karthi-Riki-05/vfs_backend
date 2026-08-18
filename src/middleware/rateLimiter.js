@@ -63,6 +63,38 @@ const authLimiter = isTest
       },
     });
 
+// Biometric unlock (/auth/biometric/exchange and /consume).
+//
+// These CANNOT share authLimiter. Both are reached through the Next.js proxy,
+// so the backend sees the web server's IP for every user on the planet — one
+// shared bucket. At 10 per 15 minutes, and two calls per successful login
+// (exchange, then consume), that is roughly five biometric sign-ins every
+// quarter hour for the ENTIRE user base before everyone silently falls back to
+// passwords. It also fires on every app launch, so ordinary use exhausts it.
+//
+// A generous budget is safe here in a way it would not be for a password:
+// the credential is 32 random bytes rather than something a human chose, so
+// guessing is not a threat model, and replaying a spent token revokes the
+// device outright (biometric.auth.controller.js). skipSuccessfulRequests keeps
+// legitimate launches from consuming the budget at all, so what remains is
+// purely a brake on repeated FAILURES — which is the only shape an attack has.
+const biometricLimiter = isTest
+  ? passthrough
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 60,
+      skipSuccessfulRequests: true,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: {
+        success: false,
+        error: {
+          code: "AUTH_RATE_LIMIT",
+          message: "Too many authentication attempts, please try again later.",
+        },
+      },
+    });
+
 const aiLimiter = isTest
   ? passthrough
   : rateLimit({
@@ -171,6 +203,7 @@ const chatMessageLimiter = isTest ? passthrough : buildChatMessageLimiter();
 module.exports = {
   globalLimiter,
   authLimiter,
+  biometricLimiter,
   aiLimiter,
   inviteLimiter,
   resendLimiter,

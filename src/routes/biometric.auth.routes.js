@@ -1,7 +1,7 @@
 const router = require("express").Router();
 const c = require("../controllers/biometric.auth.controller");
 const { authenticate } = require("../middleware/auth.middleware");
-const { authLimiter } = require("../middleware/rateLimiter");
+const { biometricLimiter } = require("../middleware/rateLimiter");
 
 /**
  * @swagger
@@ -98,7 +98,7 @@ router.post("/enroll", authenticate, c.enroll);
  *       400: { description: Missing deviceToken }
  *       401: { description: Invalid, revoked, or expired; or account not loginable }
  */
-router.post("/exchange", authLimiter, c.exchange);
+router.post("/exchange", biometricLimiter, c.exchange);
 
 /**
  * @swagger
@@ -126,7 +126,7 @@ router.post("/exchange", authLimiter, c.exchange);
  *       401: { description: Ticket invalid, already used, or expired }
  *       403: { description: Email not verified }
  */
-router.post("/consume", authLimiter, c.consume);
+router.post("/consume", biometricLimiter, c.consume);
 
 /**
  * @swagger
