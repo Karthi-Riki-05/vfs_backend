@@ -59,6 +59,8 @@ const authenticate = async (req, res, next) => {
         // Needed by the Pro app-context gate (enforceProContext) below.
         hasPro: true,
         proPurchasedAt: true,
+        // bug-U3: reject tokens minted before the last password change.
+        passwordChangedAt: true,
       },
     });
 
@@ -87,13 +89,35 @@ const authenticate = async (req, res, next) => {
       return next(new AppError("Account is inactive", 403, "ACCOUNT_INACTIVE"));
     }
 
+    // bug-U3: evict sessions issued before the last password change. `iat` is in
+    // seconds; guard on both values so tokens without an `iat` are unaffected.
+    if (
+      user.passwordChangedAt &&
+      decoded?.iat &&
+      decoded.iat * 1000 < new Date(user.passwordChangedAt).getTime()
+    ) {
+      return next(
+        new AppError(
+          "Session expired — please sign in again",
+          401,
+          "SESSION_REVOKED",
+        ),
+      );
+    }
+
+    // bug-U1: the FRESH DB values must win. Previously `...decoded` was spread
+    // LAST, so the token's stale `role`/`currentVersion`/`hasPro` overrode the
+    // rows just read here — a demoted admin (or a downgraded plan) kept its old
+    // authorization for the token's lifetime (up to 30 days). Spread `decoded`
+    // FIRST for any extra claims (email/name), then override with the DB reads
+    // that this middleware fetched precisely to be authoritative.
     req.user = {
+      ...decoded,
       id: userId,
       role: user.role,
       currentVersion: user.currentVersion || "free",
       hasPro: user.hasPro === true,
       proPurchasedAt: user.proPurchasedAt || null,
-      ...decoded,
     };
 
     // Pro app-context gate: reject any request that claims the Pro context

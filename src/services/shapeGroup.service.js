@@ -15,14 +15,21 @@ class ShapeGroupService {
     return await prisma.shapeGroup.findMany({
       where: await workspaceScope(userId, requestedWorkspaceId, appContext),
       orderBy: { createdAt: "desc" },
-      include: { _count: { select: { shapes: true } } },
+      // bug-M4: exclude soft-deleted shapes so the group card badge matches the
+      // shapes actually rendered under it (getAllShapes filters deletedAt:null).
+      include: {
+        _count: { select: { shapes: { where: { deletedAt: null } } } },
+      },
     });
   }
 
   async getGroupById(id, userId) {
     const group = await prisma.shapeGroup.findFirst({
       where: { id, userId },
-      include: { shapes: true, _count: { select: { shapes: true } } },
+      include: {
+        shapes: { where: { deletedAt: null } },
+        _count: { select: { shapes: { where: { deletedAt: null } } } },
+      },
     });
     if (!group) throw new AppError("Shape group not found", 404, "NOT_FOUND");
     return group;

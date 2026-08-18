@@ -2,8 +2,8 @@
 
 /**
  * IAP product catalog — single source of truth mapping store product IDs
- * (created in Google Play Console / App Store Connect, surfaced through
- * RevenueCat) onto ValueChart entitlements.
+ * (created in Google Play Console / App Store Connect, purchased directly
+ * through Play Billing / StoreKit) onto ValueChart entitlements.
  *
  * RULES
  *  - Product IDs are PERMANENT in both stores. Never rename or reuse one;
@@ -34,8 +34,10 @@ const TEAM_SEAT_TIERS = [5, 10, 15, 20, 25];
 const IAP_PRODUCTS = {
   // ── Pro (one-time lifetime unlock) ─────────────────────────────────────
   pro_lifetime: { type: "pro_lifetime" },
-  // Legacy RevenueCat IDs from the original integration — kept so any
-  // historical purchases/renewals keep resolving. Same entitlement.
+  // Legacy product IDs from the original (RevenueCat-era) integration — kept
+  // as plain string mappings so any historical purchase/restore still
+  // resolves. Same entitlement. No vendor involved: the RevenueCat webhook
+  // was removed 2026-08-14.
   valuechart_pro_monthly: { type: "pro_lifetime" },
   valuechart_pro_yearly: { type: "pro_lifetime" },
   valuechart_free: { type: "noop" },
@@ -116,7 +118,7 @@ for (const seats of TEAM_SEAT_TIERS) {
 }
 
 /**
- * Resolve a store/RevenueCat product ID to its catalog entry.
+ * Resolve a store product ID to its catalog entry.
  * Handles the Play Billing "productId:basePlanId" form. Returns null for
  * unknown products (callers must log and skip — never guess entitlements).
  */

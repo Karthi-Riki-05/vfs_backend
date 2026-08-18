@@ -1,9 +1,11 @@
 "use strict";
 
 /**
- * IAP entitlement service — processes RevenueCat webhook events for every
+ * IAP entitlement service — processes direct store-billing events for every
  * mobile product (Pro lifetime, flow packs, flow add-ons, AI credits, team
- * seat plans).
+ * seat plans). Sources: POST /iap/validate, Google RTDN, and Apple Server
+ * Notifications V2. There is no billing vendor in this path — RevenueCat was
+ * rejected 2026-07-21 and its dormant webhook removed 2026-08-14.
  *
  * DESIGN: maximal reuse. Purchases are translated into the same
  * "session-shaped" objects the Stripe webhook handlers already consume, then
@@ -14,16 +16,17 @@
  *   - ai_credits  → aiCredit.service addAddonCredits (mirrors payment.service)
  * so mobile and web purchases share ONE set of business rules.
  *
- * Idempotency is two-layered: an IapTransaction row per RevenueCat event.id
+ * Idempotency is two-layered: an IapTransaction row per normalized event.id
  * (unique constraint → redeliveries skipped), plus each delegated handler's
  * own txnId/paymentIntent dedup.
  *
  * CROSS-PROVIDER GUARD: an entitlement owned by an active Stripe record is
  * never overwritten by an IAP event (and lifecycle events only touch
- * RevenueCat-owned records). Users manage each purchase where they bought it.
+ * store-owned records). Users manage each purchase where they bought it.
  *
- * The RevenueCat app_user_id MUST be the ValueChart user id — the Flutter
- * shell has to call Purchases.logIn(<userId>) before any purchase.
+ * The event's app_user_id MUST be the ValueChart user id — the web app sends
+ * `iap-login:<userId>` so the shell stamps it on every purchase (Play
+ * obfuscatedAccountId / StoreKit applicationUsername). See IAP_CONTRACT.md.
  */
 
 const { prisma } = require("../lib/prisma");
@@ -52,15 +55,10 @@ const GRANT_EVENTS = new Set([
 ]);
 
 class IapService {
-  /** Legacy entry point — kept so the dormant RevenueCat webhook still works. */
-  async handleRevenueCatEvent(event) {
-    return this.handleIapEvent(event, "revenuecat");
-  }
-
   /**
    * Entry point for every IAP event source. Adapters (Google Play validate /
-   * RTDN, Apple validate / Server Notifications, RevenueCat webhook)
-   * normalize their store payloads into this ONE event shape:
+   * RTDN, Apple validate / Server Notifications) normalize their store
+   * payloads into this ONE event shape:
    *   { id, type, app_user_id, product_id, transaction_id,
    *     original_transaction_id, price, currency, store, expiration_at_ms }
    * Never throws on business-rule skips; throws only on unexpected
@@ -248,7 +246,7 @@ class IapService {
 
   /**
    * Team seat subscription. Delegates to the Stripe checkout handler with a
-   * synthesized session, then tags the subscription row as RevenueCat-owned.
+   * synthesized session, then tags the subscription row as store-owned.
    */
   async _grantTeam(userId, product, event, provider) {
     // Cross-provider guard: never clobber a live Stripe team subscription.
@@ -410,7 +408,9 @@ class IapService {
           status: "completed",
           price: amountCents / 100,
           currency,
-          source: "revenuecat",
+          // Payment rail, mirroring the sibling transactionLog row's
+          // paymentMethod. "stripe" | "admin" are the web-side values.
+          source: "in_app_purchase",
           startedAt: new Date(),
           appContext,
         },
@@ -661,7 +661,7 @@ class IapService {
     }`;
   }
 
-  /** RevenueCat expiration_at_ms → Date (null when absent). */
+  /** Normalized expiration_at_ms → Date (null when absent). */
   _expirationDate(event) {
     return event.expiration_at_ms ? new Date(event.expiration_at_ms) : null;
   }

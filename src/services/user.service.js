@@ -125,7 +125,12 @@ class UserService {
     const hashed = await argon2.hash(newPassword);
     await prisma.user.update({
       where: { id: userId },
-      data: { password: hashed },
+      // bug-U3: same session invalidation as resetPassword.
+      data: {
+        password: hashed,
+        refreshToken: null,
+        passwordChangedAt: new Date(),
+      },
     });
 
     securityAlert.alertPasswordChanged({
@@ -142,10 +147,13 @@ class UserService {
     if (!user) return; // Don't reveal if user exists
 
     const token = crypto.randomBytes(32).toString("hex");
+    // bug-M8: store only the HASH of the reset token. The plaintext lives solely
+    // in the emailed URL, so a DB read no longer yields usable 1-hour tokens.
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
 
     // Delete any existing tokens for this email, then create new one
     await prisma.passwordReset.deleteMany({ where: { email } });
-    await prisma.passwordReset.create({ data: { email, token } });
+    await prisma.passwordReset.create({ data: { email, token: tokenHash } });
 
     // Build reset URL and send email
     const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
@@ -162,8 +170,11 @@ class UserService {
   }
 
   async resetPassword(token, newPassword, ip, userAgent) {
+    // bug-M8: tokens are stored hashed — look up by the hash of the presented
+    // plaintext token from the reset URL.
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     const reset = await prisma.passwordReset.findFirst({
-      where: { token },
+      where: { token: tokenHash },
       orderBy: { createdAt: "desc" },
     });
     if (!reset)
@@ -179,10 +190,31 @@ class UserService {
       throw new AppError("Reset token has expired", 400, "TOKEN_EXPIRED");
     }
 
+    // bug-M9: a deleted/suspended account must not silently rotate its password
+    // (login gates block it either way, but the reset should refuse outright).
+    const target = await prisma.user.findUnique({
+      where: { email: reset.email },
+      select: { userStatus: true, suspendedAt: true },
+    });
+    if (
+      !target ||
+      target.userStatus === "deleted" ||
+      target.suspendedAt !== null
+    ) {
+      throw new AppError("Account is inactive", 403, "ACCOUNT_INACTIVE");
+    }
+
     const hashed = await argon2.hash(newPassword);
     const updated = await prisma.user.update({
       where: { email: reset.email },
-      data: { password: hashed },
+      // bug-U3: invalidate existing sessions. Null the mobile refresh token and
+      // bump passwordChangedAt so pre-reset web JWTs are rejected — otherwise a
+      // stolen token survives the reset the email claims restores access.
+      data: {
+        password: hashed,
+        refreshToken: null,
+        passwordChangedAt: new Date(),
+      },
       select: { id: true, email: true, name: true },
     });
     // Clean up used tokens

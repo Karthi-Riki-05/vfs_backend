@@ -1,5 +1,5 @@
 const { prisma } = require("../lib/prisma");
-const { workspaceScope } = require("../lib/workspaceScope");
+const { workspaceScope, resolveWorkspaceId } = require("../lib/workspaceScope");
 const AppError = require("../utils/AppError");
 
 class IssueService {
@@ -43,15 +43,23 @@ class IssueService {
   }
 
   async createIssue(userId, data, appContext = "free") {
+    // Verify the requested workspace server-side (bug-B5). A forged/stale
+    // X-Workspace-Context resolves to the caller's OWN workspace, never the
+    // claimed one — matching createFlow/createShape/createProject (bug-110).
+    // Previously the raw header was stamped onto the row, letting user A inject
+    // an issue into user B's workspace (getIssues does not filter by creator).
+    const workspaceId = await resolveWorkspaceId(userId, data.workspaceId || null);
     return await prisma.issueItem.create({
       data: {
         title: data.title,
         flowId: data.flowId,
         flowItemId: data.flowItemId || "",
         createdById: userId,
-        workspaceId: data.workspaceId || null,
+        workspaceId,
         appType: data.appType || null,
-        appContext: data.workspaceId ? "team" : appContext,
+        // Team context (a workspace other than the caller's own) → "team";
+        // personal context keeps the caller's app.
+        appContext: workspaceId !== userId ? "team" : appContext,
       },
     });
   }

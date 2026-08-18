@@ -1288,6 +1288,11 @@ class SubscriptionService {
     );
 
     // Guard: skip pro / addon purchases — handled by payment.service.js → pro.service.js
+    // NOTE (bug-B1, deferred): `flow_addon` is missing here, so it falls through
+    // to the team path and throws on PRICING[plan] if this receiver ever gets a
+    // flow_addon checkout. Left as-is pending the dedicated webhook-unification
+    // pass (the unified handler must reconcile this service's re-throw-on-error
+    // with payment.service's swallow-and-200 before packs can route here).
     if (
       purchaseType === "pro_upgrade" ||
       purchaseType === "pro_extra_flows" ||

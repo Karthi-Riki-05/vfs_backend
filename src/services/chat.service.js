@@ -416,14 +416,25 @@ class ChatService {
               groupTitle: group.title,
               createdBy: userId,
             });
-            // Refresh unread count for non-creator members
+            // Refresh unread count for non-creator members — scoped to this
+            // group's app + workspace (bug-U7) so it matches the REST badge.
             if (memberId !== userId) {
               const memberUnread = await prisma.chatMessageUser.count({
-                where: { receiverId: memberId, isRead: false },
+                where: {
+                  receiverId: memberId,
+                  isRead: false,
+                  group: {
+                    appContext: group.appContext,
+                    workspaceId: group.workspaceId,
+                    deletedAt: null,
+                  },
+                },
               });
               io.to(`user:${memberId}`).emit("notification:unread-count", {
                 totalUnread: memberUnread,
                 groupId: group.id,
+                appContext: group.appContext,
+                workspaceId: group.workspaceId,
               });
             }
           }
@@ -559,14 +570,26 @@ class ChatService {
           groupId,
         });
 
-        // Emit unread count update to each other member. Fetch every member's
-        // total unread in ONE grouped query instead of N per-member counts.
+        // Emit unread count update to each other member. Scope the total to
+        // THIS group's app + workspace (excluding deleted groups) so the live
+        // bump matches what the REST badge (getUnreadCounts) would show and
+        // never bleeds a pro-group message into a team badge (bug-U7). Include
+        // appContext so the client's existing per-context filter applies.
         if (members.length > 0) {
+          const grp = await prisma.chatGroup.findUnique({
+            where: { id: groupId },
+            select: { appContext: true, workspaceId: true },
+          });
           const grouped = await prisma.chatMessageUser.groupBy({
             by: ["receiverId"],
             where: {
               receiverId: { in: members.map((m) => m.userId) },
               isRead: false,
+              group: {
+                appContext: grp?.appContext || "team",
+                workspaceId: grp?.workspaceId,
+                deletedAt: null,
+              },
             },
             _count: { _all: true },
           });
@@ -577,6 +600,8 @@ class ChatService {
             io.to(`user:${member.userId}`).emit("notification:unread-count", {
               totalUnread: unreadByUser.get(member.userId) || 0,
               groupId,
+              appContext: grp?.appContext || "team",
+              workspaceId: grp?.workspaceId,
             });
           }
         }
@@ -698,6 +723,22 @@ class ChatService {
       select: { id: true, groupId: true },
     });
     if (!msg) throw new AppError("Message not found", 404, "NOT_FOUND");
+
+    // bug-U8: verify the caller belongs to the message's group before reacting.
+    // Every other message op checks this; toggleReaction did not, so a
+    // non-member could add/remove reactions on another group's private message
+    // (persisted + broadcast) and probe message existence across groups. Mirrors
+    // getMessages' member-or-owner gate.
+    const isMember = await prisma.chatGroupUser.findFirst({
+      where: { groupId: msg.groupId, userId },
+    });
+    if (!isMember) {
+      const isOwner = await prisma.chatGroup.findFirst({
+        where: { id: msg.groupId, userId },
+      });
+      if (!isOwner)
+        throw new AppError("Not a member of this chat group", 403, "FORBIDDEN");
+    }
 
     const existing = await prisma.messageReaction.findUnique({
       where: {
@@ -874,13 +915,28 @@ class ChatService {
           ...fullMessage,
           groupId,
         });
+        const grp = await prisma.chatGroup.findUnique({
+          where: { id: groupId },
+          select: { appContext: true, workspaceId: true },
+        });
         for (const member of members) {
+          // Scoped to the group's app + workspace (bug-U7) — see sendMessage.
           const unreadCount = await prisma.chatMessageUser.count({
-            where: { receiverId: member.userId, isRead: false },
+            where: {
+              receiverId: member.userId,
+              isRead: false,
+              group: {
+                appContext: grp?.appContext || "team",
+                workspaceId: grp?.workspaceId,
+                deletedAt: null,
+              },
+            },
           });
           io.to(`user:${member.userId}`).emit("notification:unread-count", {
             totalUnread: unreadCount,
             groupId,
+            appContext: grp?.appContext || "team",
+            workspaceId: grp?.workspaceId,
           });
         }
       }
@@ -986,26 +1042,33 @@ class ChatService {
       const { getIO } = require("../socket");
       const io = getIO();
       if (io) {
-        // Resolve the group's appContext so the emitted total is scoped correctly.
+        // Scope the emitted total to the group's app + workspace, EXACT match
+        // (excluding deleted groups) — same as getUnreadCounts, so a read
+        // receipt updates exactly the badge the panel shows (bug-U6/U7).
         const grp = await prisma.chatGroup.findUnique({
           where: { id: groupId },
-          select: { appContext: true },
+          select: { appContext: true, workspaceId: true },
         });
         const grpAppContext = grp?.appContext || "team";
-        const appCtxFilter =
-          grpAppContext === "pro"
-            ? { appContext: "pro" }
-            : { appContext: { not: "pro" } };
 
         io.to(`chat:${groupId}`).emit("message:read", { groupId, userId });
 
         const newTotal = await prisma.chatMessageUser.count({
-          where: { receiverId: userId, isRead: false, group: appCtxFilter },
+          where: {
+            receiverId: userId,
+            isRead: false,
+            group: {
+              appContext: grpAppContext,
+              workspaceId: grp?.workspaceId,
+              deletedAt: null,
+            },
+          },
         });
         io.to(`user:${userId}`).emit("notification:unread-count", {
           totalUnread: newTotal,
           groupId,
           appContext: grpAppContext,
+          workspaceId: grp?.workspaceId,
         });
       }
     } catch (err) {
@@ -1032,9 +1095,14 @@ class ChatService {
     // can only fall back to the caller's own workspace, never invent a count.
     const resolvedWorkspaceId = await resolveWorkspaceId(userId, workspaceId);
     const appCtxFilter = {
-      ...(appContext === "pro"
-        ? { appContext: "pro" }
-        : { appContext: { not: "pro" } }),
+      // EXACT appContext match, mirroring getSidebarData's group list
+      // (chat.service.js ~1176) — NOT the `{not:pro}` fold. Both this and the
+      // panel read the same `X-App-Context` header, so exact match makes the
+      // badge count exactly what the panel lists. The fold counted a `free`
+      // group's unread while the exact-match panel (in the team app) never
+      // listed it — an un-openable, un-clearable badge (bug-U6, the appContext
+      // axis of the bug-134/135 class).
+      appContext,
       workspaceId: resolvedWorkspaceId,
       // Exclude soft-deleted groups — getSidebarData/getChatGroups both do, and
       // WITHOUT it an unread message in a deleted conversation is counted here

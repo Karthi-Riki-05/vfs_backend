@@ -58,6 +58,7 @@ class DashboardController {
       req.user.id,
       limit,
       this._teamId(req),
+      this._appContext(req),
     );
     res.json({ success: true, data: activity });
   });

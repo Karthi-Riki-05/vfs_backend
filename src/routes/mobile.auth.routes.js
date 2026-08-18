@@ -1,6 +1,10 @@
 const router = require("express").Router();
 const c = require("../controllers/mobile.auth.controller");
 const { authenticate } = require("../middleware/auth.middleware");
+// bug-U2: the mobile credential endpoints had only the global 600/2-min IP
+// limiter, so passwords could be brute-forced against the same argon2 hashes
+// the web `authLimiter` (10/15-min) protects. Apply the same limiter here.
+const { authLimiter } = require("../middleware/rateLimiter");
 
 /**
  * @swagger
@@ -51,7 +55,7 @@ const { authenticate } = require("../middleware/auth.middleware");
  *       400: { description: Validation error }
  *       401: { description: Invalid credentials or deactivated account }
  */
-router.post("/login", c.login);
+router.post("/login", authLimiter, c.login);
 
 /**
  * @swagger
@@ -84,7 +88,7 @@ router.post("/login", c.login);
  *       400: { description: Missing refresh token }
  *       401: { description: Invalid or expired refresh token }
  */
-router.post("/refresh", c.refresh);
+router.post("/refresh", authLimiter, c.refresh);
 
 /**
  * @swagger
@@ -121,7 +125,7 @@ router.post("/refresh", c.refresh);
  *       400: { description: Invalid provider or missing email }
  *       401: { description: Account deactivated }
  */
-router.post("/social", c.socialLogin);
+router.post("/social", authLimiter, c.socialLogin);
 
 /**
  * @swagger

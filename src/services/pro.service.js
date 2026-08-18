@@ -1330,15 +1330,33 @@ class ProService {
         where: { workspaceId: userId, markedForDowngrade: true },
         data: { markedForDowngrade: false, deletedAt: null },
       });
-      await prisma.flowLimit.updateMany({
+      // Same fix as handleFlowAddonCheckoutWebhook: updateMany() silently
+      // no-ops if flow_limits isn't provisioned for this user yet, losing
+      // the grant with no error. Find-then-create-or-update instead.
+      const existingLimitDirect = await prisma.flowLimit.findFirst({
         where: { userId, appType: "individual" },
-        data: {
-          overLimitLocked: false,
-          overLimitModalShown: false,
-          totCount: addonPlan === "standard_100" ? 100 : null,
-          updatedAt: new Date(),
-        },
       });
+      const flowLimitDataDirect = {
+        overLimitLocked: false,
+        overLimitModalShown: false,
+        totCount: addonPlan === "standard_100" ? 100 : null,
+        updatedAt: new Date(),
+      };
+      if (existingLimitDirect) {
+        await prisma.flowLimit.update({
+          where: { id: existingLimitDirect.id },
+          data: flowLimitDataDirect,
+        });
+      } else {
+        await prisma.flowLimit.create({
+          data: {
+            userId,
+            appType: "individual",
+            flowUsed: 0,
+            ...flowLimitDataDirect,
+          },
+        });
+      }
 
       await prisma.transactionLog.create({
         data: {
@@ -1578,15 +1596,35 @@ class ProService {
       restored = restoreResult.count;
 
       // Clear the over-limit lock so the flows page unlocks immediately.
-      await tx.flowLimit.updateMany({
+      //
+      // bug-XXX: was `flowLimit.updateMany()`, which silently updates ZERO
+      // rows (no error) if this user's flow_limits row for "individual"
+      // hasn't been provisioned yet — losing the addon grant entirely with
+      // no signal, and permanently, since the idempotency check above keys
+      // on the Apple/Stripe transaction id and will never retry this once
+      // transactionLog has the row. Find-then-create-or-update instead, so
+      // the grant always lands regardless of provisioning order. There's no
+      // @@unique([userId, appType]) on FlowLimit yet, so this can't use
+      // Prisma's upsert() directly.
+      const existingLimit = await tx.flowLimit.findFirst({
         where: { userId, appType: "individual" },
-        data: {
-          overLimitLocked: false,
-          overLimitModalShown: false,
-          totCount: addonPlan === "standard_100" ? 100 : null,
-          updatedAt: new Date(),
-        },
       });
+      const flowLimitData = {
+        overLimitLocked: false,
+        overLimitModalShown: false,
+        totCount: addonPlan === "standard_100" ? 100 : null,
+        updatedAt: new Date(),
+      };
+      if (existingLimit) {
+        await tx.flowLimit.update({
+          where: { id: existingLimit.id },
+          data: flowLimitData,
+        });
+      } else {
+        await tx.flowLimit.create({
+          data: { userId, appType: "individual", flowUsed: 0, ...flowLimitData },
+        });
+      }
 
       await tx.transactionLog.create({
         data: {

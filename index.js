@@ -92,13 +92,6 @@ app.use(
   }),
 );
 
-// RevenueCat webhook — raw body, mount BEFORE express.json()
-app.use(
-  "/api/v1/revenuecat",
-  require("./src/routes/revenuecat.webhook.routes"),
-);
-app.use("/api/revenuecat", require("./src/routes/revenuecat.webhook.routes"));
-
 // Stripe webhook routes MUST receive raw body — mount BEFORE express.json()
 const webhookRawBody = express.raw({ type: "application/json" });
 const captureRawBody = (req, res, next) => {

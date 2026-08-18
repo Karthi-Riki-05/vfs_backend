@@ -122,7 +122,7 @@ class DashboardService {
     return flows;
   }
 
-  async getTeamActivity(userId, limit = 10, workspaceId = null) {
+  async getTeamActivity(userId, limit = 10, workspaceId = null, appContext = null) {
     // owner-as-workspace (2026-08-07): everything inside a workspace is shared,
     // so this is the workspace's recent activity — no longer restricted to the
     // caller's own rows. With no explicit workspace it covers every workspace
@@ -139,10 +139,14 @@ class DashboardService {
 
     if (workspaceIds.length === 0) return [];
 
+    // bug-M5: scope by app context so a Team-app feed never surfaces Pro-app
+    // flows (mirrors every other dashboard list).
+    const { appScope } = require("../lib/workspaceScope");
     const recentFlows = await prisma.flow.findMany({
       where: {
         workspaceId: { in: workspaceIds },
         deletedAt: null,
+        ...appScope(appContext),
       },
       orderBy: { updatedAt: "desc" },
       take: limit,
@@ -159,7 +163,9 @@ class DashboardService {
       id: f.id,
       flowName: f.name,
       userName: f.workspace?.name || "Unknown",
-      userImage: f.owner?.image || null,
+      // bug-M5: was `f.owner?.image` — `owner` is never selected, so the avatar
+      // was always null. The selected relation is `workspace`.
+      userImage: f.workspace?.image || null,
       action:
         f.createdAt.getTime() === f.updatedAt.getTime() ? "created" : "edited",
       timestamp: f.updatedAt,
@@ -176,31 +182,19 @@ class DashboardService {
   // excluded when viewing the team dashboard and vice-versa). This prevents
   // the old findFirst fallback from landing on a system team (1 member = self
   // only) and incorrectly returning 0.
-  async _getOwnedTeamMemberCount(userId, workspaceId = null, appContext = null) {
-    if (workspaceId) {
-      const [membership, ownedTeam] = await Promise.all([
-        prisma.teamMember.findFirst({
-          where: { workspaceId, userId },
-          select: { id: true },
-        }),
-        prisma.team.findFirst({
-          where: { id: workspaceId, teamOwnerId: userId, deletedAt: null },
-          select: { id: true },
-        }),
-      ]);
-      if (!membership && !ownedTeam) return 0;
-
-      const members = await prisma.teamMember.findMany({
-        where: { workspaceId, userId: { not: userId } },
-        select: { userId: true },
-      });
-      return new Set(members.map((m) => m.userId)).size;
-    }
-
-    // No active team: aggregate across all non-system owned teams,
-    // filtered by appContext so the count matches the dashboard's app mode.
+  // Distinct members of `ownerWorkspaceId`'s teams, restricted to the app the
+  // dashboard is showing, excluding `excludeUserId` (the viewer). ONE definition
+  // for both the active-workspace and the aggregate/personal branch so the two
+  // can never diverge (bug-136 fixed the aggregate branch; bug-U5 the active
+  // one, which counted across BOTH apps' seats while its roster did not).
+  //
+  // owner-as-workspace (2026-08-07): a member carries `workspaceId = the OWNER's
+  // id` (NOT a team id) and names the specific teams in the `teamIds[]` array —
+  // so scope by the owner's workspace and intersect `teamIds` with the
+  // appContext-filtered owned teams (never `workspaceId IN (team ids)`).
+  async _countWorkspaceMembers(ownerWorkspaceId, appContext, excludeUserId) {
     const teamWhere = {
-      teamOwnerId: userId,
+      teamOwnerId: ownerWorkspaceId,
       deletedAt: null,
       AND: [{ OR: [{ verifyTeam: null }, { verifyTeam: { not: "system" } }] }],
     };
@@ -210,29 +204,40 @@ class DashboardService {
       teamWhere.appContext = { not: "pro" };
     }
 
-    const ownedTeams = await prisma.team.findMany({
+    const teams = await prisma.team.findMany({
       where: teamWhere,
       select: { id: true },
     });
-    if (!ownedTeams.length) return 0;
+    if (!teams.length) return 0;
 
-    // owner-as-workspace (2026-08-07): a member of any of the owner's teams
-    // carries `workspaceId = the OWNER's id` (NOT a team id) and names the
-    // specific teams in the `teamIds[]` array. The old query matched
-    // `workspaceId IN (team ids)`, which can never hit — so the count read 0
-    // whenever no single workspace was active (the aggregate/personal dashboard
-    // context). Scope by the owner's workspace and intersect `teamIds` with the
-    // appContext-filtered owned teams instead (bug-136).
-    const teamIds = ownedTeams.map((t) => t.id);
     const members = await prisma.teamMember.findMany({
       where: {
-        workspaceId: userId,
-        userId: { not: userId },
-        teamIds: { hasSome: teamIds },
+        workspaceId: ownerWorkspaceId,
+        userId: { not: excludeUserId },
+        teamIds: { hasSome: teams.map((t) => t.id) },
       },
       select: { userId: true },
     });
     return new Set(members.map((m) => m.userId)).size;
+  }
+
+  async _getOwnedTeamMemberCount(userId, workspaceId = null, appContext = null) {
+    if (workspaceId) {
+      // Only owners/members of the active workspace get a count (fail-closed).
+      // bug-M10: the old gate paired the membership check with
+      // `team.findFirst({ id: workspaceId })` — but `workspaceId` is a USER id
+      // (owner-as-workspace), never a team PK, so that half always returned
+      // null and the gate worked only because createTeam writes an owner
+      // self-membership row. `canEnterWorkspace` is the canonical check (own
+      // workspace OR a live seat) and removes the dead branch.
+      const { canEnterWorkspace } = require("../lib/workspaceScope");
+      if (!(await canEnterWorkspace(userId, workspaceId))) return 0;
+      // The active workspace's owner IS `workspaceId` (owner-as-workspace).
+      return this._countWorkspaceMembers(workspaceId, appContext, userId);
+    }
+
+    // No active workspace → the caller's own workspace.
+    return this._countWorkspaceMembers(userId, appContext, userId);
   }
 }
 

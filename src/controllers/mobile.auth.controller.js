@@ -64,6 +64,7 @@ class MobileAuthController {
         password: true,
         userStatus: true,
         suspendedAt: true,
+        emailVerified: true,
         currentVersion: true,
         hasPro: true,
         proFlowLimit: true,
@@ -100,6 +101,20 @@ class MobileAuthController {
         "Invalid email or password",
         401,
         "INVALID_CREDENTIALS",
+      );
+    }
+
+    // bug-B4: the email-verification gate the web login enforces was missing
+    // here, so an account registered with an unverified (possibly unowned)
+    // address — blocked on web — could log in on mobile. Parity with
+    // auth.controller.validateUser. Checked after the password so it is not an
+    // account-existence/verification oracle for wrong credentials.
+    if (!user.emailVerified) {
+      logger.warn(`[mobile] login blocked — email not verified: ${user.id}`);
+      throw new AppError(
+        "Please verify your email before logging in. Check your inbox for the 6-digit verification code.",
+        403,
+        "EMAIL_NOT_VERIFIED",
       );
     }
 

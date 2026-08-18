@@ -28,18 +28,22 @@ const AppError = require("../utils/AppError");
 // Marks paymentId / flowAddonStripeSubId values owned by an IAP provider,
 // keyed on the store's original transaction id so renewals and expirations of
 // the same underlying subscription resolve to the same record.
+// The `rc_` spelling is historical (it predates the RevenueCat removal) and is
+// now simply "the store-owned id prefix" for Google and Apple alike. It is
+// WRITTEN on every IAP grant — do not rename it: existing rows carry it, and
+// isStoreOwned() reads it as the fallback signal below.
 const RC_PREFIX = "rc_";
 
 // Every non-Stripe entitlement source. Lifecycle events may only touch
 // records owned by one of these — Stripe records are read-only to IAP.
-const IAP_PROVIDERS = ["revenuecat", "google", "apple"];
+// RevenueCat was removed 2026-08-14 (never used in production; direct store
+// billing only). Any historical row still stamped provider="revenuecat" is
+// still recognised as store-owned via the RC_PREFIX paymentId signal.
+const IAP_PROVIDERS = ["google", "apple"];
 
 const STORE_LABELS = {
   google: "Google Play",
   apple: "the App Store",
-  // RevenueCat fronts both stores; without the underlying store we cannot say
-  // which one, so stay generic rather than guess and send them to the wrong app.
-  revenuecat: "the app store you purchased from",
 };
 
 /**

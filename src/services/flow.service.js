@@ -327,13 +327,17 @@ class FlowService {
       data.workspaceId || null,
     );
 
-    // Over-limit lock: if this user's FlowLimit for the active appContext has
-    // overLimitLocked=true, block creation until resolved via upgrade or
-    // /dashboard/limitflows. Each app context is a separate record.
+    // Over-limit lock: if the WORKSPACE OWNER's FlowLimit for the active
+    // appContext has overLimitLocked=true, block creation until resolved via
+    // upgrade or /dashboard/limitflows. Each app context is a separate record.
+    // bug-U4: this keyed on `userId` (the caller) — a member creating inside an
+    // over-limit workspace has no FlowLimit row of their own, so the lock was
+    // missed. The limit belongs to the owner (`workspaceId`), exactly like the
+    // ceiling check below and getLockState/_assertFlowUnlocked.
     if (appContext === "pro" || appContext === "team") {
       const dbAppType = appContext === "pro" ? "individual" : "enterprise";
       const limitRecord = await prisma.flowLimit.findFirst({
-        where: { userId, appType: dbAppType },
+        where: { userId: workspaceId, appType: dbAppType },
         select: { overLimitLocked: true },
       });
       if (limitRecord?.overLimitLocked) {
@@ -651,6 +655,11 @@ class FlowService {
     if (!flow)
       throw new AppError("Access denied or flow not found", 403, "FORBIDDEN");
 
+    // bug-B3: restoring a version overwrote diagramData with no lock check, so
+    // an over-limit owner could rewrite a locked flow the editor refuses to
+    // open or save. Same guard as the open/save paths.
+    await this._assertFlowUnlocked(flow, userId);
+
     // 2. Load the target version.
     const version = await prisma.flowVersion.findFirst({
       where: { id: versionId, flowId },
@@ -778,7 +787,11 @@ class FlowService {
     // it claimed to be a subset of.
     return await prisma.flow.findMany({
       where: {
-        workspaceId: userId,
+        // bug-M11: `resolveWorkspaceScope` OWNS the workspaceId (+ appScope) —
+        // the literal `workspaceId: userId` that used to sit here was dead
+        // (overwritten by the spread) and, if the two were ever reordered,
+        // would silently pin favourites to the caller instead of the resolved
+        // workspace, diverging from the ?isFavorite=true flows list.
         isFavorite: true,
         deletedAt: null,
         ...(await this.resolveWorkspaceScope(
@@ -1619,6 +1632,12 @@ class FlowService {
   async updateDiagramState(id, userId, groupId, newShape) {
     const flow = await this.getFlowById(id, userId);
     if (!flow) throw new AppError("Flow not found", 404, "NOT_FOUND");
+
+    // bug-B2: this write path bypassed the plan lock. An over-limit owner (or
+    // any client) could keep dropping shapes into a marked-for-downgrade /
+    // over-limit flow via PUT /:id/diagram even though open/save refuse it.
+    // Same guard the read/save paths use (getFlowByIdWithAccess / updateFlowWithAccess).
+    await this._assertFlowUnlocked(flow, userId);
 
     // Parse diagramData if stored as string
     let currentData = flow.diagramData || { groups: [] };
