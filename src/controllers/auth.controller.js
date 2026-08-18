@@ -1,6 +1,5 @@
 const { prisma } = require("../lib/prisma");
 const argon2 = require("argon2");
-const bcryptjs = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const asyncHandler = require("../utils/asyncHandler");
@@ -8,6 +7,7 @@ const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const { sendVerificationEmail } = require("../utils/email");
 const securityAlert = require("../services/securityAlert.service");
+const { verifyUserPassword } = require("../utils/verifyUserPassword");
 const userService = require("../services/user.service");
 
 const VERIFY_OTP_TTL_MIN = 15;
@@ -300,21 +300,10 @@ exports.validateUser = asyncHandler(async (req, res) => {
     throw new AppError("Invalid credentials", 401, "INVALID_CREDENTIALS");
   }
 
-  let isValid;
-  if (user.isLegacyBcrypt) {
-    // $2y$ (PHP/Laravel bcrypt) — bcryptjs handles it natively
-    isValid = await bcryptjs.compare(password, user.password);
-    if (isValid) {
-      // Rehash with argon2 so next login is native
-      const newHash = await argon2.hash(password);
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { password: newHash, isLegacyBcrypt: false },
-      });
-    }
-  } else {
-    isValid = await argon2.verify(user.password, password);
-  }
+  // Legacy-bcrypt handling and the argon2 upgrade live in one shared helper so
+  // no call site can forget the branch — which is what silently broke mobile
+  // login, change-password and delete-account for every imported account.
+  const isValid = await verifyUserPassword(user, password);
 
   if (!isValid) {
     logger.warn(`Failed login attempt for: ${email}`);

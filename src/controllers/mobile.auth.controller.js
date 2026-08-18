@@ -1,8 +1,8 @@
 const jwt = require("jsonwebtoken");
-const argon2 = require("argon2");
 const { OAuth2Client } = require("google-auth-library");
 const appleSignin = require("apple-signin-auth");
 const { prisma } = require("../lib/prisma");
+const { verifyUserPassword } = require("../utils/verifyUserPassword");
 const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
@@ -62,6 +62,9 @@ class MobileAuthController {
         email: true,
         image: true,
         password: true,
+        // Required by verifyUserPassword: without it every imported Laravel
+        // account takes the argon2 branch and its correct password reads wrong.
+        isLegacyBcrypt: true,
         userStatus: true,
         suspendedAt: true,
         emailVerified: true,
@@ -95,7 +98,7 @@ class MobileAuthController {
       throw new AppError("Account is inactive", 401, "ACCOUNT_INACTIVE");
     }
 
-    const valid = await argon2.verify(user.password, password);
+    const valid = await verifyUserPassword(user, password);
     if (!valid) {
       throw new AppError(
         "Invalid email or password",

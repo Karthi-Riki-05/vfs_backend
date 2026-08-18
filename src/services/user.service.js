@@ -1,4 +1,5 @@
 const { prisma } = require("../lib/prisma");
+const { verifyUserPassword } = require("../utils/verifyUserPassword");
 const argon2 = require("argon2");
 const crypto = require("crypto");
 const AppError = require("../utils/AppError");
@@ -114,7 +115,7 @@ class UserService {
         "BAD_REQUEST",
       );
     }
-    const valid = await argon2.verify(user.password, currentPassword);
+    const valid = await verifyUserPassword(user, currentPassword);
     if (!valid)
       throw new AppError(
         "Current password is incorrect",
@@ -128,6 +129,7 @@ class UserService {
       // bug-U3: same session invalidation as resetPassword.
       data: {
         password: hashed,
+        isLegacyBcrypt: false,
         refreshToken: null,
         passwordChangedAt: new Date(),
       },
@@ -212,6 +214,11 @@ class UserService {
       // stolen token survives the reset the email claims restores access.
       data: {
         password: hashed,
+        // The new hash is argon2, so the legacy flag MUST be cleared. Leaving
+        // it set sent the next login down the bcrypt branch to compare against
+        // an argon2 string — always false — locking the account out for good,
+        // with further resets unable to recover it.
+        isLegacyBcrypt: false,
         refreshToken: null,
         passwordChangedAt: new Date(),
       },

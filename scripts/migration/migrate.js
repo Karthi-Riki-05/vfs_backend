@@ -38,6 +38,7 @@ const idMaps = {
   users: new Map(), // oldInt → newCuid
   plans: new Map(), // oldInt → newCuid
   teams: new Map(), // oldInt → newCuid
+  teamOwners: new Map(), // newTeamCuid → owner user CUID (TeamMember.workspaceId)
   entGroups: new Map(), // oldInt → newCuid  (enterprise shape groups)
   indGroups: new Map(), // oldInt → newCuid  (individual shape groups)
   entFlows: new Map(), // oldInt → newCuid
@@ -934,6 +935,7 @@ async function migrateTeams() {
 
     const id = createId();
     idMaps.teams.set(toInt(r[ci("id")]), id);
+    idMaps.teamOwners.set(id, ownerId);
     const appType = nullOrStr(r[ci("app_type")]);
 
     records.push({
@@ -978,11 +980,20 @@ async function migrateTeamMembers() {
     if (!userId || !teamId) continue;
 
     const appType = nullOrStr(r[ci("app_type")]);
+    // CHANGE-001: the workspace is the TEAM OWNER's user id, not the member's,
+    // and membership is the `teamIds` array. `teamId` is retained (deprecated,
+    // nullable) only so `prisma db push` does not try to drop the column.
+    const workspaceId = idMaps.teamOwners.get(teamId);
+    if (!workspaceId) continue;
+
     records.push({
       id: createId(),
       userId,
+      workspaceId,
+      teamIds: [teamId],
       teamId,
       role: "MEMBER",
+      appContext: mapAppContext(appType),
       appType: mapAppType(appType),
       createdAt: toDate(r[ci("created_at")]) || new Date(),
     });
@@ -1029,6 +1040,7 @@ async function migrateShapeGroups(sqlFile, appTypeStr, idMap, statKey) {
         appTypeStr === "enterprise" ? "ent_value_chart" : "ind_value_chart",
       name: nullOrStr(r[ci("name")]) || "Group",
       userId,
+      workspaceId: userId,
       isPredefined: toBool(r[ci("is_predefined")]),
       legacyTeamId: toInt(r[ci("team_id")]) || 0,
       appType: mapAppType(appTypeStr),
@@ -1097,6 +1109,7 @@ async function migrateShapes(
       shapeType,
       groupId,
       ownerId,
+      workspaceId: ownerId,
       appType: mapAppType(appTypeStr),
       appContext,
       createdAt: toDate(r[ci("created_at")]) || new Date(),
@@ -1153,7 +1166,12 @@ async function migrateFlows(sqlFile, appTypeStr, flowIdMap, statKey) {
         name: nullOrStr(r[ci("flow_name")]) || "Untitled",
         diagramData: flowData,
         thumbnail: nullOrStr(r[ci("flow_image")]),
-        ownerId: userId,
+        // CHANGE-001 (2026-08-07): `ownerId` was replaced by `workspaceId` (the
+        // tenant this flow lives in) and is now required. `creatorId` must also
+        // be set — `flow.service.resolveWorkspaceScope` filters on it, and a
+        // null would hide every migrated flow from its own owner.
+        workspaceId: userId,
+        creatorId: userId,
         appType: mapAppType(appTypeStr),
         appContext,
         isPublic: false,
@@ -1321,6 +1339,7 @@ async function migrateIssues(sqlFile, appTypeStr, statKey) {
       companyId: toInt(r[ci("company_id")]),
       isChecked: toBool(r[ci("is_checked")]),
       createdById: userId || null,
+      workspaceId: userId || null,
       appType: mapAppType(appTypeStr),
       appContext,
       createdAt: toDate(r[ci("created_at")]) || new Date(),

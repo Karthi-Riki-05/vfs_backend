@@ -1,5 +1,5 @@
 const { prisma } = require("../lib/prisma");
-const argon2 = require("argon2");
+const { verifyUserPassword } = require("../utils/verifyUserPassword");
 const AppError = require("../utils/AppError");
 const { getStripe } = require("../lib/stripe");
 const logger = require("../utils/logger");
@@ -118,7 +118,10 @@ class AccountService {
   async verifyPassword(userId, password) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { password: true },
+      // `isLegacyBcrypt` is required by verifyUserPassword — omitting it sends
+      // imported Laravel accounts down the argon2 branch, which reads their
+      // correct password as wrong.
+      select: { id: true, password: true, isLegacyBcrypt: true },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
     if (!user.password) {
@@ -128,7 +131,7 @@ class AccountService {
         "OAUTH_ACCOUNT",
       );
     }
-    const valid = await argon2.verify(user.password, password);
+    const valid = await verifyUserPassword(user, password);
     if (!valid) {
       throw new AppError("Password is incorrect", 401, "INVALID_CREDENTIALS");
     }
@@ -141,7 +144,7 @@ class AccountService {
   async verifyDeleteAuthorization(userId, { password, confirmation } = {}) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { password: true },
+      select: { id: true, password: true, isLegacyBcrypt: true },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
 
@@ -150,7 +153,7 @@ class AccountService {
       if (!password) {
         throw new AppError("Password is required", 400, "PASSWORD_REQUIRED");
       }
-      const valid = await argon2.verify(user.password, password);
+      const valid = await verifyUserPassword(user, password);
       if (!valid) {
         throw new AppError("Password is incorrect", 401, "INVALID_CREDENTIALS");
       }
