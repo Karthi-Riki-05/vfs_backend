@@ -168,7 +168,20 @@ exports.oauthSync = asyncHandler(async (req, res) => {
   let user = null;
   if (providerVerifiedEmail) {
     user = await prisma.user.findUnique({ where: { email } });
-  } else if (linkKey) {
+  }
+
+  // Verified email did not match (or was not vouched for): fall back to the
+  // provider's OWN subject id. This does not loosen bug-082 — that rule is
+  // "never treat an UNVOUCHED EMAIL as an identity key", and `(provider,
+  // providerAccountId)` is the provider's signed subject, which is strictly
+  // stronger evidence than any address.
+  //
+  // Without this, 761 accounts imported from the old app were unreachable: it
+  // stored `<apple_sub>@valueflowsoft.com` (or a bare provider id) whenever the
+  // provider hid the real address, so Apple/Facebook return an address that
+  // matches nothing and the user silently gets a NEW empty account — orphaning
+  // 528 flows and 38 paid subscriptions.
+  if (!user && linkKey) {
     const link = await prisma.account.findUnique({
       where: { provider_providerAccountId: linkKey },
       include: { user: true },

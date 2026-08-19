@@ -1,5 +1,5 @@
 # Migration Report
-Generated: 2026-06-07T18:39:52.339Z
+Generated: 2026-08-19T08:43:31.262Z
 Mode: FULL MIGRATION
 
 ## Results
@@ -7,36 +7,36 @@ Mode: FULL MIGRATION
 | Table | Migrated |
 |-------|---------|
 | Roles | 5 |
-| Users | 10204 (16277 draft+applogin skipped) |
-| Social accounts | 9455 |
-| Firebase users | 8673 |
+| Users | 10152 (16267 draft+applogin skipped) |
+| Social accounts | 9445 |
+| Firebase users | 8665 |
 | Plans | 5 |
-| Subscriptions | 187 |
-| AI credit balances | 10204 |
-| Teams | 196 |
-| Team members | 14 |
-| Shape groups (enterprise) | 2131 |
-| Shape groups (individual) | 105 |
-| Shapes (enterprise) | 686 |
-| Shapes (individual) | 85 |
-| Flows (enterprise) | 8051 |
-| Flows (individual) | 219 (3432 NULL flow_data skipped) |
-| Flow group users (enterprise) | 67 |
+| Subscriptions | 33 |
+| AI credit balances | 10152 |
+| Teams | 180 |
+| Team members | 227 |
+| Shape groups (enterprise) | 2105 |
+| Shape groups (individual) | 92 |
+| Shapes (enterprise) | 591 |
+| Shapes (individual) | 84 |
+| Flows (enterprise) | 7896 (3387 empty flow_data skipped) |
+| Flows (individual) | 204 (32 empty flow_data skipped) |
+| Flow group users (enterprise) | 59 |
 | Flow group users (individual) | 3 |
-| Flow limits (enterprise) | 11567 |
-| Flow limits (individual) | 155 |
-| Flow publishes | 2 |
-| Issues (enterprise) | 450 |
-| Issues (individual) | 26 |
+| Flow limits (enterprise) | 11444 |
+| Flow limits (individual) | 148 |
+| Flow publishes | 1 |
+| Issues (enterprise) | 320 |
+| Issues (individual) | 13 |
 | Transaction logs | 300 |
-| Chat groups | 127 |
-| Chat messages | 151 |
-| Chat group users | 146 |
-| Chat message users | 25 |
+| Chat groups | 91 |
+| Chat messages | 94 |
+| Chat group users | 98 |
+| Chat message users | 15 |
 | VSM options | 3 |
-| User interests | 12 |
-| Feedback queries | 246 |
-| User actions | 1482 |
+| User interests | 10 |
+| Feedback queries | 243 |
+| User actions | 1213 |
 | Offers | 1 |
 | Promo codes | 1 |
 | Permissions | 30 |

@@ -32,17 +32,78 @@ const IND_SQL = path.join(SQL_DIR, "individual.sql");
 
 const TODAY = new Date();
 
+// Per-user flow allowances, accumulated from the `flow_limit` tables of the two
+// app dumps and applied to the User columns afterwards.
+//   enterprise.sql -> Team app -> teamFlowLimit / teamUnlimitedFlows
+//   individual.sql -> Pro  app -> proFlowLimit  / proUnlimitedFlows
+// The old system stores "unlimited" as the sentinel 1000000000; treat anything
+// implausibly large as unlimited rather than testing that exact number, so a
+// stray 999999999 is not imported as a literal cap.
+const UNLIMITED_SENTINEL = 1_000_000;
+// Schema defaults for User.teamFlowLimit / User.proFlowLimit. An imported
+// allowance is a FLOOR, never a ceiling: the old free tier was 10 flows, so
+// importing it verbatim left 9,921 returning customers more restricted than
+// someone signing up today (who gets 50). Only carry a value across when it
+// beats the platform default; "unlimited" always wins.
+const DEFAULT_TEAM_FLOW_LIMIT = 50;
+const DEFAULT_PRO_FLOW_LIMIT = 10;
+const userFlowAllowance = new Map(); // userCuid → { team?: n|'unlimited', pro?: … }
+
+// ─── Legacy subscription transition window ───────────────────────────────────
+// The old system marks 217 subscriptions (192 users) as `status = 'active'`, but
+// only 8 carry a `plan_endat` in the future — the rest were bought in 2022-23
+// with NO end date ever recorded, so there is no evidence they are still paid.
+// Honouring them forever would hand out permanent free Team access; dropping
+// them outright greets 184 former customers as free users on launch day.
+//
+// Instead they land ACTIVE with a synthetic expiry N days out. The existing
+// daily sweep (`subscriptionService.expireLapsedSubscriptions`, 08:00 UTC) then
+// flips them to `expired`, downgrades the user and notifies them — so the
+// window closes by itself. Set 0 to disable and mark them inactive immediately.
+const LEGACY_GRACE_DAYS = Number.parseInt(
+  process.env.LEGACY_GRACE_DAYS ?? "30",
+  10,
+);
+
+// ─── Excluded legacy accounts ────────────────────────────────────────────────
+// Internal/synthetic accounts from the old system that must NEVER reach the new
+// database: 55 of our own test users (test*, @webronic.com, @test.com,
+// mobiletest/livetest/stripetest, prouser/teamuser…) plus 7 Google Play
+// pre-launch "Nuage Laboratoire" robots on @cloudtestlabaccounts.com.
+//
+// The dumps in sql/*.clean.sql already have these stripped; this set is the
+// second line of defence for a run pointed at the raw dumps by mistake.
+//
+// One guard is enough: every child record resolves its owner through
+// idMaps.users, and each migrator skips a row whose owner is unmapped — so
+// omitting the user here also drops their flows, teams, shapes, chat and subs.
+//
+// Deliberately NOT excluded: 9 accounts that merely matched the substring
+// "test" but look like genuine customers (surnames Testa / Tøstesen /
+// Santestevan, "samisfattest69", etc.). Reviewed and kept 2026-08-18.
+const EXCLUDED_LEGACY_USER_IDS = new Set([
+  12, 14, 15, 19, 27, 33, 44, 46, 49, 50, 52, 53, 67, 71, 75, 82, 84, 86,
+  87, 95, 133, 134, 136, 137, 138, 141, 142, 143, 153, 154, 155, 156, 157,
+  162, 164, 166, 183, 308, 310, 311, 384, 403, 1006, 1020, 1026, 1036,
+  1037, 1049, 1063, 1396, 1709, 1853, 1905, 1918, 2365, 2590, 4992, 7034,
+  18371, 18447, 23005, 25399,
+]);
+
 // ─── ID Maps (old MySQL int → new CUID) ─────────────────────────────────────
 const idMaps = {
   roles: new Map(), // oldInt → newCuid
   users: new Map(), // oldInt → newCuid
   plans: new Map(), // oldInt → newCuid
+  planAppTypes: new Map(), // oldPlanInt → 'enterprise'|'individual'|null
   teams: new Map(), // oldInt → newCuid
   teamOwners: new Map(), // newTeamCuid → owner user CUID (TeamMember.workspaceId)
+  teamsByOwnerApp: new Map(), // `${legacyOwnerUserId}:${appType}` → team CUID
+  reconciledUsers: new Set(), // CUIDs of PRE-EXISTING accounts adopted by email
   entGroups: new Map(), // oldInt → newCuid  (enterprise shape groups)
   indGroups: new Map(), // oldInt → newCuid  (individual shape groups)
   entFlows: new Map(), // oldInt → newCuid
   indFlows: new Map(), // oldInt → newCuid
+  flowOwners: new Map(), // `${appType}:${oldFlowInt}` → owner user CUID
   chatGroups: new Map(), // oldInt → newCuid
   chatMessages: new Map(), // oldInt → newCuid
 };
@@ -51,6 +112,7 @@ const stats = {
   roles: 0,
   users: 0,
   skippedUsers: 0,
+  excludedUsers: 0,
   accounts: 0,
   firebaseUsers: 0,
   plans: 0,
@@ -63,7 +125,9 @@ const stats = {
   indShapes: 0,
   entFlows: 0,
   indFlows: 0,
-  skippedFlows: 0,
+  skippedFlows: 0, // total flows with no diagram data, BOTH apps
+  entEmptyFlows: 0,
+  indEmptyFlows: 0,
   entFlowGroupUsers: 0,
   indFlowGroupUsers: 0,
   entFlowLimits: 0,
@@ -85,6 +149,12 @@ const stats = {
   promoCodes: 0,
   permissions: 0,
   aiCreditBalances: 0,
+  graceGranted: 0,
+  flowAllowances: 0,
+  proRestored: 0,
+  flowShares: 0,
+  teamOwnerGrants: 0,
+  recoveredProviderIds: 0,
 };
 
 // ─── SQL Helpers ─────────────────────────────────────────────────────────────
@@ -317,6 +387,19 @@ function splitSqlRows(valuesStr) {
  * Parses a single SQL row string "(val1, val2, ...)" into an array of values.
  * Handles NULL, numbers, and quoted strings.
  */
+// MySQL string-literal escape sequences, as emitted by mysqldump/TablePlus.
+const MYSQL_ESCAPES = {
+  "0": "\0",
+  b: "\b",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+  Z: "\x1a",
+  "'": "'",
+  '"': '"',
+  "\\": "\\",
+};
+
 function parseValueRow(rowStr) {
   // Strip outer parentheses
   const inner = rowStr.trim().slice(1, -1);
@@ -335,9 +418,19 @@ function parseValueRow(rowStr) {
       continue;
     }
     if (ch === "\\" && inString) {
-      escape = true;
-      current += ch;
-      i++;
+      // MySQL backslash escape. This used to append the BACKSLASH and then the
+      // escaped character, so `\\"` survived as `\\"` instead of `"` — which left
+      // 8,108 of 8,110 diagrams holding `<mxGraphModel dx=\\"1406\\"` and made every
+      // one of them fail to open. Decode the sequence instead.
+      const next = inner[i + 1];
+      // `\\%` and `\\_` are the two sequences MySQL leaves intact (they are only
+      // special to LIKE); every other escape drops the backslash.
+      if (next === "%" || next === "_") {
+        current += ch + next;
+      } else {
+        current += MYSQL_ESCAPES[next] !== undefined ? MYSQL_ESCAPES[next] : next;
+      }
+      i += 2;
       continue;
     }
     if (ch === "'" && !inString) {
@@ -391,6 +484,23 @@ function toDate(v) {
 function toBool(v) {
   return v === "1" || v === "yes" || v === "true";
 }
+/**
+ * Thumbnails in the old system are FILE PATHS on the old server —
+ * `vsm/flow/1356/1767528851_4222.png`, `/uploads/flow/0/…`, bare `*.svg`. Those
+ * files are not in the dump and the paths resolve to nothing on the new host, so
+ * importing them verbatim put a broken image on 8,100 of 8,110 flow cards.
+ *
+ * Keep only thumbnails that can actually render on their own — an embedded
+ * `data:` URI or an absolute URL. Everything else becomes null, which makes
+ * FlowCard fall back to its placeholder icon. They self-heal: the editor
+ * captures and stores a fresh thumbnail the first time a flow is saved.
+ */
+function usableThumbnail(v) {
+  const t = nullOrStr(v);
+  if (!t) return null;
+  return /^(data:|https?:\/\/)/i.test(t) ? t : null;
+}
+
 function nullOrStr(v) {
   return v === null || v === "" ? null : String(v);
 }
@@ -417,6 +527,39 @@ function mapClientType(v) {
   if (v === "ios") return "ios";
   return "web";
 }
+
+/**
+ * Recover the provider's REAL subject id for a social account.
+ *
+ * When Apple/Facebook hid the user's address, the old app invented one from the
+ * provider's own id: `000726.<32 hex>.1444@valueflowsoft.com` (the Apple `sub`)
+ * or `3582109658740190@valueflowsoft.com` (a Facebook id). 14 rows go further and
+ * store the bare id with no domain at all.
+ *
+ * That matters because `remember_token` — the only other candidate — is set on
+ * just 4 of 9,445 social rows, so everyone else was getting the legacy ROW NUMBER
+ * as their provider id. Combined with an unmatchable email, 761 real customers
+ * would sign in with Apple and be handed a brand-new empty account, orphaning
+ * 528 flows and 38 paid subscriptions.
+ *
+ * Only the fabricated addresses are mined: a genuine `12345678@gmail.com` must
+ * never be mistaken for a Facebook id, so the domain has to be ours (or absent).
+ */
+function recoverProviderAccountId(email, rememberToken, legacyId) {
+  const at = email ? email.indexOf("@") : -1;
+  const local = at === -1 ? email : email.slice(0, at);
+  const domain = at === -1 ? "" : email.slice(at + 1).toLowerCase();
+  const fabricated = at === -1 || domain === "valueflowsoft.com";
+
+  if (local && fabricated) {
+    // Apple `sub`, e.g. 000726.3d338e4323504bcf9e87bb7c7aac08be.1444
+    if (/^\d{6}\.[0-9a-f]{32}\.\d{4}$/i.test(local)) return local;
+    // Facebook / LinkedIn numeric id
+    if (/^\d{8,}$/.test(local)) return local;
+  }
+  return rememberToken || String(legacyId);
+}
+
 function mapLoginProvider(loginType) {
   if (loginType === "google") return "google";
   if (loginType === "facebook") return "facebook";
@@ -444,6 +587,39 @@ function mapVsmType(v) {
 }
 
 // ─── Step 0: Validate SQL files exist ───────────────────────────────────────
+
+/**
+ * A generated Prisma client that predates a schema change fails MID-RUN — the
+ * first rehearsal died at migrateTeamMembers on `Unknown argument 'appContext'`
+ * after users, plans and subscriptions were already committed. Check the client
+ * up front so the fix (`npx prisma generate`) costs nothing instead of leaving a
+ * half-populated database behind.
+ */
+function validateClient() {
+  const { Prisma } = require("@prisma/client");
+  const required = {
+    Flow: ["workspaceId", "creatorId"],
+    TeamMember: ["workspaceId", "teamIds", "appContext"],
+    Plan: ["userCount", "subPlanId"],
+  };
+  const missing = [];
+  for (const [model, fields] of Object.entries(required)) {
+    const m = Prisma.dmmf.datamodel.models.find((x) => x.name === model);
+    if (!m) {
+      missing.push(`${model} (model absent)`);
+      continue;
+    }
+    const have = new Set(m.fields.map((f) => f.name));
+    for (const f of fields) if (!have.has(f)) missing.push(`${model}.${f}`);
+  }
+  if (missing.length) {
+    console.error("\n❌ The generated Prisma client is out of date.");
+    console.error(`   Missing: ${missing.join(", ")}`);
+    console.error("   Run:  npx prisma generate\n");
+    process.exit(1);
+  }
+  console.log("✅ Prisma client matches the schema");
+}
 
 function validateFiles() {
   const missing = [MASTER_SQL, ENT_SQL, IND_SQL].filter(
@@ -556,6 +732,13 @@ async function migrateUsers() {
 
   for (const r of rows) {
     const oldId = toInt(r[ci("id")]);
+
+    // Internal/robot account — drop it and everything that hangs off it.
+    if (EXCLUDED_LEGACY_USER_IDS.has(oldId)) {
+      stats.excludedUsers++;
+      continue;
+    }
+
     const status = r[ci("status")];
     const loginType = r[ci("login_type")];
     const email = nullOrStr(r[ci("email")]);
@@ -616,9 +799,13 @@ async function migrateUsers() {
 
     if (isSocial) {
       const provider = mapLoginProvider(loginType);
-      const providerAccountId =
-        nullOrStr(r[ci("remember_token")]) || String(oldId);
+      const providerAccountId = recoverProviderAccountId(
+        email,
+        nullOrStr(r[ci("remember_token")]),
+        oldId,
+      );
       if (provider) {
+        if (providerAccountId !== String(oldId)) stats.recoveredProviderIds++;
         socialAccounts.push({ userId: newId, provider, providerAccountId });
         stats.accounts++;
       }
@@ -643,12 +830,16 @@ async function migrateUsers() {
         const existingCuid = existingEmailToCuid.get(rec.email);
         // Fix ID map to point to existing row
         idMaps.users.set(rec.legacyVsId, existingCuid);
+        idMaps.reconciledUsers.add(existingCuid);
+        // ONLY the legacy id. Deliberately NOT `isLegacyBcrypt`: this row keeps
+        // its OWN (argon2) password — the legacy password is never copied over
+        // it — so importing the legacy flag would send the next login down the
+        // bcrypt branch to compare against an argon2 hash. That is always false,
+        // locking a live account out permanently, and no password reset can undo
+        // it. Any staff address present in BOTH systems would hit this.
         reconcileUpdates.push({
           where: { id: existingCuid },
-          data: {
-            legacyVsId: rec.legacyVsId,
-            isLegacyBcrypt: rec.isLegacyBcrypt,
-          },
+          data: { legacyVsId: rec.legacyVsId },
         });
       } else {
         toInsert.push(rec);
@@ -701,7 +892,10 @@ async function migrateUsers() {
 
   stats.users = toMigrate.length;
   console.log(
-    `   ✓ ${toMigrate.length} users migrated, ${stats.skippedUsers} draft+applogin skipped, ${socialAccounts.length} social accounts`,
+    `   ✓ ${toMigrate.length} users migrated, ${stats.skippedUsers} draft+applogin skipped, ${stats.excludedUsers} internal/robot excluded, ${socialAccounts.length} social accounts` +
+      (stats.recoveredProviderIds
+        ? ` (${stats.recoveredProviderIds} real provider ids recovered)`
+        : ""),
   );
 }
 
@@ -748,21 +942,61 @@ async function migratePlans() {
   const { columns, rows } = await extractRows(MASTER_SQL, "plan");
   const ci = (n) => columns.indexOf(n);
 
+  // The legacy columns are `plan_name` and `cost` — NOT `name`/`price` — and there
+  // is no `app_type` column at all. Reading the wrong names made ci() return -1,
+  // so r[-1] was undefined and nullOrStr(undefined) produced the STRING
+  // "undefined": all five plans upserted onto that one name and the table ended
+  // up with a single bogus row at price 0, with every subscription pointing at it.
+  // The step still printed "✓ 5 plans" because it counts records built, not rows
+  // written, which is why the first migration never surfaced this.
+
+  // `Plan.name` is @unique and the legacy table reuses a name across durations
+  // ("Pro" monthly AND yearly), so a bare name still collapses two rows into one.
+  // Qualify only the names that are actually reused — that reproduces the
+  // "Pro Monthly"/"Team Yearly" convention the seeded plans already use while
+  // leaving a one-off name ("Free") alone, so the upsert matches them.
+  const nameCounts = new Map();
+  for (const r of rows) {
+    const n = nullOrStr(r[ci("plan_name")]);
+    if (n) nameCounts.set(n, (nameCounts.get(n) || 0) + 1);
+  }
+
   const records = rows.map((r) => {
     const legacyId = toInt(r[ci("id")]);
-    const name = nullOrStr(r[ci("name")]) || `Plan_${legacyId}`;
-    const appTypeRaw = nullOrStr(r[ci("app_type")]);
+    const base = nullOrStr(r[ci("plan_name")]) || `Plan_${legacyId}`;
+    const duration = r[ci("duration")] === "yearly" ? "yearly" : "monthly";
+    const name =
+      (nameCounts.get(base) || 0) > 1
+        ? `${base} ${duration === "yearly" ? "Yearly" : "Monthly"}`
+        : base;
+    // Derived, not read: the source has no app_type. The plan family is the only
+    // signal, and it agrees with the store ids in sub_plan_id
+    // (com.valuecharts.app.pro vs .team).
+    const appTypeRaw = /team/i.test(base)
+      ? "enterprise"
+      : /pro/i.test(base)
+        ? "individual"
+        : null;
     return {
       id: createId(), // may not be used if plan already exists by name
       legacyId,
       legacySource: "valueflowsoft_master",
       name,
-      duration: r[ci("duration")] === "yearly" ? "yearly" : "monthly",
-      price: toFloat(r[ci("price")]),
+      duration,
+      noDuration: nullOrStr(r[ci("no_duration")]),
+      price: toFloat(r[ci("cost")]),
       freeTrial: toInt(r[ci("free_trail")]) || 0,
       gracePeriod: toInt(r[ci("grace_period")]) || 0,
+      userAccess: toBool(r[ci("user_access")]),
+      userCount: toInt(r[ci("user_count")]),
+      userCost: r[ci("user_cost")] === null ? null : toFloat(r[ci("user_cost")]),
       status: r[ci("status")] === "inactive" ? "inactive" : "active",
       permissionAccess: safeJson(r[ci("permission_access")]),
+      features: safeJson(r[ci("benefits")]),
+      colorPick: nullOrStr(r[ci("color_pick")]),
+      fontname: nullOrStr(r[ci("fontname")]),
+      subPlanId: safeJson(r[ci("sub_plan_id")]),
+      subTopId: nullOrStr(r[ci("sub_top_id")]),
       appType: mapAppType(appTypeRaw),
       createdAt: toDate(r[ci("created_at")]) || new Date(),
       updatedAt: toDate(r[ci("updated_at")]),
@@ -781,10 +1015,15 @@ async function migratePlans() {
         create: rec,
       });
       idMaps.plans.set(rec.legacyId, dbPlan.id);
+      // Recorded so a subscription can derive its tier from the plan that was
+      // BOUGHT rather than the app the purchase happened in.
+      idMaps.planAppTypes.set(rec.legacyId, rec.appType);
     }
   }
   stats.plans = records.length;
-  console.log(`   ✓ ${records.length} plans`);
+  console.log(
+    `   ✓ ${records.length} plans -> ${idMaps.plans.size} distinct rows in DB`,
+  );
 }
 
 // ─── Step 5: Subscriptions + AiCreditBalances ────────────────────────────────
@@ -797,8 +1036,40 @@ async function migrateSubscriptions() {
   // Track which users get which version (for User.currentVersion update)
   const userVersionUpdates = new Map(); // userId (CUID) → 'team'|'pro'
 
+  // Owners of a LIVE enterprise team, read here because migrateTeams runs later.
+  // In the old system `usersteam.status='active'` + `team_mem` WAS the team plan;
+  // the new app deliberately refuses to infer a plan from team ownership
+  // (bug-086 removed exactly that as a security hole), so a legacy owner whose
+  // payment row had gone stale lost Teams and Chat entirely. Translating that
+  // old-world entitlement into a real subscription row here is the migration's
+  // job — it does not re-open the runtime hole, because the app still trusts
+  // only the subscription.
+  const teamsTable = await extractRows(MASTER_SQL, "usersteam");
+  const tci = (n) => teamsTable.columns.indexOf(n);
+  const activeTeamSeats = new Map(); // legacy owner user id → seats
+  for (const t of teamsTable.rows) {
+    if (
+      t[tci("status")] !== "inactive" &&
+      nullOrStr(t[tci("app_type")]) === "enterprise" &&
+      !toDate(t[tci("deleted_at")])
+    ) {
+      const seats = toInt(t[tci("team_mem")]);
+      const owner = toInt(t[tci("team_owner_id")]);
+      const prev = activeTeamSeats.get(owner) || 0;
+      if (seats && seats > prev) activeTeamSeats.set(owner, seats);
+      else if (!activeTeamSeats.has(owner)) activeTeamSeats.set(owner, seats || 0);
+    }
+  }
+
   const subscriptions = [];
   const creditBalances = []; // per user, per appContext
+  // Legacy Pro lifetime ($1) purchases → userCuid → earliest purchase date.
+  // The new app does NOT read subscriptions for Pro: `planResolver.hasProPurchase`
+  // requires `hasPro && (proPurchasedAt || isLegacyPro)` on the USER row, and the
+  // migration set none of them — so 153 customers who had already bought Pro were
+  // being asked to pay $5 again. `isLegacyPro` exists precisely for this case
+  // ("covers users migrated in before proPurchasedAt existed").
+  const proPurchases = new Map();
 
   for (const r of rows) {
     const userId = idMaps.users.get(toInt(r[ci("user_id")]));
@@ -812,12 +1083,86 @@ async function migrateSubscriptions() {
     const paymentId = nullOrStr(r[ci("payment_id")]);
     const isAdminGrant = paymentId === "admin";
 
-    // True active: not expired OR admin grant
-    const isActive = expiresAt && expiresAt > TODAY;
-    const status = isActive || isAdminGrant ? "active" : "inactive";
-    const appContext = mapAppContext(appType);
+    // The source's own status column — previously ignored entirely, which is why
+    // a Team purchase with no recorded end date migrated as a free account.
+    // The PLAN is authoritative for which app this subscription belongs to.
+    // `app_type` on the purchase row records only where the purchase happened —
+    // the Pro app could sell a Team plan — so 145 Team Yearly subscribers were
+    // being filed as `pro` and 2 Pro Monthly ones as `team`. The row's own
+    // `product_type` agrees with the plan, not with `app_type`.
+    //   plan enterprise -> Team app -> appContext 'team'
+    //   plan individual -> Pro  app -> appContext 'pro'
+    const planAppType = idMaps.planAppTypes.get(toInt(r[ci("plan_id")]));
+    const effectiveAppType = planAppType || mapAppType(appType);
+
+    // Pro lifetime signature. Two forms exist in the dump, both at price 1:
+    //   • payment_id 'individual_intial' — the in-app $1 purchase (161 rows)
+    //   • a real Stripe charge id with app_type 'individual' (23 rows)
+    // A lifetime purchase never lapses, so the row's status is not a gate.
+    const isProLifetime =
+      toFloat(r[ci("price")]) === 1 &&
+      (paymentId === "individual_intial" || appType === "individual");
+    if (isProLifetime) {
+      const boughtAt = toDate(r[ci("created_at")]);
+      const prev = proPurchases.get(userId);
+      if (!prev || (boughtAt && boughtAt < prev)) {
+        proPurchases.set(userId, boughtAt || new Date());
+      }
+      // A lifetime purchase is NOT a subscription, and it must not compete for
+      // the single Subscription row (userId is @unique). Every one of these rows
+      // carries plan_id 20 ("Team Yearly") regardless of what was actually
+      // bought, so leaving them in mislabelled 127 Pro customers as Team and
+      // buried the real Team purchase they were hiding. Ownership is recorded
+      // on the User via hasPro/proPurchasedAt/isLegacyPro instead.
+      continue;
+    }
+
+    const sourceActive = nullOrStr(r[ci("status")]) === "active";
+    const hasFutureExpiry = expiresAt && expiresAt > TODAY;
+
+    let status;
+    let effectiveExpiresAt = expiresAt;
+    if (hasFutureExpiry || isAdminGrant) {
+      // Provably current, or a deliberate comp — leave the dates alone.
+      status = "active";
+    } else if (sourceActive && LEGACY_GRACE_DAYS > 0) {
+      // Claimed active but unprovable: grant the transition window.
+      status = "active";
+      effectiveExpiresAt = new Date(
+        TODAY.getTime() + LEGACY_GRACE_DAYS * 24 * 60 * 60 * 1000,
+      );
+      stats.graceGranted++;
+    } else {
+      status = "inactive";
+    }
+
+    // An admin grant keeps whatever date the old system stored, and several are
+    // in the PAST — leaving the row 'active' with an expiry of 2021-11-02. The
+    // daily sweep (expireLapsedSubscriptions) matches exactly that shape and
+    // would revoke the grant on its next run, so an account restored today would
+    // silently lose access tomorrow. Give any active-but-already-expired row the
+    // same transition window as everything else it cannot date.
+    if (
+      status === "active" &&
+      effectiveExpiresAt &&
+      effectiveExpiresAt <= TODAY &&
+      LEGACY_GRACE_DAYS > 0
+    ) {
+      effectiveExpiresAt = new Date(
+        TODAY.getTime() + LEGACY_GRACE_DAYS * 24 * 60 * 60 * 1000,
+      );
+      stats.graceGranted++;
+    }
+
+    const appContext =
+      effectiveAppType === "enterprise"
+        ? "team"
+        : effectiveAppType === "individual"
+          ? "pro"
+          : "free";
 
     subscriptions.push({
+      _legacyUserId: toInt(r[ci("user_id")]), // stripped before insert
       id: createId(),
       legacyId: toInt(r[ci("id")]),
       legacySource: "valueflowsoft_master",
@@ -829,7 +1174,7 @@ async function migrateSubscriptions() {
       permission: safeJson(r[ci("permission")]),
       isRecurring: toBool(r[ci("is_recurring")]),
       deviceType: mapClientType(r[ci("device_type")]),
-      appType: mapAppType(appType),
+      appType: effectiveAppType,
       usersCount: toInt(r[ci("users_count")]),
       flowsCount: nullOrStr(r[ci("flows_count")]),
       subType:
@@ -844,32 +1189,111 @@ async function migrateSubscriptions() {
       gracePeriod: toInt(r[ci("grace_period")]),
       startedAt: toDate(r[ci("started_at")]),
       status,
-      expiresAt,
+      expiresAt: effectiveExpiresAt,
       appContext,
       createdAt: toDate(r[ci("created_at")]) || new Date(),
       updatedAt: new Date(),
       deletedAt: toDate(r[ci("deleted_at")]),
     });
 
-    // Set user version based on active subscription
+    // Tier comes from the PLAN, not from `app_type`. `app_type` records which
+    // app the purchase was made in (the Pro app could sell a Team plan), so
+    // trusting it handed `pro` to 145 users who had bought Team Yearly — and
+    // `team` to 2 who had bought Pro Monthly. The plan is what they paid for;
+    // the row's own `product_type` agrees with it. Falls back to the old signal
+    // only when the plan carries no app type (e.g. Free).
+    // Tier follows the same plan-derived context, so the user's version, the
+    // subscription's appType and its appContext can never disagree.
     if (status === "active") {
-      userVersionUpdates.set(userId, appContext === "team" ? "team" : "pro");
+      userVersionUpdates.set(userId, appContext === "free" ? "pro" : appContext);
     }
   }
 
-  // Dedup subscriptions: one per userId (Subscription has @unique userId)
-  // Keep the most recently active one if multiple exist
+  // Dedup subscriptions: one per userId (Subscription has @unique userId, so a
+  // user's purchase history cannot be preserved — 554 source rows collapse to
+  // one per user). The previous rule kept whichever row happened to be seen
+  // FIRST unless a later one was active, which for a user with 9 purchases kept
+  // their oldest 2022 row and discarded the 2023 one. Rank explicitly:
+  // active beats inactive, then the later createdAt wins.
+  // Rank by SUBSTANCE. Ranking on recency alone kept a bare retry over the real
+  // purchase: one user had a genuine $216 Team Yearly (30 seats, product_type
+  // set) followed by six identical failed Google Play attempts carrying neither
+  // — and a July retry beat the May purchase, so the account showed 5 seats
+  // instead of 30. A row that records what was actually bought outranks one
+  // that records only that something was attempted.
+  const score = (x) =>
+    (x.status === "active" ? 8 : 0) +
+    (x.productType ? 4 : 0) +
+    (x.usersCount ? 2 : 0);
+  const better = (a, b) => {
+    if (!b) return true;
+    const sa = score(a);
+    const sb = score(b);
+    if (sa !== sb) return sa > sb;
+    return (a.createdAt?.getTime() || 0) > (b.createdAt?.getTime() || 0);
+  };
   const subsByUser = new Map();
   for (const sub of subscriptions) {
-    const existing = subsByUser.get(sub.userId);
-    if (
-      !existing ||
-      (sub.status === "active" && existing.status !== "active")
-    ) {
+    if (better(sub, subsByUser.get(sub.userId))) {
       subsByUser.set(sub.userId, sub);
     }
   }
-  const dedupedSubs = Array.from(subsByUser.values());
+  // ─── Live-team owners: grant the same transition window ──────────────────
+  // Same rule the owner approved for unprovable subscriptions: real evidence of
+  // a paid plan that we cannot date, so honour it for LEGACY_GRACE_DAYS and let
+  // the daily expiry sweep close it. Seats come from the team itself when the
+  // payment row never recorded them.
+  const windowEnd = new Date(
+    TODAY.getTime() + LEGACY_GRACE_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const teamPlanId = idMaps.plans.get(20) || idMaps.plans.values().next().value;
+  for (const [legacyOwnerId, seats] of activeTeamSeats) {
+    const userId = idMaps.users.get(legacyOwnerId);
+    if (!userId || idMaps.reconciledUsers.has(userId)) continue;
+
+    let sub = subsByUser.get(userId);
+    if (sub && sub.status === "active" && sub.appContext === "team") {
+      // Already a live team plan — only fill in seats if they are missing.
+      if (!sub.usersCount && seats) sub.usersCount = seats;
+      continue;
+    }
+
+    if (!sub) {
+      if (!teamPlanId || LEGACY_GRACE_DAYS <= 0) continue;
+      sub = {
+        _legacyUserId: legacyOwnerId,
+        id: createId(),
+        legacySource: "valueflowsoft_master",
+        userId,
+        planId: teamPlanId,
+        paymentId: "legacy_team_owner",
+        price: 0,
+        currency: "usd",
+        isRecurring: false,
+        appType: "enterprise",
+        subType: "users",
+        productType: "team_yearly",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      subsByUser.set(userId, sub);
+    }
+
+    if (LEGACY_GRACE_DAYS > 0) {
+      sub.status = "active";
+      sub.expiresAt = windowEnd;
+      sub.appContext = "team";
+      sub.appType = "enterprise";
+      if (!sub.productType) sub.productType = "team_yearly";
+      if (!sub.usersCount && seats) sub.usersCount = seats;
+      userVersionUpdates.set(userId, "team");
+      stats.teamOwnerGrants++;
+    }
+  }
+
+  const dedupedSubs = Array.from(subsByUser.values()).map(
+    ({ _legacyUserId, ...rest }) => rest,
+  );
 
   if (!DRY_RUN) {
     for (const sub of dedupedSubs) {
@@ -887,6 +1311,27 @@ async function migrateSubscriptions() {
         data: { currentVersion: version },
       });
     }
+
+    // Restore Pro lifetime ownership. `isLegacyPro` is set alongside
+    // `proPurchasedAt` because aiCredit.service reads the flag to give legacy
+    // ($1) Pro the same 50 credits as new ($5) Pro.
+    let proRestored = 0;
+    for (const [userId, boughtAt] of proPurchases) {
+      if (idMaps.reconciledUsers.has(userId)) continue; // never touch a live account
+      const data = {
+        hasPro: true,
+        proPurchasedAt: boughtAt,
+        isLegacyPro: true,
+      };
+      // Pro is their workspace only if a Team plan has not already claimed it —
+      // a user can hold both (Team subscription + the $1 Pro purchase).
+      if (userVersionUpdates.get(userId) !== "team") {
+        data.currentVersion = "pro";
+      }
+      await prisma.user.update({ where: { id: userId }, data });
+      proRestored++;
+    }
+    stats.proRestored = proRestored;
   }
 
   // Create AI credit balances for all migrated users
@@ -916,7 +1361,16 @@ async function migrateSubscriptions() {
   stats.subscriptions = dedupedSubs.length;
   stats.aiCreditBalances = creditBalances.length;
   console.log(
-    `   ✓ ${dedupedSubs.length} subscriptions (${userVersionUpdates.size} active users upgraded)`,
+    `   ✓ ${dedupedSubs.length} subscriptions (${userVersionUpdates.size} active users upgraded)` +
+      (stats.graceGranted
+        ? `, ${stats.graceGranted} on a ${LEGACY_GRACE_DAYS}-day transition window`
+        : "") +
+      (stats.proRestored
+        ? `, ${stats.proRestored} legacy Pro lifetime purchases restored`
+        : "") +
+      (stats.teamOwnerGrants
+        ? `, ${stats.teamOwnerGrants} live-team owners granted the window`
+        : ""),
   );
   console.log(`   ✓ ${creditBalances.length} AI credit balances`);
 }
@@ -937,6 +1391,13 @@ async function migrateTeams() {
     idMaps.teams.set(toInt(r[ci("id")]), id);
     idMaps.teamOwners.set(id, ownerId);
     const appType = nullOrStr(r[ci("app_type")]);
+    // team_members.team_id is the OWNER'S USER ID, not usersteam.id, so the
+    // roster has to be looked up by (owner, app). Verified unique: all 218
+    // teams have a distinct (team_owner_id, app_type) pair.
+    idMaps.teamsByOwnerApp.set(
+      `${toInt(r[ci("team_owner_id")])}:${appType ?? ""}`,
+      id,
+    );
 
     records.push({
       id,
@@ -974,17 +1435,38 @@ async function migrateTeamMembers() {
   const ci = (n) => columns.indexOf(n);
 
   const records = [];
+  let noMember = 0;
+  let noOwner = 0;
+  let noTeam = 0;
   for (const r of rows) {
     const userId = idMaps.users.get(toInt(r[ci("user_id")]));
-    const teamId = idMaps.teams.get(toInt(r[ci("team_id")]));
-    if (!userId || !teamId) continue;
+    if (!userId) {
+      noMember++;
+      continue;
+    }
+
+    // `team_members.team_id` does NOT reference usersteam.id — it holds the TEAM
+    // OWNER'S USER ID (275 of 295 rows match a team owner; only 42 coincide with
+    // a usersteam.id, purely because both id ranges overlap at 2..321). Resolving
+    // it through the teams map therefore dropped 288 of 295 memberships and
+    // silently attached the surviving 7 to unrelated teams — e.g. user 179 was
+    // added to user 1356's workspace. Map it through USERS instead, which is
+    // also exactly what TeamMember.workspaceId wants under CHANGE-001.
+    const legacyOwnerId = toInt(r[ci("team_id")]);
+    const workspaceId = idMaps.users.get(legacyOwnerId);
+    if (!workspaceId) {
+      noOwner++;
+      continue;
+    }
 
     const appType = nullOrStr(r[ci("app_type")]);
-    // CHANGE-001: the workspace is the TEAM OWNER's user id, not the member's,
-    // and membership is the `teamIds` array. `teamId` is retained (deprecated,
-    // nullable) only so `prisma db push` does not try to drop the column.
-    const workspaceId = idMaps.teamOwners.get(teamId);
-    if (!workspaceId) continue;
+    const teamId = idMaps.teamsByOwnerApp.get(
+      `${legacyOwnerId}:${appType ?? ""}`,
+    );
+    if (!teamId) {
+      noTeam++;
+      continue;
+    }
 
     records.push({
       id: createId(),
@@ -1008,7 +1490,10 @@ async function migrateTeamMembers() {
     }
   }
   stats.teamMembers = records.length;
-  console.log(`   ✓ ${records.length} team members`);
+  console.log(
+    `   ✓ ${records.length} team members` +
+      ` (skipped: ${noMember} member not migrated, ${noOwner} owner not migrated, ${noTeam} no matching team)`,
+  );
 }
 
 // ─── Step 8 & 9: Shape Groups ───────────────────────────────────────────────
@@ -1153,11 +1638,17 @@ async function migrateFlows(sqlFile, appTypeStr, flowIdMap, statKey) {
       if (!flowData) {
         skipped++;
         stats.skippedFlows++;
+        if (appTypeStr === "enterprise") stats.entEmptyFlows++;
+        else stats.indEmptyFlows++;
         continue;
       }
 
       const id = createId();
-      flowIdMap.set(toInt(r[ci("id")]), id);
+      const legacyFlowId = toInt(r[ci("id")]);
+      flowIdMap.set(legacyFlowId, id);
+      // Recorded so issues created by an unmigrated user can still land in the
+      // right workspace (see migrateIssues).
+      idMaps.flowOwners.set(`${appTypeStr}:${legacyFlowId}`, userId);
 
       records.push({
         id,
@@ -1165,7 +1656,7 @@ async function migrateFlows(sqlFile, appTypeStr, flowIdMap, statKey) {
         legacySource,
         name: nullOrStr(r[ci("flow_name")]) || "Untitled",
         diagramData: flowData,
-        thumbnail: nullOrStr(r[ci("flow_image")]),
+        thumbnail: usableThumbnail(r[ci("flow_image")]),
         // CHANGE-001 (2026-08-07): `ownerId` was replaced by `workspaceId` (the
         // tenant this flow lives in) and is now required. `creatorId` must also
         // be set — `flow.service.resolveWorkspaceScope` filters on it, and a
@@ -1208,10 +1699,44 @@ async function migrateFlowGroupUsers(
   const ci = (n) => columns.indexOf(n);
 
   const records = [];
+  // `flow_group_user` IS the old sharing table (`type_flow_share` = yes on every
+  // row). It was migrated into FlowGroupUser — a table NOTHING in the app reads;
+  // every service resolves sharing through FlowShare, which the migration never
+  // wrote. So all 149 shares imported into a dead end and "Shared with me" was
+  // empty for everyone. Build the real FlowShare rows here too.
+  const shares = [];
+  const seenShare = new Set(); // FlowShare is @@unique([flowId, sharedWithId])
+  const shareAppContext = appTypeStr === "enterprise" ? "team" : "pro";
+
   for (const r of rows) {
     const flowId = flowIdMap.get(toInt(r[ci("flow_id")]));
     const userId = idMaps.users.get(toInt(r[ci("user_id")]));
     if (!flowId || !userId) continue;
+
+    const sharedById = idMaps.users.get(toInt(r[ci("created_by_id")]));
+    // A share needs both parties, and sharing with yourself is not a share.
+    if (
+      toBool(r[ci("type_flow_share")]) &&
+      sharedById &&
+      sharedById !== userId &&
+      !toDate(r[ci("deleted_at")])
+    ) {
+      const key = `${flowId}:${userId}`;
+      if (!seenShare.has(key)) {
+        seenShare.add(key);
+        shares.push({
+          id: createId(),
+          flowId,
+          sharedById,
+          sharedWithId: userId,
+          // The legacy table records no permission level, only that access was
+          // granted. `view` is the safe reading — never silently hand out edit.
+          permission: "view",
+          appContext: shareAppContext,
+          createdAt: toDate(r[ci("created_at")]) || new Date(),
+        });
+      }
+    }
 
     const groupId = groupIdMap.get(toInt(r[ci("group_id")])) || null;
     records.push({
@@ -1238,9 +1763,18 @@ async function migrateFlowGroupUsers(
         skipDuplicates: true,
       });
     }
+    for (let i = 0; i < shares.length; i += 500) {
+      await prisma.flowShare.createMany({
+        data: shares.slice(i, i + 500),
+        skipDuplicates: true,
+      });
+    }
   }
   stats[statKey] = records.length;
-  console.log(`   ✓ ${records.length} flow group users (${appTypeStr})`);
+  stats.flowShares += shares.length;
+  console.log(
+    `   ✓ ${records.length} flow group users (${appTypeStr}), ${shares.length} flow shares`,
+  );
 }
 
 // ─── Step 15a: Flow Limits ──────────────────────────────────────────────────
@@ -1254,13 +1788,33 @@ async function migrateFlowLimits(sqlFile, appTypeStr, statKey) {
     const userId = idMaps.users.get(toInt(r[ci("user_id")]));
     if (!userId) continue;
 
+    // Remember the allowance so it can be written onto the User row, which is
+    // what getPackStatus actually reads for the usage bar. The flow_limits table
+    // itself is only consulted by the over-limit picker.
+    const totCount = toInt(r[ci("tot_count")]);
+    if (totCount !== null) {
+      const key = appTypeStr === "enterprise" ? "team" : "pro";
+      const slot = userFlowAllowance.get(userId) || {};
+      const value = totCount >= UNLIMITED_SENTINEL ? "unlimited" : totCount;
+      // A user can have more than one row per app; keep the most generous.
+      if (
+        slot[key] === undefined ||
+        slot[key] === "unlimited" ||
+        value === "unlimited" ||
+        value > slot[key]
+      ) {
+        slot[key] = slot[key] === "unlimited" ? "unlimited" : value;
+      }
+      userFlowAllowance.set(userId, slot);
+    }
+
     records.push({
       id: createId(),
       legacyId: toInt(r[ci("id")]),
       legacySource:
         appTypeStr === "enterprise" ? "ent_value_chart" : "ind_value_chart",
       userId,
-      totCount: toInt(r[ci("tot_count")]),
+      totCount,
       flowUsed: toInt(r[ci("flow_used")]),
       flowIds: nullOrStr(r[ci("flow_ids")]),
       appType: mapAppType(appTypeStr),
@@ -1325,8 +1879,23 @@ async function migrateIssues(sqlFile, appTypeStr, statKey) {
   const ci = (n) => columns.indexOf(n);
 
   const records = [];
+  let orphaned = 0;
   for (const r of rows) {
     const userId = idMaps.users.get(toInt(r[ci("created_by")]));
+    const legacyFlowId = toInt(r[ci("flow_id")]);
+    const flowOwner = idMaps.flowOwners.get(`${appTypeStr}:${legacyFlowId}`);
+
+    // Every issue in the source is attached to a flow (verified: 0 rows with
+    // flow_id 0 or NULL), so an issue whose flow did not migrate — because the
+    // flow's creator was skipped, or the flow had NULL flow_data — is a dangling
+    // reference to a diagram that no longer exists. Importing it produced 110
+    // dead rows, 76 of which had a creator and so would surface in the UI against
+    // a phantom flow. Skipped, matching how every other child table here drops a
+    // row whose parent is unmapped.
+    if (!flowOwner) {
+      orphaned++;
+      continue;
+    }
 
     records.push({
       id: createId(),
@@ -1339,7 +1908,11 @@ async function migrateIssues(sqlFile, appTypeStr, statKey) {
       companyId: toInt(r[ci("company_id")]),
       isChecked: toBool(r[ci("is_checked")]),
       createdById: userId || null,
-      workspaceId: userId || null,
+      // Fall back to the OWNER OF THE FLOW the issue belongs to. 34 issues were
+      // raised by users who are not migrated (skipped drafts); with a null
+      // workspace they exist but are invisible to every workspace-scoped query.
+      // Attribution (`createdById`) stays honest and stays null.
+      workspaceId: userId || flowOwner,
       appType: mapAppType(appTypeStr),
       appContext,
       createdAt: toDate(r[ci("created_at")]) || new Date(),
@@ -1355,7 +1928,10 @@ async function migrateIssues(sqlFile, appTypeStr, statKey) {
     }
   }
   stats[statKey] = records.length;
-  console.log(`   ✓ ${records.length} issues (${appTypeStr})`);
+  console.log(
+    `   ✓ ${records.length} issues (${appTypeStr})` +
+      (orphaned ? `, ${orphaned} skipped — parent flow not migrated` : ""),
+  );
 }
 
 // ─── Step 15d: Transactions ─────────────────────────────────────────────────
@@ -1749,6 +2325,71 @@ async function migrateSmallTables() {
   }
 }
 
+
+// ─── Apply flow allowances to the User row ──────────────────────────────────
+/**
+ * `getPackStatus` (flow.service) draws the usage bar from User.teamFlowLimit /
+ * teamUnlimitedFlows / proFlowLimit / proUnlimitedFlows — NOT from the
+ * flow_limits table. Those four columns were never written, so every migrated
+ * user fell back to the schema defaults (team 50, pro 10) and a legitimately
+ * unlimited account showed "122 / 50" with a red over-limit bar.
+ *
+ * Pre-existing accounts adopted by email are skipped: their current limits are
+ * live billing state and must not be overwritten by 2022 numbers.
+ */
+async function applyFlowAllowances() {
+  console.log("\n[15g] Applying flow allowances to users...");
+  let team = 0;
+  let pro = 0;
+  let unlimited = 0;
+  let floored = 0;
+  let skipped = 0;
+
+  for (const [userId, slot] of userFlowAllowance) {
+    if (idMaps.reconciledUsers.has(userId)) {
+      skipped++;
+      continue;
+    }
+    const data = {};
+    if (slot.team !== undefined) {
+      if (slot.team === "unlimited") {
+        data.teamUnlimitedFlows = true;
+        unlimited++;
+        team++;
+      } else if (slot.team > DEFAULT_TEAM_FLOW_LIMIT) {
+        data.teamFlowLimit = slot.team;
+        team++;
+      } else {
+        floored++; // keep the platform default — it is more generous
+      }
+    }
+    if (slot.pro !== undefined) {
+      if (slot.pro === "unlimited") {
+        data.proUnlimitedFlows = true;
+        unlimited++;
+        pro++;
+      } else if (slot.pro > DEFAULT_PRO_FLOW_LIMIT) {
+        data.proFlowLimit = slot.pro;
+        pro++;
+      } else {
+        floored++;
+      }
+    }
+    if (Object.keys(data).length === 0) continue;
+    if (!DRY_RUN) {
+      await prisma.user.update({ where: { id: userId }, data });
+    }
+  }
+  stats.flowAllowances = team + pro;
+  console.log(
+    `   \u2713 ${team} team + ${pro} pro allowances applied (${unlimited} unlimited)` +
+      (floored
+        ? `, ${floored} kept the platform default (legacy value was lower)`
+        : "") +
+      (skipped ? `, ${skipped} pre-existing accounts left untouched` : ""),
+  );
+}
+
 // ─── Verification ────────────────────────────────────────────────────────────
 
 async function verifyMigration() {
@@ -1835,8 +2476,8 @@ Mode: ${DRY_RUN ? "DRY RUN (no DB writes)" : "FULL MIGRATION"}
 | Shape groups (individual) | ${stats.indGroups} |
 | Shapes (enterprise) | ${stats.entShapes} |
 | Shapes (individual) | ${stats.indShapes} |
-| Flows (enterprise) | ${stats.entFlows} |
-| Flows (individual) | ${stats.indFlows} (${stats.skippedFlows} NULL flow_data skipped) |
+| Flows (enterprise) | ${stats.entFlows} (${stats.entEmptyFlows} empty flow_data skipped) |
+| Flows (individual) | ${stats.indFlows} (${stats.indEmptyFlows} empty flow_data skipped) |
 | Flow group users (enterprise) | ${stats.entFlowGroupUsers} |
 | Flow group users (individual) | ${stats.indFlowGroupUsers} |
 | Flow limits (enterprise) | ${stats.entFlowLimits} |
@@ -1874,6 +2515,7 @@ async function main() {
   console.log("=".repeat(60));
 
   validateFiles();
+  validateClient();
 
   if (DRY_RUN) {
     await dryRun();
@@ -1948,6 +2590,10 @@ async function main() {
   console.log("\n[15a/15] Migrating flow limits...");
   await migrateFlowLimits(ENT_SQL, "enterprise", "entFlowLimits");
   await migrateFlowLimits(IND_SQL, "individual", "indFlowLimits");
+
+  // Must run AFTER both flow_limit passes so a user present in both apps gets
+  // both columns from one update.
+  await applyFlowAllowances();
 
   await migrateFlowPublishes();
 

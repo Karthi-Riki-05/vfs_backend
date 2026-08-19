@@ -208,6 +208,9 @@ class MobileAuthController {
     }
 
     let email, name, image;
+    // The provider's subject id — the only stable identity key when the address
+    // is hidden or was fabricated by the old app (see oauthSync for the detail).
+    let providerSub = null;
 
     if (provider === "google") {
       let payload;
@@ -237,6 +240,7 @@ class MobileAuthController {
       email = payload.email;
       name = payload.name;
       image = payload.picture;
+      providerSub = payload.sub || null;
     } else if (provider === "apple") {
       let applePayload;
       try {
@@ -253,6 +257,7 @@ class MobileAuthController {
       email = applePayload.email;
       name = req.body.name || null;
       image = null;
+      providerSub = applePayload.sub || null;
     } else {
       throw new AppError("Unsupported provider", 400, "INVALID_PROVIDER");
     }
@@ -266,6 +271,22 @@ class MobileAuthController {
     }
 
     let user = await prisma.user.findUnique({ where: { email } });
+
+    // Same fallback as the web path: an imported account may carry a fabricated
+    // address, so match the provider's signed subject id before concluding this
+    // is a new person.
+    if (!user && providerSub) {
+      const link = await prisma.account.findUnique({
+        where: {
+          provider_providerAccountId: {
+            provider,
+            providerAccountId: String(providerSub),
+          },
+        },
+        include: { user: true },
+      });
+      user = link?.user || null;
+    }
 
     if (!user) {
       user = await prisma.user.create({
@@ -290,6 +311,32 @@ class MobileAuthController {
           where: { id: user.id },
           data: updates,
         });
+      }
+    }
+
+    // Persist the provider link so this account stays reachable by subject id on
+    // every later sign-in, even if the provider stops sharing the address.
+    // Parity with the web oauthSync path, which has always done this.
+    if (providerSub) {
+      try {
+        await prisma.account.upsert({
+          where: {
+            provider_providerAccountId: {
+              provider,
+              providerAccountId: String(providerSub),
+            },
+          },
+          create: {
+            userId: user.id,
+            type: "oauth",
+            provider,
+            providerAccountId: String(providerSub),
+          },
+          update: { userId: user.id },
+        });
+      } catch (err) {
+        // Non-fatal: the user is already authenticated.
+        logger.warn(`[mobile] account link upsert failed: ${err.message}`);
       }
     }
 

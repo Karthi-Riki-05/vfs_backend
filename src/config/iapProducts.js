@@ -99,9 +99,21 @@ const IAP_PRODUCTS = {
   "com.valuecharts.pro.unltd_flows": { type: "flow_addon", plan: "unlimited" },
 
   // ── AI credit packs (consumables, both apps) ───────────────────────────
+  // TEAM app ids. Sold from the Team shell on both platforms.
   aicredits_50: { type: "ai_credits", credits: 50, packType: "starter" },
   aicredits_100: { type: "ai_credits", credits: 100, packType: "standard" },
   aicredits_200: { type: "ai_credits", credits: 200, packType: "proppack" },
+  // PRO app ids — same three packs, same entitlements, different strings.
+  // WHY the suffix (2026-08-19): Apple scopes a product id to the DEVELOPER
+  // TEAM, not the app, so `aicredits_50` — already created under the Team app
+  // — can never be reused by the Pro app ("already being used by another
+  // in-app purchase associated with this team"). Play scopes per package and
+  // would have allowed reuse, but using the same `_pro` string on BOTH stores
+  // keeps the lookup keyed on variant alone instead of variant × platform.
+  // Resolved client-side by aiCreditProductId() in frontend/lib/iapBridge.ts.
+  aicredits_50_pro: { type: "ai_credits", credits: 50, packType: "starter" },
+  aicredits_100_pro: { type: "ai_credits", credits: 100, packType: "standard" },
+  aicredits_200_pro: { type: "ai_credits", credits: 200, packType: "proppack" },
 };
 
 // ── Team seat subscriptions (Team app) — generated matrix ────────────────
