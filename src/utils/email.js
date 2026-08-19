@@ -581,92 +581,6 @@ This code expires in 15 minutes. If you didn't create an account, ignore this em
   }
 }
 
-/**
- * OTP-styled password reset for the native mobile shell — the web reset flow
- * (sendPasswordResetEmail) emails a link because the browser can host the
- * `/reset-password?token=` page; a native Flutter screen has no browser to
- * open, so it needs a short code it can render an input for instead. Same
- * 15-minute TTL and OTP visual style as sendVerificationEmail, different copy.
- */
-async function sendPasswordResetOtpEmail({ to, name, otp }) {
-  const safeName = escapeHtml(name || "there");
-  const mailOptions = {
-    from:
-      process.env.SMTP_FROM ||
-      process.env.SMTP_USER ||
-      "noreply@valuecharts.com",
-    to: resolveRecipient(to),
-    subject: `Your ValueChart password reset code: ${otp}`,
-    html: `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin:0; padding:0; background-color:#f5f5f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5; padding:40px 0;">
-    <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
-          <tr>
-            <td style="background-color:#34A881; padding:32px 40px; text-align:center;">
-              <table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 auto 14px;">
-                <tr><td style="background-color:#ffffff; border-radius:12px; padding:8px 16px;">
-                  <img src="${APP_URL()}/images/image.png" alt="ValueChart" width="150" style="display:block; border:0; height:auto;">
-                </td></tr>
-              </table>
-              <p style="color:rgba(255,255,255,0.9); margin:0; font-size:14px;">AI-Powered Diagramming</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:40px;">
-              <h2 style="color:#1a1a1a; text-align:center; margin:0 0 16px 0; font-size:22px; font-weight:600;">Reset Your Password</h2>
-              <p style="color:#555555; font-size:16px; line-height:1.6;">Hi ${safeName},</p>
-              <p style="color:#555555; font-size:16px; line-height:1.6;">Use the code below in the app to reset your password.</p>
-              <div style="text-align:center; margin:32px 0;">
-                <div style="display:inline-block; background:#F0FDF4; border:2px solid #34A881; border-radius:12px; padding:18px 32px; font-size:32px; font-weight:700; letter-spacing:8px; color:#15803D; font-family:'Courier New', monospace;">
-                  ${otp}
-                </div>
-              </div>
-              <p style="color:#999999; font-size:13px; text-align:center;">This code expires in <strong>15 minutes</strong>.</p>
-              <p style="color:#999999; font-size:13px; text-align:center;">If you didn't request this, you can safely ignore this email.</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="background-color:#f8f9fa; padding:24px 40px; border-top:1px solid #eeeeee;">
-              <p style="color:#bbbbbb; font-size:11px; text-align:center; margin:0;">&copy; ${new Date().getFullYear()} ValueChart. All rights reserved.</p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-        `,
-    text: `Hi ${name || "there"},
-
-Your ValueChart password reset code is: ${otp}
-
-This code expires in 15 minutes. If you didn't request this, ignore this email.`,
-  };
-
-  try {
-    const info = await transporter.sendMail(mailOptions);
-    logger.info(`Password reset OTP email sent to ${to}`);
-    const previewUrl = nodemailer.getTestMessageUrl(info);
-    if (previewUrl) {
-      logger.info(`Mail preview URL: ${previewUrl}`);
-    }
-  } catch (error) {
-    logger.error(
-      `Failed to send password reset OTP email to ${to}: ${error.message}`,
-    );
-    throw error;
-  }
-}
-
 async function sendEmail({ to, subject, html, text }) {
   if (!process.env.SMTP_USER) {
     logger.warn("[Email] SMTP not configured — skipping send");
@@ -902,7 +816,6 @@ module.exports = {
   sendFlowShareEmail,
   sendFlowShareProRequiredEmail,
   sendPasswordResetEmail,
-  sendPasswordResetOtpEmail,
   sendVerificationEmail,
   sendEmail,
   emailTemplates,
