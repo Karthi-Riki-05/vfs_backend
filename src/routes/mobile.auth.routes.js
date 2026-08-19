@@ -280,4 +280,77 @@ router.post("/register-device", authenticate, c.registerDevice);
  */
 router.get("/app-version", c.appVersion);
 
+/**
+ * @swagger
+ * /api/v1/auth/mobile/forgot-password:
+ *   post:
+ *     summary: Request a password reset code for the native app (email, not link)
+ *     tags: [Mobile Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *     responses:
+ *       200: { description: Always success, does not reveal account existence }
+ */
+router.post("/forgot-password", authLimiter, c.forgotPassword);
+
+/**
+ * @swagger
+ * /api/v1/auth/mobile/reset-password-otp:
+ *   post:
+ *     summary: Reset password using the 6-digit code from forgot-password
+ *     tags: [Mobile Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, otp, newPassword]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               otp: { type: string, example: "123456" }
+ *               newPassword: { type: string }
+ *     responses:
+ *       200: { description: Password reset }
+ *       400: { description: Invalid or expired code }
+ */
+router.post("/reset-password-otp", authLimiter, c.resetPasswordOtp);
+
+/**
+ * @swagger
+ * /api/v1/auth/mobile/handoff-ott:
+ *   post:
+ *     summary: Mint a one-time ticket so the WebView can pick up the native session
+ *     description: >
+ *       Call this right after a successful native login/register/social
+ *       sign-in. Load the returned ott via the shell's existing
+ *       nativeAuthUrl(ott) helper (same one biometric unlock already uses)
+ *       to open the WebView pre-authenticated.
+ *     tags: [Mobile Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: One-time ticket minted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     ott: { type: string }
+ *                     expiresIn: { type: integer, example: 60 }
+ */
+router.post("/handoff-ott", authenticate, c.handoffOtt);
+
 module.exports = router;

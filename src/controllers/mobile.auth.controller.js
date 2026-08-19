@@ -1,4 +1,6 @@
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const argon2 = require("argon2");
 const { OAuth2Client } = require("google-auth-library");
 const appleSignin = require("apple-signin-auth");
 const { prisma } = require("../lib/prisma");
@@ -7,6 +9,30 @@ const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const flowService = require("../services/flow.service");
+const { sendPasswordResetOtpEmail } = require("../utils/email");
+
+const RESET_OTP_TTL_MIN = 15;
+// Lifetime of the native-login -> WebView hand-off ticket. Mirrors
+// biometric.auth.controller.js's OTT_TTL_SECONDS — deliberately tiny, single-use.
+const NATIVE_OTT_TTL_SECONDS = Number(
+  process.env.BIOMETRIC_OTT_TTL_SECONDS || 60,
+);
+
+// passwordResets has no expiry column — the 15-minute window is re-derived
+// from createdAt in resetPasswordOtp below, so this only generates the code.
+function generateResetOtp() {
+  const num = crypto.randomInt(0, 1000000);
+  return String(num).padStart(6, "0");
+}
+
+/** Opaque, high-entropy secret — same shape as biometric.auth.controller.js. */
+function mintOttToken() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function hashOttToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
 
 function signAccessToken(userId) {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "7d" });
@@ -566,6 +592,134 @@ class MobileAuthController {
         url: `${baseUrl}/mobile/editor/${flowId}?token=${shortToken}`,
         expiresIn: 3600,
       },
+    });
+  });
+
+  /**
+   * POST /api/v1/auth/mobile/forgot-password   (open)
+   *
+   * Native counterpart to POST /api/v1/users/forgot-password. That web flow
+   * emails a link to `${NEXTAUTH_URL}/reset-password?token=`, which only makes
+   * sense inside a browser — the native shell has no browser tab to open, so
+   * this emails a 6-digit code instead, in the same passwordResets table
+   * (deleteMany-then-create, same as user.service.js requestPasswordReset).
+   */
+  forgotPassword = asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    if (!email || typeof email !== "string") {
+      throw new AppError("Email is required", 400, "VALIDATION_ERROR");
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    // Always respond success — do not reveal whether the account exists.
+    if (user) {
+      const otp = generateResetOtp();
+      const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+      await prisma.passwordReset.deleteMany({ where: { email } });
+      await prisma.passwordReset.create({
+        data: { email, token: otpHash },
+      });
+      try {
+        await sendPasswordResetOtpEmail({ to: email, name: user.name, otp });
+      } catch (err) {
+        logger.error(
+          `Password reset OTP email failed for ${email}: ${err.message}`,
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        message: "If your account exists, a reset code was sent.",
+      },
+    });
+  });
+
+  /**
+   * POST /api/v1/auth/mobile/reset-password-otp   (open)
+   */
+  resetPasswordOtp = asyncHandler(async (req, res) => {
+    const { email, otp, newPassword } = req.body;
+    if (!email || !otp || !newPassword) {
+      throw new AppError(
+        "Email, code and new password are required",
+        400,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+    const reset = await prisma.passwordReset.findFirst({
+      where: { email, token: otpHash },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!reset) {
+      throw new AppError("Invalid or expired code", 400, "INVALID_OTP");
+    }
+
+    const otpExpiry = new Date(
+      Date.now() - RESET_OTP_TTL_MIN * 60 * 1000,
+    );
+    if (reset.createdAt < otpExpiry) {
+      throw new AppError("Code expired. Please request a new one.", 400, "OTP_EXPIRED");
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (
+      !user ||
+      user.userStatus === "deleted" ||
+      user.suspendedAt !== null
+    ) {
+      throw new AppError("Invalid or expired code", 400, "INVALID_OTP");
+    }
+
+    const hashed = await argon2.hash(newPassword);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: hashed,
+        isLegacyBcrypt: false,
+        refreshToken: null, // bug-U3 parity: reset must invalidate other sessions
+        passwordChangedAt: new Date(),
+      },
+    });
+    await prisma.passwordReset.deleteMany({ where: { email } });
+
+    logger.info(`Password reset via mobile OTP: ${user.id}`);
+    res.json({
+      success: true,
+      data: { message: "Password reset successfully" },
+    });
+  });
+
+  /**
+   * POST /api/v1/auth/mobile/handoff-ott   (authenticate)
+   *
+   * Lets ANY successful native login (password, Google, Apple — not just an
+   * enrolled biometric device) open the WebView already signed in. Mints a
+   * biometricOtt row directly for the bearer-authenticated user and reuses
+   * the existing /native page + biometric CredentialsProvider unchanged
+   * (biometric.auth.controller.js#consume only ever needed a userId + a
+   * deviceId to log, never actually re-validated against a real
+   * BiometricDevice row) — so no schema change or new NextAuth provider.
+   */
+  handoffOtt = asyncHandler(async (req, res) => {
+    const ott = mintOttToken();
+    await prisma.biometricOtt.create({
+      data: {
+        tokenHash: hashOttToken(ott),
+        userId: req.user.id,
+        deviceId: req.body?.deviceId || "native-login",
+        expiresAt: new Date(Date.now() + NATIVE_OTT_TTL_SECONDS * 1000),
+      },
+    });
+
+    logger.info(`[native-login] handoff ott minted: user=${req.user.id}`);
+
+    res.json({
+      success: true,
+      data: { ott, expiresIn: NATIVE_OTT_TTL_SECONDS },
     });
   });
 }
