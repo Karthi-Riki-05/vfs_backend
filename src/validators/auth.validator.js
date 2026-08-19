@@ -36,8 +36,10 @@ const oauthSyncSchema = z.object({
       .max(255)
       .trim()
       .toLowerCase(),
-    name: z.string().max(100).trim().optional(),
-    image: z.string().max(500).optional(),
+    name: z.string().max(100).trim().nullable().optional(),
+    // Apple's next-auth profile() always returns image: null (no photo API) —
+    // .optional() alone rejects an explicit null, only an omitted key.
+    image: z.string().max(500).nullable().optional(),
     provider: z.string().min(1).max(50),
     // Without these, Zod strips them (validate.js replaces req.body with the
     // parsed result) and the Account.upsert guard `if (provider && providerAccountId)`
