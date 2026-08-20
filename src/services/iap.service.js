@@ -382,6 +382,12 @@ class IapService {
             userId,
             plan: product.period,
             teamMembers: String(product.seats),
+            // Lets the shared Stripe handler tell a RENEWAL from a first
+            // purchase. _grant routes both here, so without this every
+            // renewal re-sent the "Payment confirmed" push and receipt email
+            // (once per ~5 min on a license-tester subscription). Stripe
+            // sessions never set it, so web checkout is unaffected.
+            isRenewal: event?.type === "RENEWAL" ? "true" : "false",
           },
         },
         product,

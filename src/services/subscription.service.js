@@ -1464,6 +1464,17 @@ class SubscriptionService {
         update: {
           planId: dbPlan.id,
           status: "active",
+          // MUST be cleared: _handleSubscriptionDeleted soft-deletes this row
+          // on expiry/refund, and every access gate short-circuits on it —
+          // `isSubscriptionLive` opens with `if (!sub || sub.deletedAt) return
+          // false` and `paidOwnerWhere` requires `deletedAt: null`. Leaving it
+          // set meant a user who RE-subscribed after a previous plan ended paid
+          // in full, got status='active' with a future expiresAt, and still
+          // read as Free everywhere. Observed 2026-08-20 on a real Play
+          // purchase: active + expiresAt 2026-09-20 + deletedAt 10:16 → the UI
+          // showed "free account" while users.currentVersion said "team".
+          // First-time buyers never hit it — there is no old row to un-delete.
+          deletedAt: null,
           paymentId: session.subscription || session.payment_intent,
           price,
           usersCount: members,
@@ -1587,38 +1598,67 @@ class SubscriptionService {
       `Subscription activated for user ${userId}: ${plan}, ${members} members`,
     );
 
-    // Fire-and-forget receipt email (non-blocking)
-    prisma.user
-      .findUnique({
-        where: { id: userId },
-        select: { name: true, email: true },
-      })
-      .then((u) => {
-        if (u?.email) {
-          const tpl = emailTemplates.paymentSuccess(
-            u,
-            session.amount_total || 0,
-            dbPlan.name,
-          );
-          return sendEmail({ to: u.email, ...tpl });
-        }
-      })
-      .catch((err) =>
-        logger.error(`[Email] paymentSuccess send failed: ${err.message}`),
+    // Fire-and-forget receipt email (non-blocking).
+    // Suppressed on a store RENEWAL for the same reason as the push below —
+    // a 5-minute test renewal cycle would otherwise email the user every
+    // 5 minutes. A real renewal receipt is a separate, deliberate feature;
+    // re-sending the NEW-PURCHASE receipt is simply wrong.
+    const isRenewal = session?.metadata?.isRenewal === "true";
+    if (isRenewal) {
+      logger.info(
+        `[Email] paymentSuccess suppressed for user ${userId} — renewal, not a new purchase`,
       );
+    }
+    if (!isRenewal)
+      prisma.user
+        .findUnique({
+          where: { id: userId },
+          select: { name: true, email: true },
+        })
+        .then((u) => {
+          if (u?.email) {
+            const tpl = emailTemplates.paymentSuccess(
+              u,
+              session.amount_total || 0,
+              dbPlan.name,
+            );
+            return sendEmail({ to: u.email, ...tpl });
+          }
+        })
+        .catch((err) =>
+          logger.error(`[Email] paymentSuccess send failed: ${err.message}`),
+        );
 
-    // Best-effort push notification.
-    try {
-      const push = require("./push.service");
-      // "team" scopes delivery to Team-app devices — omitting it broadcast
-      // this Team purchase push to the user's Pro app too (bug-052).
-      await push.sendPushToUser(
-        userId,
-        push.builders.paymentSuccess({ planName: dbPlan?.name || "Team plan" }),
-        "team",
+    // Best-effort push notification — FIRST purchase only.
+    //
+    // Store RENEWALS reuse this whole handler (iap.service._grant routes both
+    // INITIAL_PURCHASE and RENEWAL here), so without this guard every renewal
+    // re-announced "Payment confirmed" as though the user had just bought.
+    // Harmless-looking monthly, but Google renews LICENSE-TESTER subscriptions
+    // roughly every 5 minutes, which on 2026-08-20 produced a banner every
+    // 5 minutes on the tester's phone. It only surfaced that day because RTDN
+    // had never been delivered before, so renewals were simply never processed.
+    //
+    // Stripe sessions never carry this flag, so web checkout is unchanged.
+    if (isRenewal) {
+      logger.info(
+        `[push] paymentSuccess suppressed for user ${userId} — renewal, not a new purchase`,
       );
-    } catch (err) {
-      logger.warn(`[push] paymentSuccess notify skipped: ${err.message}`);
+    } else {
+      try {
+        const push = require("./push.service");
+        // "team" scopes delivery to Team-app devices — omitting it broadcast
+        // this Team purchase push to the user's Pro app too (bug-052).
+        await push.sendPushToUser(
+          userId,
+          push.builders.paymentSuccess({
+            planName: dbPlan?.name || "Team plan",
+          }),
+          "team",
+        );
+      } catch (err) {
+        logger.warn(`[push] paymentSuccess notify skipped: ${err.message}`);
+      }
     }
 
     // In-app notification (non-blocking). Credit amount is seat-scaled.
