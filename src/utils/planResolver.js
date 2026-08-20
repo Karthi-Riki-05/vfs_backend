@@ -36,11 +36,25 @@ const OWNER_PLAN_SELECT = {
 };
 
 /**
- * A subscription row keeps status='active' even after it lapses — there is NO
- * cron that flips it to 'expired' (status only moves via a Stripe webhook or an
- * admin action). So status alone is not proof of a live plan; the paid period
- * must also not have ended. 'cancelling' = cancel_at_period_end set, access
- * runs to expiresAt (see bug-033).
+ * Both conditions are load-bearing: status AND the paid period.
+ *
+ * A subscription row can keep status='active' after it has actually lapsed, so
+ * status alone is not proof of a live plan. Status moves via a store/Stripe
+ * webhook, an admin action, or the daily 08:00 UTC `expireLapsedSubscriptions`
+ * sweep registered in index.js — but a webhook can be missed and the sweep runs
+ * at most once a day, so between lapse and sweep the row still reads 'active'.
+ * Hence the expiresAt check.
+ * (An earlier version of this comment claimed no such cron existed. It does —
+ * corrected 2026-08-20 — but that does not make the date check redundant.)
+ *
+ * The date check is NOT sufficient on its own either, which the same day
+ * demonstrated: a cancelled Play subscription had expiresAt a month in the
+ * FUTURE (Google expires test subscriptions in ~5 minutes while we record the
+ * nominal period), so a date-only test would have kept granting a 5-seat team
+ * plan for a month. The status check caught it. Keep both, in this order.
+ *
+ * 'cancelling' = cancel_at_period_end set — access legitimately runs to
+ * expiresAt (see bug-033).
  */
 function isSubscriptionLive(sub) {
   if (!sub || sub.deletedAt) return false;
@@ -71,8 +85,10 @@ function hasProPurchase(user) {
  * @returns {'free'|'pro'|'team'}
  */
 function resolveOwnedPlan(user) {
-  return planFromSubscription(user?.subscription) ||
-    (hasProPurchase(user) ? "pro" : "free");
+  return (
+    planFromSubscription(user?.subscription) ||
+    (hasProPurchase(user) ? "pro" : "free")
+  );
 }
 
 /**
