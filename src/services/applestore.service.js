@@ -81,6 +81,37 @@ function mapNotificationType(notificationType, subtype) {
   }
 }
 
+/**
+ * The dedup key for an Apple event. Derived from the TRANSACTION, never from
+ * the delivery — the exact mistake that made every Google purchase grant twice
+ * (see googleplay.service.playEventId and commit 74bbdd2).
+ *
+ * The same purchase reaches us through two independent channels:
+ *   1. the app's authenticated POST /iap/validate  → `ap:<transactionId>`
+ *   2. App Store Server Notifications V2           → previously
+ *      `ap-ntf:<notificationUUID>`
+ *
+ * A notificationUUID is unique per DELIVERY, so those two could never collide
+ * and both would grant. Apple also RETRIES notifications, so a mere redelivery
+ * carried a fresh UUID and re-granted as well. This was latent only because the
+ * Server Notifications URL has never been configured in App Store Connect —
+ * switching it on would have produced duplicate teams on iOS exactly as it did
+ * on Android 2026-08-20.
+ *
+ * The type is included for every event EXCEPT the initial purchase, which is
+ * deliberate: the client calls it INITIAL_PURCHASE while Apple's SUBSCRIBED
+ * maps to the same thing, so including the type would split them again.
+ * Lifecycle events keep it, or a CANCELLATION would be swallowed as a duplicate
+ * of the purchase it follows. Renewals differ naturally — Apple issues a NEW
+ * transactionId per period while originalTransactionId stays constant.
+ */
+function appleEventId(type, transactionId) {
+  const ref = transactionId || "unknown";
+  return type === "INITIAL_PURCHASE" || type === "NON_RENEWING_PURCHASE"
+    ? `ap:${ref}`
+    : `ap:${type}:${ref}`;
+}
+
 /** Decodes one JWS segment (base64url JSON). */
 function decodeSegment(segment) {
   return JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
@@ -335,7 +366,10 @@ async function validatePurchase({ userId, productId, receiptData }) {
   }
 
   return {
-    id: `ap:${txn.transactionId}`,
+    id: appleEventId(
+      isSubscription ? "INITIAL_PURCHASE" : "NON_RENEWING_PURCHASE",
+      txn.transactionId,
+    ),
     type: isSubscription ? "INITIAL_PURCHASE" : "NON_RENEWING_PURCHASE",
     app_user_id: userId,
     product_id: productId,
@@ -386,9 +420,7 @@ async function normalizeNotification(body) {
   }
 
   return {
-    id: payload.notificationUUID
-      ? `ap-ntf:${payload.notificationUUID}`
-      : `ap-ntf:${type}:${txn.transactionId}`,
+    id: appleEventId(type, txn.transactionId || originalId),
     type,
     app_user_id: ledgerRow.userId,
     product_id: txn.productId,
