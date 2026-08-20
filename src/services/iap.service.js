@@ -167,12 +167,30 @@ class IapService {
     switch (type) {
       case "UNCANCELLATION":
         return this._reactivate(userId, product, event);
-      case "CANCELLATION":
-        return this._markCancelling(userId, product, event);
-      case "BILLING_ISSUE":
-        return this._markPastDue(userId, product, event);
-      case "EXPIRATION":
-        return this._revoke(userId, product, event);
+      case "CANCELLATION": {
+        const res = await this._markCancelling(userId, product, event);
+        // Deliberately SILENT on an ordinary user-initiated cancellation: the
+        // user just did it themselves in the store's own UI, and Apple/Google
+        // already email a confirmation. The one exception is a one-time product,
+        // where a "cancellation" IS a store refund and access disappears — that
+        // the user does need telling about.
+        if (res && res.updated === "pro_revoked") {
+          await this._notifyStoreEvent(userId, product, "refunded");
+        }
+        return res;
+      }
+      case "BILLING_ISSUE": {
+        const res = await this._markPastDue(userId, product, event);
+        await this._notifyStoreEvent(userId, product, "billing_issue", res);
+        return res;
+      }
+      case "EXPIRATION": {
+        const res = await this._revoke(userId, product, event);
+        // Also covers refunds: Play maps SUBSCRIPTION_REVOKED (type 12) and
+        // Apple maps REFUND onto EXPIRATION, both meaning "access ends now".
+        await this._notifyStoreEvent(userId, product, "expired", res);
+        return res;
+      }
       default:
         logger.info(`[iap] Unhandled event type ${type} — ignored`);
         return { skipped: "unhandled_type" };
@@ -196,6 +214,73 @@ class IapService {
       logger.error(
         `[iap] Could not release ledger row ${eventId} after a failed grant: ${err.message}. ` +
           `That transaction will now report "duplicate" and never grant — delete the row manually.`,
+      );
+    }
+  }
+
+  /**
+   * Tells the user about a store event that costs them access. Push only —
+   * `notificationService.createNotification` writes the in-app bell row but has
+   * no FCM call, so it would never reach the phone.
+   *
+   * Which events notify is a product decision (owner, 2026-08-20): billing
+   * failure, expiry and refund — NOT a plain cancellation, which the user
+   * performed themselves seconds earlier in the store's own UI.
+   *
+   * BILLING_ISSUE is the one that really matters: Google/Apple enter a grace
+   * period and retry the card silently, so without this the user's plan simply
+   * vanishes days later with no explanation and nothing they could have done.
+   *
+   * Best-effort by design. A failed push must NEVER fail the entitlement change
+   * that has already been written — the store will not redeliver just because
+   * we could not send a banner.
+   */
+  async _notifyStoreEvent(userId, product, kind, result) {
+    // Only speak up if the handler actually changed something. A `skipped`
+    // result means the product was not a subscription (or nothing applied), and
+    // telling the user their payment failed would then be plain wrong.
+    if (result && !result.updated) return;
+
+    // Route to the right shell's devices. flow_addon/flow_pack are Pro-app
+    // products; team is the Team app; pro_lifetime is sold from the Team app's
+    // upgrade-pro page (which redirects Pro users away), so it rides Team too.
+    const appContext =
+      product.type === "flow_addon" || product.type === "flow_pack"
+        ? "pro"
+        : "team";
+
+    const COPY = {
+      billing_issue: {
+        title: "Payment problem",
+        body: "We couldn't take payment for your subscription. Update your payment method to keep your plan.",
+      },
+      expired: {
+        title: "Subscription ended",
+        body: "Your subscription has ended and premium features are no longer available. Resubscribe any time to restore access.",
+      },
+      refunded: {
+        title: "Purchase refunded",
+        body: "Your purchase was refunded, so the related features have been removed from your account.",
+      },
+    };
+    const copy = COPY[kind];
+    if (!copy) return;
+
+    try {
+      const fcm = require("./fcm.service");
+      const res = await fcm.sendToUser(
+        userId,
+        copy.title,
+        copy.body,
+        { url: "/dashboard/subscription", reason: kind },
+        appContext,
+      );
+      logger.info(
+        `[iap] ${kind} push for user ${userId} (${appContext}): ${JSON.stringify(res)}`,
+      );
+    } catch (err) {
+      logger.error(
+        `[iap] ${kind} push failed for user ${userId}: ${err.message} — entitlement change already applied, not retrying`,
       );
     }
   }
@@ -380,7 +465,10 @@ class IapService {
     // purchase — and the appType-scoped billing history (enterprise) never showed
     // it ("no AI-credit transaction history"). Resolve ONCE and use that context
     // for the grant AND the log so the record always matches the pool it hit.
-    const { addAddonCredits, resolveBillingUser } = require("./aiCredit.service");
+    const {
+      addAddonCredits,
+      resolveBillingUser,
+    } = require("./aiCredit.service");
     const billing = await resolveBillingUser(
       userId,
       null,
