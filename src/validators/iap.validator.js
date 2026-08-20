@@ -26,6 +26,11 @@ const validatePurchaseSchema = z.object({
         .optional(),
       // Apple: the base64 app receipt
       receiptData: z.string().min(1).max(1_000_000).optional(),
+      // Localized store price the buyer saw (from the client's iapPrices). Used
+      // only to RECORD the amount + currency; never grants anything. Bounded so
+      // a client can't stuff arbitrary data into the transaction ledger.
+      priceAmount: z.number().positive().max(10_000_000).optional(),
+      currency: z.string().min(1).max(10).optional(),
     })
     .superRefine((data, ctx) => {
       if (data.store === "google_play") {

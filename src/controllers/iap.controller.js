@@ -25,8 +25,21 @@ class IapController {
    */
   validate = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const { store, productId, purchaseToken, packageName, receiptData } =
-      req.body;
+    const {
+      store,
+      productId,
+      purchaseToken,
+      packageName,
+      receiptData,
+      // The localized amount + currency the store showed the buyer (from the
+      // client's iapPrices()). Google's server API does not return the price
+      // for consumables, so this is the only source of the REAL amount charged
+      // (e.g. ₹499 INR) — without it the grant falls back to the fixed USD list
+      // price. Client-supplied, so treated as display metadata only: it sets
+      // the recorded amount, never an entitlement.
+      priceAmount,
+      currency,
+    } = req.body;
 
     const event =
       store === "google_play"
@@ -41,6 +54,16 @@ class IapController {
             productId,
             receiptData,
           });
+
+    // Stamp the observed localized price onto the event so _amountCents records
+    // the true amount + currency instead of the USD fallback. Guarded: only a
+    // positive number is trusted; anything else leaves the fallback in place.
+    if (event && typeof priceAmount === "number" && priceAmount > 0) {
+      event.price = priceAmount;
+      if (typeof currency === "string" && currency.trim()) {
+        event.currency = currency.trim().toLowerCase();
+      }
+    }
 
     const provider = store === "google_play" ? "google" : "apple";
     const result = await iapService.handleIapEvent(event, provider);

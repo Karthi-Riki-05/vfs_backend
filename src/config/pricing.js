@@ -47,9 +47,20 @@ const FLOW_ADDON_PLAN_PRICE_USD = {
   unlimited: 20,
 };
 
+// AI-credit top-up packs (one-time) — cents, keyed by iapProducts `packType`.
+// Mirrors pricing.service BASE_PRICES_USD (addon_starter/standard/proppack) and
+// the Stripe addon Price IDs. Used to record a sensible transaction amount when
+// the store (Google Play) reports no price — an estimate, not the store receipt.
+const AI_CREDIT_PACK_PRICE_CENTS = {
+  starter: 500, // $5.00 → 50 credits
+  standard: 800, // $8.00 → 100 credits
+  proppack: 1500, // $15.00 → 200 credits
+};
+
 module.exports = {
   TEAM_PRICING,
   PRO_LIFETIME_PRICE_CENTS,
   FLOW_PRICING,
   FLOW_ADDON_PLAN_PRICE_USD,
+  AI_CREDIT_PACK_PRICE_CENTS,
 };

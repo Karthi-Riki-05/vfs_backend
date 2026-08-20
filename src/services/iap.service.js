@@ -36,6 +36,7 @@ const { resolveIapProduct } = require("../config/iapProducts");
 const {
   TEAM_PRICING,
   PRO_LIFETIME_PRICE_CENTS,
+  AI_CREDIT_PACK_PRICE_CENTS,
   FLOW_PRICING,
   FLOW_ADDON_PLAN_PRICE_USD,
 } = require("../config/pricing");
@@ -371,9 +372,21 @@ class IapService {
       where: { id: userId },
       select: { currentVersion: true },
     });
-    const appContext = user?.currentVersion || "free";
 
-    const { addAddonCredits } = require("./aiCredit.service");
+    // The credit is routed through addAddonCredits → resolveBillingUser, which
+    // folds `free` → the user's REAL pool (e.g. team). Previously the txn/history
+    // row was logged with the RAW currentVersion ("free" → appType "individual"),
+    // so a credit that landed in the TEAM pool was filed as an individual
+    // purchase — and the appType-scoped billing history (enterprise) never showed
+    // it ("no AI-credit transaction history"). Resolve ONCE and use that context
+    // for the grant AND the log so the record always matches the pool it hit.
+    const { addAddonCredits, resolveBillingUser } = require("./aiCredit.service");
+    const billing = await resolveBillingUser(
+      userId,
+      null,
+      user?.currentVersion || "free",
+    );
+    const appContext = billing.appContext || user?.currentVersion || "free";
     await addAddonCredits(userId, product.credits, appContext, null);
 
     // Routed through the shared helper like every other grant path. AI credit
@@ -626,10 +639,11 @@ class IapService {
    * product has no locally-known price. Prices come from config/pricing.js so
    * they cannot drift from what Stripe charges on the web.
    *
-   * ai_credits returns null on purpose: those packs are priced only as Stripe
-   * Price IDs held in env vars (see aiCredit.controller getStripePrice), so
-   * there is no amount to read locally and inventing one would be worse than
-   * admitting we do not know.
+   * ai_credits now falls back to AI_CREDIT_PACK_PRICE_CENTS (the same fixed USD
+   * pack prices the web charges via Stripe) so a store purchase records a
+   * sensible amount instead of $0 when Google Play reports no price. It is an
+   * estimate — the store receipt is still the source of truth for the exact
+   * localized amount.
    */
   _listPriceCents(product) {
     if (!product) return null;
@@ -646,6 +660,12 @@ class IapService {
         return FLOW_ADDON_PLAN_PRICE_USD[product.plan] != null
           ? FLOW_ADDON_PLAN_PRICE_USD[product.plan] * 100
           : null;
+      case "ai_credits":
+        // The store rarely reports a price for consumables, so fall back to the
+        // pack's known USD price (same as the web Stripe price) instead of
+        // recording $0. An estimate — the store receipt remains the source of
+        // truth for the exact localized amount charged.
+        return AI_CREDIT_PACK_PRICE_CENTS[product.packType] ?? null;
       default:
         return null;
     }
