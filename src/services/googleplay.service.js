@@ -279,6 +279,13 @@ async function normalizeRtdn(pushBody) {
     return null;
   }
 
+  // The delivery id is no longer part of the dedup key (see playEventId), but
+  // it is still worth logging: Pub/Sub is at-least-once, so seeing the SAME
+  // messageId twice means a redelivery, whereas two different messageIds
+  // resolving to one event id means the client and RTDN raced — which is the
+  // case this file's dedup now collapses.
+  logger.info(`[iap-google] RTDN received (pubsub messageId=${messageId})`);
+
   if (notification.testNotification) {
     logger.info("[iap-google] RTDN test notification received");
     return null;
