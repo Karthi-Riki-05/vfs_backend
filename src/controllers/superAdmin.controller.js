@@ -11,6 +11,7 @@ const {
 } = require("../lib/teamMembership");
 const { getStripe } = require("../lib/stripe");
 const fcmService = require("../services/fcm.service");
+const aiCreditService = require("../services/aiCredit.service");
 const notificationRateLimit = require("../services/notificationRateLimit.service");
 
 /**
@@ -872,6 +873,32 @@ class SuperAdminController {
       );
     }
 
+    // bug-141: Edit-user must honour the same floor the Settings roster does.
+    // `role` is written here as free text, so a demotion through this form
+    // bypassed removeSuperAdmin's LAST_SUPER_ADMIN guard entirely — two
+    // super-admins demoting each other (or one demoting the only other) left
+    // ZERO, and the console can only be re-entered by a super-admin. The only
+    // recovery is a developer running scripts/seed-super-admin.js against prod.
+    // Demoting a NON-last super-admin stays allowed, matching removeSuperAdmin.
+    if (role !== undefined && String(role) !== "super_admin") {
+      const target = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { role: true },
+      });
+      if (target?.role === "super_admin") {
+        const remaining = await prisma.user.count({
+          where: { role: "super_admin" },
+        });
+        if (remaining <= 1) {
+          throw new AppError(
+            "Cannot remove the last remaining super admin",
+            400,
+            "LAST_SUPER_ADMIN",
+          );
+        }
+      }
+    }
+
     // Rule #3 — Pro → Free downgrade side effects
     let downgradeOps = null;
     if (currentVersion === "free") {
@@ -1111,6 +1138,24 @@ class SuperAdminController {
       );
     }
 
+    // bug-148: deleteUser refuses to touch a fellow super-admin
+    // (SUPER_ADMIN_PROTECTED) but suspend had no such guard — and a suspended
+    // account is rejected by `authenticate` with ACCOUNT_INACTIVE, so this was
+    // a back door to locking another super-admin out of the console while
+    // leaving their role intact. Same rule as delete: demote first, then act.
+    const target = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (!target) throw new AppError("User not found", 404, "NOT_FOUND");
+    if (target.role === "super_admin") {
+      throw new AppError(
+        "Cannot suspend a super admin. Revoke the role first from Settings.",
+        400,
+        "SUPER_ADMIN_PROTECTED",
+      );
+    }
+
     await prisma.user.update({
       where: { id: userId },
       data: {
@@ -1333,11 +1378,23 @@ class SuperAdminController {
     expiresAt.setMonth(expiresAt.getMonth() + monthsToAdd);
 
     const productType = `${normalizedPlan}_${normalizedDuration}`;
-    const planCreditMap = { pro: 50, team: 200 };
+    // bug-147: a Team plan's credits are SEAT-SCALED — the Stripe path grants
+    // seats × 40/mo (or × 500/yr) via aiCreditService.grantTeamCredits. This
+    // handler used a flat 200, so an admin-granted 30-seat team got 200 where
+    // the identical purchased team got 1200. Derive from the same constants
+    // rather than restating a number that only happens to be right at 5 seats.
+    const grantSeats = Math.max(2, Math.min(100, parseInt(seats, 10) || 5));
+    const defaultCredits =
+      normalizedPlan === "team"
+        ? grantSeats *
+          (normalizedDuration === "yearly"
+            ? aiCreditService.TEAM_CREDITS_PER_SEAT_YEARLY
+            : aiCreditService.TEAM_CREDITS_PER_SEAT_MONTHLY)
+        : aiCreditService.PLAN_CREDITS.pro;
     const grantCredits =
       credits !== undefined && credits !== null && credits !== ""
         ? parseInt(credits, 10)
-        : planCreditMap[normalizedPlan];
+        : defaultCredits;
 
     // Archive existing subscription (if any) before we overwrite it — but
     // skip when "extend" is true, because extending is a modification of
@@ -1468,9 +1525,7 @@ class SuperAdminController {
     // find+create/update avoids constraint violations on re-grant.
     {
       const isTeamPlanGrant = normalizedPlan === "team";
-      const requestedSeats = isTeamPlanGrant
-        ? Math.max(2, Math.min(100, parseInt(seats, 10) || 5))
-        : 5; // Pro default
+      const requestedSeats = isTeamPlanGrant ? grantSeats : 5; // Pro default
       const teamAppType = isTeamPlanGrant ? "enterprise" : "individual";
       const teamAppContext = normalizedPlan; // 'pro' or 'team'
 
@@ -1651,9 +1706,117 @@ class SuperAdminController {
     });
   });
 
+  // bug-146: every workspace the target can spend in, with the pool each one
+  // actually bills. A team member's spend is charged to the WORKSPACE OWNER's
+  // pool (resolveBillingUser), so topping up the member's personal row — all
+  // the old adjustAiCredits could do — left them just as blocked. The admin now
+  // picks the workspace; the pool is resolved server-side, never claimed by the
+  // client.
+  getUserCreditWorkspaces = asyncHandler(async (req, res) => {
+    const { userId } = req.params;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, name: true, email: true, currentVersion: true },
+    });
+    if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    // Candidates: the personal workspace (always), plus every workspace the
+    // user is a member of. `workspaceId` IS the owner's user id (owner-as-
+    // workspace, 2026-08-07).
+    const memberships = await prisma.teamMember.findMany({
+      where: { userId },
+      select: { workspaceId: true, role: true },
+    });
+    const workspaceIds = [
+      ...new Set(memberships.map((m) => m.workspaceId).filter(Boolean)),
+    ];
+
+    const owners = workspaceIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: workspaceIds } },
+          select: { id: true, name: true, email: true, image: true },
+        })
+      : [];
+    const ownerById = new Map(owners.map((o) => [o.id, o]));
+
+    // A workspace draws the owner's Pro pool when its team is a Pro team;
+    // everything else draws the Team pool.
+    const teams = workspaceIds.length
+      ? await prisma.team.findMany({
+          where: { teamOwnerId: { in: workspaceIds }, deletedAt: null },
+          select: { teamOwnerId: true, name: true, appContext: true },
+        })
+      : [];
+    const teamByOwner = new Map(teams.map((t) => [t.teamOwnerId, t]));
+
+    const candidates = [
+      { workspaceId: null, kind: "personal" },
+      ...workspaceIds.map((id) => ({ workspaceId: id, kind: "team" })),
+    ];
+
+    const seen = new Set();
+    const workspaces = [];
+    for (const c of candidates) {
+      const team = c.workspaceId ? teamByOwner.get(c.workspaceId) : null;
+      const isProWorkspace = team?.appContext === "pro";
+
+      // THE contract: resolve through the same function a spend uses.
+      const pool = await aiCreditService.resolveBillingUser(
+        userId,
+        c.workspaceId,
+        isProWorkspace ? "pro" : null,
+      );
+      const appContext =
+        pool.appContext || user.currentVersion || "free";
+      const billedUserId = pool.userId;
+
+      // A team owner's "personal" and "own workspace" resolve to one row —
+      // list it once.
+      const key = `${billedUserId}:${appContext}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const balance = await prisma.aiCreditBalance.findUnique({
+        where: { userId_appContext: { userId: billedUserId, appContext } },
+        select: { planCredits: true, addonCredits: true, planResetsAt: true },
+      });
+
+      const owner = c.workspaceId ? ownerById.get(c.workspaceId) : null;
+      const isSelfBilled = billedUserId === userId;
+
+      workspaces.push({
+        workspaceId: c.workspaceId,
+        kind: c.kind,
+        label: c.workspaceId
+          ? team?.name || `${owner?.name || owner?.email || "Team"}'s workspace`
+          : `${user.name || user.email} (personal)`,
+        appContext,
+        // Who actually gets credited — the thing the old UI hid.
+        billedTo: isSelfBilled
+          ? { id: user.id, name: user.name, email: user.email, isSelf: true }
+          : {
+              id: billedUserId,
+              name: owner?.name || null,
+              email: owner?.email || null,
+              isSelf: false,
+            },
+        planCredits: balance?.planCredits ?? 0,
+        addonCredits: balance?.addonCredits ?? 0,
+        planResetsAt: balance?.planResetsAt || null,
+        role: c.workspaceId
+          ? memberships.find((m) => m.workspaceId === c.workspaceId)?.role ||
+            null
+          : null,
+      });
+    }
+
+    res.json({ success: true, data: { workspaces } });
+  });
+
   adjustAiCredits = asyncHandler(async (req, res) => {
     const { userId } = req.params;
-    const { planCredits, addonCredits, reason } = req.body || {};
+    const { planCredits, addonCredits, reason, workspaceId } = req.body || {};
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -1661,11 +1824,47 @@ class SuperAdminController {
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
 
-    const appContext = user.currentVersion || "free";
-    const updated = await prisma.aiCreditBalance.upsert({
-      where: { userId_appContext: { userId, appContext } },
-      create: {
+    // bug-146: default (no workspaceId) keeps the old behaviour — the user's
+    // personal pool. With a workspaceId, credit the pool that workspace really
+    // bills, resolved server-side.
+    let targetUserId = userId;
+    let appContext = user.currentVersion || "free";
+
+    if (workspaceId) {
+      // Membership is verified here rather than trusting resolveBillingUser's
+      // silent fallback: that returns the caller's OWN pool for a non-member,
+      // which would quietly credit the wrong row instead of refusing.
+      const isOwner = workspaceId === userId;
+      if (!isOwner) {
+        const membership = await prisma.teamMember.findFirst({
+          where: { workspaceId, userId },
+          select: { id: true },
+        });
+        if (!membership) {
+          throw new AppError(
+            "That user is not a member of this workspace",
+            400,
+            "NOT_A_WORKSPACE_MEMBER",
+          );
+        }
+      }
+      const team = await prisma.team.findFirst({
+        where: { teamOwnerId: workspaceId, deletedAt: null },
+        select: { appContext: true },
+      });
+      const pool = await aiCreditService.resolveBillingUser(
         userId,
+        workspaceId,
+        team?.appContext === "pro" ? "pro" : null,
+      );
+      targetUserId = pool.userId;
+      appContext = pool.appContext || appContext;
+    }
+
+    const updated = await prisma.aiCreditBalance.upsert({
+      where: { userId_appContext: { userId: targetUserId, appContext } },
+      create: {
+        userId: targetUserId,
         planCredits: planCredits !== undefined ? parseInt(planCredits, 10) : 0,
         addonCredits:
           addonCredits !== undefined ? parseInt(addonCredits, 10) : 0,
@@ -1682,13 +1881,19 @@ class SuperAdminController {
     });
 
     if (reason) {
+      // The note belongs on the person the admin acted on, not on whoever got
+      // credited — otherwise a team owner's adminNote is overwritten by a note
+      // about a member.
       await prisma.user.update({
         where: { id: userId },
         data: { adminNote: reason },
       });
     }
 
-    res.json({ success: true, data: updated });
+    res.json({
+      success: true,
+      data: { ...updated, creditedUserId: targetUserId, appContext },
+    });
   });
 
   getAllUserActivity = asyncHandler(async (req, res) => {
@@ -1810,6 +2015,16 @@ class SuperAdminController {
       "Joined",
     ].join(",");
 
+    // bug-145: the query selects `aiCreditBalances` (an ARRAY — one balance per
+    // workspace), but the row builder read `u.aiCreditBalance` (singular). That
+    // is always undefined, so both credit columns fell through to 0 for every
+    // user in every export. Pick the balance for the workspace the user is
+    // actually in, mirroring how the console displays it.
+    const activeBalance = (u) =>
+      (u.aiCreditBalances || []).find(
+        (b) => b.appContext === (u.currentVersion || "free"),
+      ) || null;
+
     const rows = users.map((u) =>
       [
         u.id,
@@ -1822,8 +2037,8 @@ class SuperAdminController {
         u.suspendedAt ? u.suspendedAt.toISOString() : "",
         u._count.flows,
         u._count.aiCreditUsages,
-        u.aiCreditBalance?.planCredits ?? 0,
-        u.aiCreditBalance?.addonCredits ?? 0,
+        activeBalance(u)?.planCredits ?? 0,
+        activeBalance(u)?.addonCredits ?? 0,
         u.subscription?.productType || "",
         u.subscription?.status || "",
         u.subscription?.expiresAt ? u.subscription.expiresAt.toISOString() : "",
@@ -2422,7 +2637,22 @@ class SuperAdminController {
     const hashed = await argon2.hash(String(newPassword));
     await prisma.user.update({
       where: { id: userId },
-      data: { password: hashed },
+      // bug-140: mirror the self-service reset (user.service.resetPassword).
+      // Without these three extra fields an admin reset is cosmetic:
+      //   - passwordChangedAt is what auth.middleware compares the JWT `iat`
+      //     against (bug-U3), so omitting it left every live web session of a
+      //     COMPROMISED account valid — the exact case an admin reset exists for.
+      //   - refreshToken must be nulled or the mobile session survives too.
+      //   - isLegacyBcrypt MUST be cleared: the new hash is argon2, and leaving
+      //     the flag set sends the next login down the bcrypt branch to compare
+      //     against an argon2 string — a permanent lockout no further reset can
+      //     undo.
+      data: {
+        password: hashed,
+        isLegacyBcrypt: false,
+        refreshToken: null,
+        passwordChangedAt: new Date(),
+      },
     });
 
     res.json({

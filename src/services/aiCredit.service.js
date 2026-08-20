@@ -424,6 +424,10 @@ async function grantTeamCredits(userId, seats, plan, expiresAt = null) {
 
 module.exports = {
   getBalance,
+  // bug-146: the super-admin credit picker resolves its target through this
+  // exact function, so an admin top-up can never land in a different row from
+  // the one a spend will draw from.
+  resolveBillingUser,
   hasCredits,
   deductCredit,
   creditsFromTokens,

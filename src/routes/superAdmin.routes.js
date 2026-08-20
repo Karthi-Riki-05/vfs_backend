@@ -87,6 +87,12 @@ router.delete(
   logAdminAction("team_member_removed"),
   superAdminController.removeTeamMember,
 );
+// bug-146: workspaces the target can spend in (personal + every team they
+// belong to), each with the pool it actually bills.
+router.get(
+  "/users/:userId/credit-workspaces",
+  superAdminController.getUserCreditWorkspaces,
+);
 router.put(
   "/users/:userId/ai-credits",
   logAdminAction("credits_adjusted"),
