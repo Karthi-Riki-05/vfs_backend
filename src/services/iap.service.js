@@ -219,9 +219,14 @@ class IapService {
   }
 
   /**
-   * Tells the user about a store event that costs them access. Push only —
-   * `notificationService.createNotification` writes the in-app bell row but has
-   * no FCM call, so it would never reach the phone.
+   * Tells the user about a store event that costs them access.
+   *
+   * Goes through push.service, NOT fcm.service. Only the facade applies the
+   * user's per-category preference, quiet hours and rate limits; calling fcm
+   * directly (as the first version of this method did) bypasses all three.
+   * Every category used here is in NON_DISABLEABLE_CATEGORIES, so a user can
+   * never switch off "your payment failed" — but the wiring still has to be
+   * correct, or a later disableable category would silently ignore the opt-out.
    *
    * Which events notify is a product decision (owner, 2026-08-20): billing
    * failure, expiry and refund — NOT a plain cancellation, which the user
@@ -249,16 +254,23 @@ class IapService {
         ? "pro"
         : "team";
 
+    // `category` is the preference key AND must exist in the notification
+    // service's KNOWN_TYPES. All three are non-disableable, so these always
+    // deliver — deliberate: they all mean "you are about to lose, or have
+    // lost, something you paid for".
     const COPY = {
       billing_issue: {
+        category: "subscription_payment_failed",
         title: "Payment problem",
         body: "We couldn't take payment for your subscription. Update your payment method to keep your plan.",
       },
       expired: {
+        category: "subscription_expired",
         title: "Subscription ended",
         body: "Your subscription has ended and premium features are no longer available. Resubscribe any time to restore access.",
       },
       refunded: {
+        category: "subscription_cancelled",
         title: "Purchase refunded",
         body: "Your purchase was refunded, so the related features have been removed from your account.",
       },
@@ -267,13 +279,20 @@ class IapService {
     if (!copy) return;
 
     try {
-      const fcm = require("./fcm.service");
-      const res = await fcm.sendToUser(
+      const push = require("./push.service");
+      const res = await push.sendPushToUser(
         userId,
-        copy.title,
-        copy.body,
-        { url: "/dashboard/subscription", reason: kind },
+        {
+          title: copy.title,
+          body: copy.body,
+          data: {
+            type: copy.category,
+            url: "/dashboard/subscription",
+            reason: kind,
+          },
+        },
         appContext,
+        copy.category,
       );
       logger.info(
         `[iap] ${kind} push for user ${userId} (${appContext}): ${JSON.stringify(res)}`,

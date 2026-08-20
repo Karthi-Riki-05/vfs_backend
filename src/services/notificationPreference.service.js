@@ -17,6 +17,10 @@ const NON_DISABLEABLE_CATEGORIES = new Set([
   "subscription_cancelled",
   "subscription_expired",
   "flow_addon_payment_failed",
+  // A team-plan payment failure is as critical as the add-on one: the user
+  // must be able to fix their card before access lapses, so it cannot be
+  // switched off.
+  "subscription_payment_failed",
 ]);
 
 function isNonDisableable(category) {

@@ -28,6 +28,7 @@ const KNOWN_TYPES = new Set([
   "subscription_activated",
   "subscription_cancelled",
   "subscription_expired",
+  "subscription_payment_failed",
   "team_invite",
   "team_invite_declined",
   "team_member_joined",
@@ -134,6 +135,7 @@ async function createNotification(
   metadata = null,
   appContext = "team",
   workspaceId = null,
+  opts = {},
 ) {
   // bug-029: warn-only typo catcher — never blocks creation.
   if (!KNOWN_TYPES.has(type)) {
@@ -174,12 +176,62 @@ async function createNotification(
   // next 60s poll. Non-blocking, fail-open.
   emitNotification(notification);
 
+  // ── Optional FCM push ───────────────────────────────────────────────────
+  // OPT-IN (`opts.push`), not automatic. The bell and the push are two
+  // deliberate channels: the bell is workspace-scoped by design (see
+  // buildScope) while a push reaches the user wherever they are, so five
+  // services already pair createNotification with an explicit
+  // push.sendPushToUser. Pushing unconditionally here would double-notify
+  // every one of them, and would also push ~17 other call sites that were
+  // never written expecting it. Enable it per type, on purpose.
+  //
+  // ALWAYS via push.service, never fcm.service directly: only the facade
+  // applies the user's per-category preference, quiet hours and rate limits.
+  // `type` doubles as the preference category — that is the contract
+  // isChannelEnabled documents ("the Notification.type / push category
+  // string"), so passing anything else would silently bypass the opt-out.
+  if (opts.push) {
+    try {
+      const push = require("./push.service");
+      const res = await push.sendPushToUser(
+        userId,
+        {
+          title,
+          body: opts.pushBody || message,
+          data: {
+            type,
+            ...(actionUrl ? { url: actionUrl } : {}),
+            ...(opts.pushData || {}),
+          },
+        },
+        appContext,
+        type,
+      );
+      if (res && res.skipped) {
+        logger.info(
+          `[Notification] push for "${type}" skipped (${res.reason}) — bell row still created`,
+        );
+      }
+    } catch (err) {
+      // Never fatal: the bell row is already written and is the source of
+      // truth. A missing banner must not fail the caller's business logic.
+      logger.error(
+        `[Notification] push for "${type}" failed: ${err.message} — bell row unaffected`,
+      );
+    }
+  }
+
   return notification;
 }
 
 async function getUserNotifications(
   userId,
-  { unreadOnly = false, limit = 20, appContext = null, workspaceId = null } = {},
+  {
+    unreadOnly = false,
+    limit = 20,
+    appContext = null,
+    workspaceId = null,
+  } = {},
 ) {
   const where = buildScope({ userId, workspaceId, appContext });
   if (unreadOnly) where.isRead = false;
