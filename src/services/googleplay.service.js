@@ -81,9 +81,44 @@ function baseOrderId(orderId) {
   return orderId ? orderId.replace(/\.\.\d+$/, "") : orderId;
 }
 
+/**
+ * The dedup key for a Play event. MUST be derived from the PURCHASE, never
+ * from the delivery, because the same purchase reaches us through two
+ * independent channels:
+ *
+ *   1. the app's authenticated POST /iap/validate   → id `gp:<orderId>`
+ *   2. Google's RTDN push                           → previously `gp-rtdn:<messageId>`
+ *
+ * A Pub/Sub messageId is unique per DELIVERY, so those two never collided and
+ * both granted. Observed live 2026-08-20: RTDN landed 270ms before the client
+ * call and the user got TWO teams (`test4321's Team` ×2, created 1ms apart),
+ * plus a 409 when the second `teamMember.create` hit its unique constraint.
+ * Pub/Sub is also at-least-once, so a mere REDELIVERY of one notification used
+ * to re-grant as well.
+ *
+ * Keying on the order id fixes both: the two channels now produce the same
+ * string for the same purchase, and a redelivery is recognised as a duplicate.
+ *
+ * The event type is included for every event EXCEPT the initial purchase —
+ * that omission is deliberate and load-bearing. The client calls the purchase
+ * `INITIAL_PURCHASE` while RTDN calls it `SUBSCRIBED`/type 4, so including the
+ * type would make them differ again. Lifecycle events DO need it, or a
+ * CANCELLATION would be swallowed as a duplicate of the purchase it follows
+ * (a renewal already differs naturally — Google issues `GPA.xxx..1`).
+ */
+function playEventId(type, orderId, purchaseToken) {
+  const ref =
+    orderId || (purchaseToken ? purchaseToken.slice(0, 24) : "unknown");
+  return type === "INITIAL_PURCHASE" || type === "NON_RENEWING_PURCHASE"
+    ? `gp:${ref}`
+    : `gp:${type}:${ref}`;
+}
+
 function isSubscriptionProduct(productId) {
   const product = resolveIapProduct(productId);
-  return !!product && (product.type === "team" || product.type === "flow_addon");
+  return (
+    !!product && (product.type === "team" || product.type === "flow_addon")
+  );
 }
 
 /**
@@ -91,7 +126,12 @@ function isSubscriptionProduct(productId) {
  * event. Throws AppError on any token that is not genuinely purchased or
  * that belongs to a different user (replay protection).
  */
-async function validatePurchase({ userId, packageName, productId, purchaseToken }) {
+async function validatePurchase({
+  userId,
+  packageName,
+  productId,
+  purchaseToken,
+}) {
   if (!packageName || !productId || !purchaseToken) {
     throw new AppError("Missing purchase fields", 400, "INVALID_PURCHASE");
   }
@@ -152,7 +192,7 @@ async function validatePurchase({ userId, packageName, productId, purchaseToken 
     }
 
     return {
-      id: `gp:${orderId || purchaseToken.slice(0, 24)}`,
+      id: playEventId("INITIAL_PURCHASE", orderId, purchaseToken),
       type: "INITIAL_PURCHASE",
       app_user_id: userId,
       product_id: lineProductId,
@@ -207,7 +247,7 @@ async function validatePurchase({ userId, packageName, productId, purchaseToken 
   }
 
   return {
-    id: `gp:${p.orderId || purchaseToken.slice(0, 24)}`,
+    id: playEventId("NON_RENEWING_PURCHASE", p.orderId, purchaseToken),
     type: "NON_RENEWING_PURCHASE",
     app_user_id: userId,
     product_id: productId,
@@ -275,7 +315,7 @@ async function normalizeRtdn(pushBody) {
     const orderId = sub.latestOrderId || null;
 
     return {
-      id: messageId ? `gp-rtdn:${messageId}` : `gp-rtdn:${type}:${orderId}`,
+      id: playEventId(type, orderId, subNote.purchaseToken),
       type,
       app_user_id: userId,
       product_id: line.productId || subNote.subscriptionId,
@@ -308,7 +348,11 @@ async function normalizeRtdn(pushBody) {
       return null;
     }
     return {
-      id: messageId ? `gp-rtdn:${messageId}` : `gp:${p.orderId}`,
+      id: playEventId(
+        "NON_RENEWING_PURCHASE",
+        p.orderId,
+        oneTime.purchaseToken,
+      ),
       type: "NON_RENEWING_PURCHASE",
       app_user_id: userId,
       product_id: oneTime.sku,
