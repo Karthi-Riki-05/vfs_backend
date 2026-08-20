@@ -29,6 +29,10 @@ const KNOWN_TYPES = new Set([
   "subscription_cancelled",
   "subscription_expired",
   "subscription_payment_failed",
+  // Receipt for a non-team purchase (flow add-on / pack / AI credits / Pro
+  // lifetime). Deliberately NOT in NON_DISABLEABLE_CATEGORIES — it is a
+  // courtesy confirmation, so muting it costs the user nothing.
+  "purchase_confirmed",
   "team_invite",
   "team_invite_declined",
   "team_member_joined",

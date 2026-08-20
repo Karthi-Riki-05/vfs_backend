@@ -308,18 +308,112 @@ class IapService {
 
   async _grant(userId, product, event, provider) {
     switch (product.type) {
-      case "pro_lifetime":
-        return this._grantProLifetime(userId, product, event);
+      case "pro_lifetime": {
+        const res = await this._grantProLifetime(userId, product, event);
+        await this._notifyPurchase(userId, product, event, res);
+        return res;
+      }
       case "team":
+        // No _notifyPurchase here on purpose: the team path delegates to
+        // subscriptionService._handleCheckoutComplete, which already sends its
+        // own paymentSuccess push (and suppresses it on renewals). Adding one
+        // here would double-notify every team purchase.
         return this._grantTeam(userId, product, event, provider);
-      case "flow_addon":
-        return this._grantFlowAddon(userId, product, event);
-      case "flow_pack":
-        return this._grantFlowPack(userId, product, event);
-      case "ai_credits":
-        return this._grantAiCredits(userId, product, event);
+      case "flow_addon": {
+        const res = await this._grantFlowAddon(userId, product, event);
+        await this._notifyPurchase(userId, product, event, res);
+        return res;
+      }
+      case "flow_pack": {
+        const res = await this._grantFlowPack(userId, product, event);
+        await this._notifyPurchase(userId, product, event, res);
+        return res;
+      }
+      case "ai_credits": {
+        const res = await this._grantAiCredits(userId, product, event);
+        await this._notifyPurchase(userId, product, event, res);
+        return res;
+      }
       default:
         return { skipped: "unknown_entitlement" };
+    }
+  }
+
+  /**
+   * Confirms a NON-TEAM purchase to the buyer.
+   *
+   * Until 2026-08-20 only team plans confirmed anything: the paymentSuccess
+   * push lives in subscriptionService._handleCheckoutComplete, while flow
+   * add-ons, flow packs and AI credits route through pro.service /
+   * aiCredit.service, which send nothing. So a Pro user who bought a ₹1,150
+   * flow add-on got total silence while a Team user got a banner — an accident
+   * of where the code grew, not a decision.
+   *
+   * RENEWALS are excluded for the same reason the team path suppresses them: a
+   * recurring add-on would otherwise re-announce itself every cycle (every
+   * ~5 minutes on a license-tester subscription).
+   *
+   * Category `purchase_confirmed` is deliberately DISABLEABLE — this is a
+   * receipt, not a warning, so a user who mutes it loses nothing they need.
+   * Contrast _notifyStoreEvent, whose categories are all non-disableable.
+   *
+   * Best-effort: a failed banner must never fail a grant that is already
+   * written.
+   */
+  async _notifyPurchase(userId, product, event, result) {
+    if (!result || !(result.granted || result.updated)) return;
+    if (event?.type === "RENEWAL") return;
+
+    const COPY = {
+      flow_addon: {
+        title: "Flow add-on active",
+        body:
+          product.plan === "unlimited"
+            ? "Unlimited flows are now enabled on your account."
+            : "Your 100-flow add-on is now active.",
+      },
+      flow_pack: {
+        title: "Flow pack added",
+        body: `${product.flowPackage === "unlimited" ? "Unlimited" : product.flowCount} extra flows are available for the next 30 days.`,
+      },
+      ai_credits: {
+        title: "Credits added",
+        body: `${product.credits} AI credits have been added to your balance.`,
+      },
+      pro_lifetime: {
+        title: "Pro unlocked",
+        body: "Pro is now active on your account — thank you.",
+      },
+    };
+    const copy = COPY[product.type];
+    if (!copy) return;
+
+    // flow_addon / flow_pack are Pro-app products; AI credits and the lifetime
+    // unlock are sold from the Team app (upgrade-pro redirects Pro users away).
+    const appContext =
+      product.type === "flow_addon" || product.type === "flow_pack"
+        ? "pro"
+        : "team";
+
+    try {
+      const push = require("./push.service");
+      await push.sendPushToUser(
+        userId,
+        {
+          title: copy.title,
+          body: copy.body,
+          data: { type: "purchase_confirmed", url: "/dashboard/subscription" },
+        },
+        appContext,
+        "purchase_confirmed",
+      );
+      logger.info(
+        `[iap] purchase confirmation sent for ${product.productKey} to user ${userId} (${appContext})`,
+      );
+    } catch (err) {
+      logger.error(
+        `[iap] purchase confirmation failed for user ${userId}: ${err.message} — grant already applied`,
+      );
     }
   }
 
