@@ -24,6 +24,38 @@ const {
 // onto each SubscriptionItem in newer API versions. Read the item-level
 // field first and fall back to the (deprecated) top-level one so this keeps
 // working regardless of which API version the account is pinned to.
+/**
+ * Normalises a period-end that may arrive in three different shapes.
+ *
+ * Stripe sends Unix SECONDS, so every call site here historically did
+ * `new Date(x * 1000)`. The IAP layer passes a real Date (built from Apple/Play
+ * milliseconds), and multiplying a Date by 1000 yields ~1.79e15 ms — the year
+ * 58605 — which Prisma rejects outright:
+ *
+ *   Could not convert argument value Object {"$type": "DateTime",
+ *   "value": "+058605-05-15T22:38:29.000Z"} to ArgumentValue.
+ *
+ * That crashed all three IAP flow-addon lifecycle paths on 2026-08-20 —
+ * _markCancelling, _markPastDue and _reactivate — so a cancelled or
+ * payment-failed add-on threw instead of updating. Fixed at the boundary rather
+ * than in each caller, because the next caller would make the same mistake.
+ *
+ * The seconds/ms split is unambiguous in practice: Unix seconds today are ~1.8e9
+ * and ms ~1.8e12, so the 1e11 threshold separates them for any date between 1973
+ * and the year 5138.
+ */
+function toPeriodEndDate(value) {
+  if (!value) return null;
+  if (value instanceof Date)
+    return Number.isNaN(value.getTime()) ? null : value;
+  if (typeof value === "number") {
+    const d = new Date(value < 1e11 ? value * 1000 : value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function getSubscriptionPeriodEnd(subscription) {
   return (
     subscription?.items?.data?.[0]?.current_period_end ??
@@ -1622,7 +1654,12 @@ class ProService {
         });
       } else {
         await tx.flowLimit.create({
-          data: { userId, appType: "individual", flowUsed: 0, ...flowLimitData },
+          data: {
+            userId,
+            appType: "individual",
+            flowUsed: 0,
+            ...flowLimitData,
+          },
         });
       }
 
@@ -1687,7 +1724,7 @@ class ProService {
           flowAddonStatus: "past_due",
           flowAddonGracePeriodEnd: new Date(Date.now() + 3 * 24 * 3600 * 1000),
           ...(currentPeriodEnd
-            ? { flowAddonCurrentPeriodEnd: new Date(currentPeriodEnd * 1000) }
+            ? { flowAddonCurrentPeriodEnd: toPeriodEndDate(currentPeriodEnd) }
             : {}),
         },
       });
@@ -1712,7 +1749,7 @@ class ProService {
         plan: current?.flowAddonPlan,
         status: "past_due",
         reason: "payment_failed",
-        expiresAt: currentPeriodEnd ? new Date(currentPeriodEnd * 1000) : null,
+        expiresAt: currentPeriodEnd ? toPeriodEndDate(currentPeriodEnd) : null,
       });
       logger.info(
         `[handleFlowAddonSubscriptionUpdated] user=${userId} past_due — 3-day grace started`,
@@ -1734,7 +1771,7 @@ class ProService {
               ? { proUnlimitedFlows: true }
               : {}),
           ...(currentPeriodEnd
-            ? { flowAddonCurrentPeriodEnd: new Date(currentPeriodEnd * 1000) }
+            ? { flowAddonCurrentPeriodEnd: toPeriodEndDate(currentPeriodEnd) }
             : {}),
         },
       });
@@ -1742,7 +1779,7 @@ class ProService {
         plan: current.flowAddonPlan,
         status: "active",
         reason: "recovered",
-        expiresAt: currentPeriodEnd ? new Date(currentPeriodEnd * 1000) : null,
+        expiresAt: currentPeriodEnd ? toPeriodEndDate(currentPeriodEnd) : null,
       });
       logger.info(
         `[handleFlowAddonSubscriptionUpdated] user=${userId} recovered from past_due — entitlements restored`,
@@ -1756,7 +1793,7 @@ class ProService {
         flowAddonStatus: addonStatus,
         ...(addonStatus === "active" ? { flowAddonGracePeriodEnd: null } : {}),
         ...(currentPeriodEnd
-          ? { flowAddonCurrentPeriodEnd: new Date(currentPeriodEnd * 1000) }
+          ? { flowAddonCurrentPeriodEnd: toPeriodEndDate(currentPeriodEnd) }
           : {}),
       },
     });
@@ -1767,7 +1804,7 @@ class ProService {
         plan: current?.flowAddonPlan,
         status: addonStatus,
         reason: addonStatus,
-        expiresAt: currentPeriodEnd ? new Date(currentPeriodEnd * 1000) : null,
+        expiresAt: currentPeriodEnd ? toPeriodEndDate(currentPeriodEnd) : null,
       });
     }
     logger.info(
