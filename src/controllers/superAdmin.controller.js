@@ -12,6 +12,7 @@ const {
 const { getStripe } = require("../lib/stripe");
 const fcmService = require("../services/fcm.service");
 const aiCreditService = require("../services/aiCredit.service");
+const logger = require("../utils/logger");
 const notificationRateLimit = require("../services/notificationRateLimit.service");
 
 /**
@@ -1071,6 +1072,13 @@ class SuperAdminController {
     if (hard === "true" || hard === true) {
       // Hard delete — manually wipe non-cascading or problematic relations first
       // to ensure a clean wipe without foreign key violations.
+      // Rows about this user outlive them (bug-153) — stamp who they were, or
+      // the retained history reads as actions against a null.
+      const identity = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true, name: true },
+      });
+
       await prisma.$transaction(async (tx) => {
         // 1. Delete billing & subscriptions
         await tx.subscription.deleteMany({ where: { userId } });
@@ -1101,11 +1109,45 @@ class SuperAdminController {
         await tx.userAction.deleteMany({ where: { userId } });
         await tx.userInterest.deleteMany({ where: { userId } });
         await tx.feedbackQuery.deleteMany({ where: { userId } });
-        await tx.adminLog.deleteMany({ where: { targetUserId: userId } });
+        // bug-153: do NOT delete the admin_logs rows about this user. Wiping
+        // them made the single most consequential action in the console erase
+        // the proof it happened — measured live, 11 audit rows vanished with
+        // one account. The schema never required it: AdminLogTarget is
+        // onDelete: SetNull, so the history survives with the reference
+        // blanked, and `details.targetEmail` below keeps it readable.
+        await tx.adminLog.updateMany({
+          where: { targetUserId: userId },
+          data: { targetUserId: null },
+        });
 
         // 5. Finally, delete the user
         await tx.user.delete({ where: { id: userId } });
       });
+
+      // bug-153: the route's own logAdminAction row cannot survive this — it
+      // fires after the response with targetUserId pointing at a row that no
+      // longer exists, so the FK insert fails and is swallowed by the audit
+      // writer's catch. The deletion would go unrecorded. Write it explicitly,
+      // with no FK and the identity preserved in details.
+      await prisma.adminLog
+        .create({
+          data: {
+            adminId: req.user.id,
+            targetUserId: null,
+            action: "user_hard_deleted",
+            details: {
+              deletedUserId: userId,
+              email: identity?.email || null,
+              name: identity?.name || null,
+              method: req.method,
+              path: req.originalUrl,
+            },
+            ipAddress: req.ip || req.headers["x-forwarded-for"] || null,
+          },
+        })
+        .catch((err) =>
+          logger.warn(`[AdminLog] hard-delete record failed: ${err.message}`),
+        );
 
       res.json({
         success: true,
@@ -2690,7 +2732,7 @@ class SuperAdminController {
   });
 
   broadcastNotification = asyncHandler(async (req, res) => {
-    const { title, body, url, kind } = req.body || {};
+    const { title, body, url, kind, confirm, dryRun } = req.body || {};
     if (!title || !body) {
       throw new AppError(
         "title and body are required",
@@ -2698,6 +2740,43 @@ class SuperAdminController {
         "VALIDATION_ERROR",
       );
     }
+    // bug-154: the ONLY thing standing between a click and every registered
+    // device used to be a browser dialog. That is a courtesy, not a control —
+    // proven on 2026-08-20, when a stale front-end build (the container serves
+    // `npm run build`, so an un-rebuilt UI ships without new guards) removed
+    // the dialog and two broadcasts went out to live devices through the
+    // production Firebase project.
+    //
+    // The gate now lives here, where no client can skip it:
+    //   dryRun: true   → report the audience, send nothing (the safe "test"
+    //                    this screen never had — it has no self-only send)
+    //   confirm: true  → required to actually transmit
+    // Fail-closed by design: any caller that does not know about `confirm`
+    // — including that stale bundle — gets a 400 instead of a broadcast.
+    const audience = await prisma.firebaseUser.count({
+      where: { fcmToken: { not: null }, deletedAt: null },
+    });
+
+    if (dryRun) {
+      return res.json({
+        success: true,
+        data: {
+          dryRun: true,
+          wouldSend: audience,
+          message: `Dry run — nothing sent. ${audience} device${audience === 1 ? "" : "s"} would receive this.`,
+        },
+      });
+    }
+
+    if (confirm !== true) {
+      throw new AppError(
+        `This sends to ${audience} registered device${audience === 1 ? "" : "s"} and cannot be recalled. Re-send with confirm:true, or use dryRun:true to check the audience first.`,
+        400,
+        "BROADCAST_CONFIRM_REQUIRED",
+      );
+    }
+
+
     // bug-026: keyed on the calling admin, not a recipient — throttles how
     // often one super-admin account can trigger a platform-wide broadcast
     // (compromised/careless-account safety net; audit trail is separately
@@ -2716,7 +2795,7 @@ class SuperAdminController {
     if (url) data.url = url;
     if (kind) data.kind = kind;
     const result = await fcmService.broadcastToAll(title, body, data);
-    res.json({ success: true, data: result });
+    res.json({ success: true, data: { ...result, audience } });
   });
 
   countDevices = asyncHandler(async (req, res) => {

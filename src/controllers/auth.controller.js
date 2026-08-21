@@ -360,6 +360,23 @@ exports.validateUser = asyncHandler(async (req, res) => {
 
   const hasTeamAccess = await userService.getHasTeamAccess(user.id);
 
+  // bug-152: stamp lastSeen on successful sign-in. It was previously written
+  // only by the websocket DISCONNECT handler, so anyone who never opened a
+  // realtime session never got one — 3 rows out of 10,163 had a value. That
+  // left the super-admin console's "Last Login" column, the user record's
+  // "Last Seen" field and the dashboard's "Active (24h)" KPI permanently
+  // blank. Fire-and-forget: a metrics write must never fail a login.
+  void (async () => {
+    try {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { lastSeen: new Date() },
+      });
+    } catch (err) {
+      logger.warn(`[Auth] lastSeen update failed: ${err.message}`);
+    }
+  })();
+
   res.json({
     success: true,
     data: {

@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
 const { prisma } = require("../lib/prisma");
+const logger = require("../utils/logger");
 
 let initialized = false;
 
@@ -119,39 +120,58 @@ async function broadcastToAll(title, body, data = {}) {
   const stringData = Object.fromEntries(
     Object.entries(data).map(([k, v]) => [k, String(v)]),
   );
-  const tokens = rows.map((r) => r.fcmToken);
-
-  const res = await admin.messaging().sendEachForMulticast({
-    tokens,
-    notification: { title, body },
-    data: stringData,
-    android: { priority: "high" },
-    apns: { payload: { aps: { sound: "default" } } },
-    webpush: data.url ? { fcmOptions: { link: data.url } } : undefined,
-  });
-
-  // Clean up tokens FCM says are permanently dead. Uses the shared
-  // STALE_TOKEN_CODES via isStaleTokenError so this path can never drift from
-  // the single-send path above — it previously hardcoded its own two codes and
-  // so missed `mismatched-credential`.
+  // bug-149: Firebase rejects sendEachForMulticast above 500 tokens per call.
+  // This used to send every token in ONE call, so the whole broadcast failed
+  // outright the moment the install base passed 500 — not a partial send, no
+  // send at all, and the console reported nothing wrong. Chunk it.
+  const CHUNK = 500;
   const stale = [];
-  res.responses.forEach((r, i) => {
-    if (!r.success && isStaleTokenError(r.error)) {
-      stale.push(rows[i].id);
+  let sent = 0;
+  let failed = 0;
+  const errors = [];
+
+  for (let offset = 0; offset < rows.length; offset += CHUNK) {
+    const slice = rows.slice(offset, offset + CHUNK);
+    try {
+      const res = await admin.messaging().sendEachForMulticast({
+        tokens: slice.map((r) => r.fcmToken),
+        notification: { title, body },
+        data: stringData,
+        android: { priority: "high" },
+        apns: { payload: { aps: { sound: "default" } } },
+        webpush: data.url ? { fcmOptions: { link: data.url } } : undefined,
+      });
+      sent += res.successCount;
+      failed += res.failureCount;
+      // Clean up tokens FCM says are permanently dead. Uses the shared
+      // STALE_TOKEN_CODES via isStaleTokenError so this path can never drift
+      // from the single-send path above.
+      res.responses.forEach((r, i) => {
+        if (!r.success && isStaleTokenError(r.error)) stale.push(slice[i].id);
+      });
+    } catch (err) {
+      // One bad chunk must not sink the rest of the broadcast — the remaining
+      // batches still go out and the failure is reported back to the caller.
+      failed += slice.length;
+      errors.push(err.message);
+      logger.error(
+        `[FCM] broadcast chunk ${offset / CHUNK + 1} failed: ${err.message}`,
+      );
     }
-  });
+  }
+
   if (stale.length > 0) {
-    await prisma.firebaseUser.deleteMany({
-      where: { id: { in: stale } },
-    });
+    await prisma.firebaseUser.deleteMany({ where: { id: { in: stale } } });
   }
 
   return {
     success: true,
     total: rows.length,
-    sent: res.successCount,
-    failed: res.failureCount,
+    batches: Math.ceil(rows.length / CHUNK),
+    sent,
+    failed,
     cleaned: stale.length,
+    ...(errors.length ? { errors } : {}),
   };
 }
 
