@@ -4,18 +4,36 @@ const logger = require("../utils/logger");
 
 /**
  * On team-subscription expiry, a user reverts to the 50-flow team limit.
- * If they hold more than 50 team flows (appContext='team', workspaceId=null), the
- * excess (oldest by updatedAt) is marked for downgrade and the user enters the
+ * If they hold more than 50 team flows in their own workspace, the excess
+ * (oldest by updatedAt) is marked for downgrade and the user enters the
  * team-picker phase so they can choose which 50 to keep. With <=50 flows there
  * is nothing at risk — just drop the unlimited flag.
+ *
+ * The scope is `workspaceId: userId` — the user's OWN workspace, which is what
+ * `resolveWorkspaceId` returns for their own flows. An earlier version of this
+ * doc line and a duplicate object key both said `workspaceId: null`, which is
+ * impossible: `Flow.workspaceId` is non-nullable, so Prisma REJECTED the query
+ * outright ("Argument `workspaceId` must not be null") and this function threw
+ * on every call. See the note on the query below.
  */
 async function applyTeamFlowPicker(userId) {
   const TEAM_FLOW_LIMIT = 50;
   const teamFlows = await prisma.flow.findMany({
     where: {
+      // `workspaceId` was specified TWICE here. In an object literal the last
+      // key wins, so `workspaceId: null` silently replaced `workspaceId:
+      // userId` — and because Flow.workspaceId is non-nullable Prisma refused
+      // the query with "Argument `workspaceId` must not be null". This function
+      // is awaited unguarded on BOTH branches of downgradeUser, so downgrade
+      // threw for every user on every rail: the store EXPIRATION handler
+      // (observed 2026-08-22), _handleSubscriptionDeleted for Stripe, and the
+      // expireLapsedSubscriptions sweep — which logged "downgrade failed" per
+      // user and never downgraded anyone. Subscriptions were still marked
+      // cancelled/expired first, so access gates closed; everything downstream
+      // (currentVersion, hasPro, credit zeroing, the free balance row, this
+      // picker) was skipped, and the cancellation email never sent.
       workspaceId: userId,
       appContext: "team",
-      workspaceId: null,
       deletedAt: null,
     },
     select: { id: true, updatedAt: true },
