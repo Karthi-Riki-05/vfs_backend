@@ -122,6 +122,38 @@ class IapService {
       });
     } catch (err) {
       if (err && err.code === "P2002") {
+        // The eventId is unique GLOBALLY, not per user, so this branch catches
+        // two very different situations and they must not be conflated:
+        //
+        //  a) the SAME user is being re-delivered an event we already granted
+        //     (Apple retries, plus the app's own validate racing the server
+        //     notification) — genuinely a no-op, the user already has it;
+        //
+        //  b) a DIFFERENT app account is presenting a subscription that is
+        //     already bound to someone else. Apple keys a subscription to the
+        //     Apple ID, so once account A validates it every later receipt
+        //     carries the same originalTransactionId. Account B then lands
+        //     here — and until 2026-08-22 was told `granted: true` while
+        //     receiving nothing, which is what a real tester hit: paid, app
+        //     said success, account stayed Free.
+        //
+        // Distinguishing them is what lets the caller show an honest error.
+        const owner = await prisma.iapTransaction
+          .findUnique({
+            where: { eventId },
+            select: { userId: true },
+          })
+          .catch(() => null);
+        if (owner && owner.userId !== userId) {
+          logger.warn(
+            `[iap] Event ${eventId} is already owned by user ${owner.userId} — ` +
+              `refusing to grant it to ${userId}`,
+          );
+          return {
+            skipped: "owned_by_other_user",
+            ownerUserId: owner.userId,
+          };
+        }
         logger.info(`[iap] Duplicate event ${eventId} — skipped`);
         return { skipped: "duplicate" };
       }

@@ -68,12 +68,33 @@ class IapController {
     const provider = store === "google_play" ? "google" : "apple";
     const result = await iapService.handleIapEvent(event, provider);
 
+    // A subscription already bound to a DIFFERENT app account must not report
+    // success. Apple keys a subscription to the Apple ID, so a user who buys on
+    // account A and later signs in as account B presents the same
+    // originalTransactionId; granting it to B would be subscription sharing, so
+    // the service refuses. Reporting `granted: true` there (the behaviour until
+    // 2026-08-22) left the buyer on Free with no error shown anywhere.
+    if (result.skipped === "owned_by_other_user") {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: "SUBSCRIPTION_OWNED_BY_ANOTHER_ACCOUNT",
+          message:
+            "This purchase is already linked to a different ValueCharts " +
+            "account. Sign in with that account to use it, or contact " +
+            "support to move the subscription.",
+        },
+        data: { validated: true, productId, granted: false },
+      });
+    }
+
     res.json({
       success: true,
       data: {
         validated: true,
         productId,
-        // "duplicate" means an earlier delivery already granted — still OK.
+        // "duplicate" means an earlier delivery already granted TO THIS USER —
+        // still OK. The cross-account case is handled above.
         granted: !!result.granted || result.skipped === "duplicate",
         detail: result,
       },
