@@ -94,16 +94,43 @@ async function sendToUser(userId, title, body, data = {}, appContext = null) {
     where,
     select: { fcmToken: true },
   });
-  if (devices.length === 0) return { success: false, error: "No FCM token" };
+  if (devices.length === 0) {
+    // Logged, not silent: "no registered device" and "delivered fine" used to
+    // look identical in the log, which cost a whole iOS debugging session on
+    // 2026-08-22 — a purchase push had gone to an account whose only token
+    // belonged to a stale session, and nothing recorded that.
+    logger.info(
+      `[FCM] sendToUser user=${userId} app=${appContext || "any"} — no registered device, nothing sent`,
+    );
+    return { success: false, error: "No FCM token" };
+  }
 
   const results = await Promise.all(
     devices.map((d) => sendPushNotification(d.fcmToken, title, body, data)),
   );
   const sent = results.filter((r) => r.success).length;
+  const failed = results.length - sent;
+  // NOTE: `sent` means FCM ACCEPTED the message, never that it was displayed.
+  // APNs rejects asynchronously and tells us nothing, so a wrong
+  // aps-environment entitlement still counts as sent here — see
+  // flutter_webview-main/iOS_checklist.md.
+  if (failed > 0) {
+    logger.warn(
+      `[FCM] sendToUser user=${userId} app=${appContext || "any"} — accepted ${sent}/${results.length}, ${failed} rejected: ` +
+        results
+          .filter((r) => !r.success)
+          .map((r) => r.error?.message || r.error || "unknown")
+          .join("; "),
+    );
+  } else {
+    logger.info(
+      `[FCM] sendToUser user=${userId} app=${appContext || "any"} — accepted ${sent}/${results.length}`,
+    );
+  }
   return {
     success: sent > 0,
     sent,
-    failed: results.length - sent,
+    failed,
     total: results.length,
   };
 }

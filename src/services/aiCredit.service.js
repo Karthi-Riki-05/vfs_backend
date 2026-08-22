@@ -114,18 +114,34 @@ async function getOrCreateBalance(userId, appContext = "team") {
   });
 
   if (!balance) {
-    balance = await prisma.aiCreditBalance.create({
-      data: {
-        userId,
-        planCredits: planCreditsFor(appContext),
-        addonCredits: 0,
-        // Only Team plans expire/refill. Free = one-time grant (never
-        // refills); Pro = lifetime purchase (never expires). Both keep
-        // planResetsAt = null so no refill is ever scheduled.
-        planResetsAt: appContext === "team" ? getNextResetDate() : null,
-        appContext,
-      },
-    });
+    // find-then-create is a race, and a brand-new user is exactly when it
+    // fires: the first page load issues several concurrent requests that all
+    // reach this branch before any row exists. One create wins, the rest throw
+    // P2002 on (user_id, app_context) — which surfaced as a 500 on
+    // GET /api/v1/ai/credits for every new signup (seen 2026-08-22, 1.6s after
+    // an Apple sign-up). The loser simply re-reads the winner's row.
+    try {
+      balance = await prisma.aiCreditBalance.create({
+        data: {
+          userId,
+          planCredits: planCreditsFor(appContext),
+          addonCredits: 0,
+          // Only Team plans expire/refill. Free = one-time grant (never
+          // refills); Pro = lifetime purchase (never expires). Both keep
+          // planResetsAt = null so no refill is ever scheduled.
+          planResetsAt: appContext === "team" ? getNextResetDate() : null,
+          appContext,
+        },
+      });
+    } catch (err) {
+      if (!err || err.code !== "P2002") throw err;
+      balance = await prisma.aiCreditBalance.findUnique({
+        where: { userId_appContext: { userId, appContext } },
+      });
+      // Only a delete between the failed create and this read can land here;
+      // treating it as unexpected is right, the caller already handles throws.
+      if (!balance) throw err;
+    }
   }
 
   // Refill plan credits if the reset date has passed — TEAM only.
