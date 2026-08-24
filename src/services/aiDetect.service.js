@@ -714,7 +714,21 @@ async function generateWithGemini(userMessage) {
     systemInstruction: DIAGRAM_SYSTEM_PROMPT,
   });
 
-  const result = await model.generateContent(userMessage);
+  // thinkingBudget:0 turns OFF gemini-2.5-flash "thinking" — otherwise the model
+  // spends many seconds (and output tokens) reasoning before emitting any XML,
+  // which is the main reason free-tier (Gemini) diagram jobs brushed the client
+  // timeout. maxOutputTokens gives big/long-prompt diagrams room to complete.
+  const result = await model.generateContent({
+    contents: [{ role: "user", parts: [{ text: userMessage }] }],
+    generationConfig: {
+      thinkingConfig: { thinkingBudget: 0 },
+      // 16384 (not 8192): the house-style prompt makes each node token-heavy
+      // (icons, colors, title+subtitle), so large flowcharts truncated at 8192 →
+      // "Incomplete XML structure" → failed all retries. 16384 gives big diagrams
+      // room and still completes in ~30s on gemini-2.5-flash (thinking off).
+      maxOutputTokens: 16384,
+    },
+  });
   const xml = result.response.text().trim();
 
   if (!xml || !xml.includes("<mxGraphModel")) {
@@ -829,7 +843,13 @@ async function generateDiagramXml(
         logger.warn(
           `[AIDetect] Attempt ${attempt} invalid XML: ${validation.error}`,
         );
-        if (attempt < maxAttempts) {
+        // Time budget: the client stops polling at ~120s. A fresh full
+        // generation can take 30–80s, so once we've already spent ~70s there is
+        // no time for another attempt before the user sees a timeout — bail now
+        // (throws → NO credit charged) instead of running a doomed retry.
+        const elapsed = Date.now() - _t0;
+        const canRetryInTime = attempt < maxAttempts && elapsed < 70000;
+        if (canRetryInTime) {
           currentPrompt =
             userMessage +
             `\n\n⚠️ CRITICAL: Previous attempt #${attempt} failed XML validation.
