@@ -215,11 +215,20 @@ class MobileAuthController {
     if (provider === "google") {
       let payload;
       try {
-        const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-        const ticket = await client.verifyIdToken({
-          idToken,
-          audience: process.env.GOOGLE_CLIENT_ID,
-        });
+        // Both client ids are accepted. This backend's GOOGLE_CLIENT_ID is a
+        // LEGACY project (298508684479-…); the web app and Firebase live in
+        // another (177678452616-…, GOOGLE_WEB_CLIENT_ID), so a token minted by
+        // any current client carries the latter as its `aud` and was silently
+        // rejected here. Additive — each entry is still an exact match against
+        // a client we own. See native.google.controller.js#acceptedAudiences.
+        const audience = [
+          process.env.GOOGLE_CLIENT_ID,
+          process.env.GOOGLE_WEB_CLIENT_ID,
+          process.env.GOOGLE_ANDROID_CLIENT_ID,
+          process.env.GOOGLE_IOS_CLIENT_ID,
+        ].filter((id) => typeof id === "string" && id.length > 0);
+        const client = new OAuth2Client();
+        const ticket = await client.verifyIdToken({ idToken, audience });
         payload = ticket.getPayload();
       } catch (err) {
         // Issue 1: malformed/invalid/expired token → 401, never a 500 with a

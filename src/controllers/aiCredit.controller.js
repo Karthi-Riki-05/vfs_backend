@@ -113,7 +113,30 @@ async function persistDiagramToConversation({
 // chat). Caps at the last `limit` messages, trims each, and never includes the
 // stored diagram XML (only role + text). Returns "" for a new/empty/unknown
 // conversation. Never throws — context is best-effort.
-async function buildConversationContext(conversationId, userId, limit = 8) {
+// App-scaffolding assistant lines that carry no conversation *content* — they
+// are the diagram/credit UX chatter we persist. Including them in context made
+// "analyse our history and make a flow" diagram the app's own plumbing (Start →
+// "why so generate?" → "need explicit diagram request" → …) instead of the real
+// topic. Filter them so the model sees only substantive discussion.
+const SCAFFOLDING_RE =
+  /^(Diagram generated\. Preview|Diagram updated\.|I'll create a diagram|I'll update the diagram|⚡|Want me to generate a diagram|You've used all your diagram credits|Analyzed document\.|Could not analyze|Ready to generate)/i;
+
+function isScaffolding(content) {
+  const t = String(content || "").trim();
+  if (!t) return true;
+  return SCAFFOLDING_RE.test(t);
+}
+
+// When the user explicitly asks to summarise/diagram the WHOLE conversation we
+// need a much wider window than the default, or the topic gets truncated.
+const FULL_HISTORY_RE =
+  /\b(history|whole (chat|conversation|thing)|entire (chat|conversation)|our (chat|conversation|discussion)|everything (we|you) (discussed|talked)|summar(y|ise|ize)|so far|above|main (concept|topic|idea|point))\b/i;
+
+function wantsFullHistory(text) {
+  return FULL_HISTORY_RE.test(String(text || ""));
+}
+
+async function buildConversationContext(conversationId, userId, limit = 20) {
   if (!conversationId) return "";
   try {
     const conv = await prisma.aiConversation.findFirst({
@@ -121,15 +144,21 @@ async function buildConversationContext(conversationId, userId, limit = 8) {
       select: { id: true },
     });
     if (!conv) return "";
+    // Over-fetch, then drop scaffolding, then keep the last `limit` substantive
+    // messages — so filtered-out plumbing lines don't eat the window.
     const msgs = await prisma.aiMessage.findMany({
       where: { conversationId },
       orderBy: { createdAt: "desc" },
-      take: limit,
+      take: Math.max(limit * 3, 40),
       select: { role: true, content: true },
     });
     if (!msgs || !msgs.length) return "";
-    return msgs
+    const substantive = msgs
       .reverse()
+      .filter((m) => !isScaffolding(m.content));
+    const kept = substantive.slice(-limit);
+    if (!kept.length) return "";
+    return kept
       .map(
         (m) =>
           `${m.role === "user" ? "User" : "Assistant"}: ${String(
@@ -155,9 +184,13 @@ async function processDiagramJob(jobId) {
     });
 
     // Conversation-aware: pull recent chat so "this business" etc. resolve.
+    // When the user asked to diagram the WHOLE history ("analyse our history and
+    // make a flow"), widen the window so the real topic isn't truncated to just
+    // the last few (often meta) turns.
     const context = await buildConversationContext(
       job.conversationId,
       job.userId,
+      wantsFullHistory(job.prompt) ? 40 : 20,
     );
 
     // Classify complexity so the async path routes by it (Step 6) and charges
@@ -393,7 +426,11 @@ class AiCreditController {
     // fallback inside generateDiagramXml.
     // Conversation-aware: recent chat lets the diagram resolve references and
     // rate complexity from the whole discussion (like Claude/Gemini chat).
-    const context = await buildConversationContext(conversationId, userId);
+    const context = await buildConversationContext(
+      conversationId,
+      userId,
+      wantsFullHistory(message) ? 40 : 20,
+    );
     let complexity = null;
     if (typeof aiDetectService.classifyComplexity === "function") {
       try {

@@ -201,9 +201,15 @@ app.use(
   require("./src/routes/biometric.auth.routes"),
 );
 
+// Native sign-in methods the shell runs OUTSIDE the WebView — currently Google,
+// which refuses OAuth in an embedded browser. Same handoff shape as biometric:
+// a one-time ticket redeemed at /native?ott=. See docs/be-auth-native-google.md.
+app.use("/api/v1/auth/native", require("./src/routes/native.auth.routes"));
+
 // Backwards-compatible aliases (old /api/ routes -> /api/v1/)
 app.use("/api/auth/mobile", require("./src/routes/mobile.auth.routes"));
 app.use("/api/auth/biometric", require("./src/routes/biometric.auth.routes"));
+app.use("/api/auth/native", require("./src/routes/native.auth.routes"));
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/flows", flowRoutes);
