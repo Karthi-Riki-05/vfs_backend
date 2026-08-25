@@ -1,9 +1,12 @@
-const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
-const { prisma } = require("../lib/prisma");
 const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
+const {
+  assertUserLoginable,
+  resolveSocialUser,
+  issueLoginTicket,
+} = require("../services/nativeAuth.service");
 
 /**
  * Native Google Sign-In for the shell.
@@ -35,40 +38,25 @@ const logger = require("../utils/logger");
  *   docs/be-auth-biometric.md for the full argument.
  */
 
-/** Lifetime of the hand-off ticket. Matches the biometric one deliberately. */
-const OTT_TTL_SECONDS = Number(process.env.BIOMETRIC_OTT_TTL_SECONDS || 60);
-
-function mintToken() {
-  return crypto.randomBytes(32).toString("base64url");
-}
-
-function hashToken(token) {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
-
 /**
  * Audiences we accept on a native ID token.
  *
  * ⚠️ `GOOGLE_WEB_CLIENT_ID` IS THE ONE THAT MATTERS, and it is NOT the same as
- * this backend's `GOOGLE_CLIENT_ID`. Discovered 2026-08-24: the two halves of
+ * this backend's `GOOGLE_CLIENT_ID`. Discovered 2026-08-25: the two halves of
  * this app were pointing at two different Google Cloud projects —
  *
  *   frontend/NextAuth  177678452616-…  (project value-charts-6b9c6, = Firebase)
- *   backend .env       298508684479-…  (a legacy project, redirect
- *                                       apps.valueflowsoft.com/login/handler)
+ *   backend .env       298508684479-…  (a legacy project)
  *
- * The shell passes the WEB client as `serverClientId`, which is Google's own
- * recommendation and makes the token's `aud` that web client on both
- * platforms. Verifying against the backend's own `GOOGLE_CLIENT_ID` would
- * therefore reject every native login with an opaque "Invalid token".
+ * The shell passes the WEB client as `serverClientId`, which makes the token's
+ * `aud` that web client on both platforms. Verifying against the backend's own
+ * `GOOGLE_CLIENT_ID` would therefore reject every native login with an opaque
+ * "Invalid token".
  *
  * `GOOGLE_CLIENT_ID` stays in the list rather than being replaced: the legacy
- * project still backs `/api/v1/auth/mobile/social`, and dropping it would break
- * whatever still calls that. Accepting both is strictly additive — each id is
- * still an exact match against a client we own.
+ * project still backs `/api/v1/auth/mobile/social`. Accepting both is strictly
+ * additive — each id is still an exact match against a client we own.
  *
- * The per-platform ids are a fallback for builds where `serverClientId` was not
- * wired up, because the alternative is a login that fails with no clue why.
  * All are OPTIONAL: an unset one is filtered out rather than becoming an
  * empty-string audience, which would match nothing and mask the real cause.
  */
@@ -79,20 +67,6 @@ function acceptedAudiences() {
     process.env.GOOGLE_ANDROID_CLIENT_ID,
     process.env.GOOGLE_IOS_CLIENT_ID,
   ].filter((id) => typeof id === "string" && id.length > 0);
-}
-
-/** Same gate as biometric/login/refresh — see BUG-007 parity. */
-function assertUserLoginable(user) {
-  if (!user) {
-    throw new AppError("Invalid or expired token", 401, "INVALID_TOKEN");
-  }
-  if (user.userStatus === "deleted") {
-    throw new AppError("Account has been deactivated", 401, "USER_DEACTIVATED");
-  }
-  if (user.suspendedAt !== null && user.suspendedAt !== undefined) {
-    logger.warn(`[native-google] blocked — suspended: ${user.id}`);
-    throw new AppError("Account is inactive", 401, "ACCOUNT_INACTIVE");
-  }
 }
 
 class NativeGoogleAuthController {
@@ -159,30 +133,21 @@ class NativeGoogleAuthController {
     }
 
     const providerSub = payload.sub ? String(payload.sub) : null;
-    const user = await this.#resolveUser({
+    const user = await resolveSocialUser({
+      provider: "google",
       email,
       name: payload.name,
       image: payload.picture,
       providerSub,
+      tag: "native-google",
     });
 
-    assertUserLoginable(user);
+    assertUserLoginable(user, "native-google");
 
-    // Prefix so a `biometric_otts` row's origin is legible without a join.
-    const ticketDeviceId = `google:${
-      typeof deviceId === "string" && deviceId.length > 0
-        ? deviceId.slice(0, 120)
-        : "unknown"
-    }`;
-
-    const ott = mintToken();
-    await prisma.biometricOtt.create({
-      data: {
-        tokenHash: hashToken(ott),
-        userId: user.id,
-        deviceId: ticketDeviceId,
-        expiresAt: new Date(Date.now() + OTT_TTL_SECONDS * 1000),
-      },
+    const ticket = await issueLoginTicket({
+      userId: user.id,
+      deviceId,
+      source: "google",
     });
 
     logger.info(
@@ -191,84 +156,9 @@ class NativeGoogleAuthController {
       }`,
     );
 
-    res.json({ success: true, data: { ott, expiresIn: OTT_TTL_SECONDS } });
+    res.json({ success: true, data: ticket });
   });
 
-  /**
-   * Find or create the account behind a verified Google identity.
-   *
-   * Mirrors mobile.auth.controller.js#socialLogin, including the subject-id
-   * fallback: an account imported from the old app may carry a fabricated
-   * address, so a miss on email is not proof this is a new person.
-   */
-  async #resolveUser({ email, name, image, providerSub }) {
-    let user = await prisma.user.findUnique({ where: { email } });
-
-    if (!user && providerSub) {
-      const link = await prisma.account.findUnique({
-        where: {
-          provider_providerAccountId: {
-            provider: "google",
-            providerAccountId: providerSub,
-          },
-        },
-        include: { user: true },
-      });
-      user = link?.user || null;
-    }
-
-    if (!user) {
-      user = await prisma.user.create({
-        data: {
-          email,
-          name: name || email.split("@")[0],
-          image: image || null,
-          role: "Viewer",
-          // Google has verified the address, so the account starts verified —
-          // consistent with the credentials gate and with socialLogin.
-          emailVerified: new Date(),
-        },
-      });
-      logger.info(`[native-google] user created: ${user.id}`);
-    } else {
-      const updates = {};
-      if (!user.image && image) updates.image = image;
-      if (!user.name && name) updates.name = name;
-      if (Object.keys(updates).length > 0) {
-        user = await prisma.user.update({
-          where: { id: user.id },
-          data: updates,
-        });
-      }
-    }
-
-    // Keep the account reachable by subject id even if Google later stops
-    // sharing the address. Parity with the web oauthSync path.
-    if (providerSub) {
-      try {
-        await prisma.account.upsert({
-          where: {
-            provider_providerAccountId: {
-              provider: "google",
-              providerAccountId: providerSub,
-            },
-          },
-          create: {
-            userId: user.id,
-            type: "oauth",
-            provider: "google",
-            providerAccountId: providerSub,
-          },
-          update: { userId: user.id },
-        });
-      } catch (err) {
-        // Non-fatal: the identity is already established.
-        logger.warn(`[native-google] account link upsert failed: ${err.message}`);
-      }
-    }
-
-    return user;
-  }
 }
 
 module.exports = new NativeGoogleAuthController();

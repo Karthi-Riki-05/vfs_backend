@@ -30,6 +30,7 @@ const notificationService = require("./notification.service");
 const {
   TEAM_CREDITS_PER_SEAT_MONTHLY,
   TEAM_CREDITS_PER_SEAT_YEARLY,
+  absorbFreeAddonCredits,
 } = require("./aiCredit.service");
 const { getSubscriptionPeriodEnd } = require("./pro.service");
 
@@ -1588,6 +1589,12 @@ class SubscriptionService {
         },
       }),
     ]);
+
+    // bug-156: the array transaction above just created/updated the team wallet.
+    // Now carry the buyer's paid add-on credits from their `free` wallet into it
+    // (Option A — free PLAN credits are not carried). Own atomic move-then-zero,
+    // idempotent on webhook replay.
+    await absorbFreeAddonCredits(prisma, userId, "team");
 
     logger.info(
       `[Team Upgrade] Complete for user ${userId} → team ${team.id}. ` +

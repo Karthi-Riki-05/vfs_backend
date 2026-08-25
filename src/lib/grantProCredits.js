@@ -42,6 +42,12 @@ async function grantProCredits(userId, options = {}, tx = null) {
       },
     });
 
+    // bug-156: carry the buyer's paid add-on credits from their `free` wallet
+    // into the new `pro` wallet (Option A — free PLAN credits are not carried).
+    // Lazy require avoids a load-order cycle with aiCredit.service.
+    const { absorbFreeAddonCredits } = require("../services/aiCredit.service");
+    await absorbFreeAddonCredits(db, userId, "pro");
+
     if (txnId) {
       const existing = await db.transactionLog.findFirst({ where: { txnId } });
       if (!existing) {

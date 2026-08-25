@@ -404,6 +404,38 @@ async function resetAllPlanCredits() {
   return resetCount;
 }
 
+// bug-156: When a FREE user upgrades to Team/Pro, the paid add-on credits they
+// bought as a free user sit in the `free` wallet (a separate (userId, appContext)
+// row) and become invisible in the new context. Carry those PAID add-on credits
+// forward into the target wallet on activation. Free PLAN credits are a starter
+// perk the paid plan replaces, so they are intentionally NOT carried (Option A).
+//
+// Move-then-zero makes this idempotent: a webhook replay finds 0 add-on left in
+// the free wallet and moves nothing. Must share the caller's transaction client
+// so the move and the zero are atomic. The target wallet must already exist
+// (upsert it first) — the increment update below would otherwise throw.
+async function absorbFreeAddonCredits(db, userId, targetContext) {
+  if (!targetContext || targetContext === "free") return 0;
+  const free = await db.aiCreditBalance.findUnique({
+    where: { userId_appContext: { userId, appContext: "free" } },
+    select: { addonCredits: true },
+  });
+  const moving = free?.addonCredits || 0;
+  if (moving <= 0) return 0;
+  await db.aiCreditBalance.update({
+    where: { userId_appContext: { userId, appContext: "free" } },
+    data: { addonCredits: 0 },
+  });
+  await db.aiCreditBalance.update({
+    where: { userId_appContext: { userId, appContext: targetContext } },
+    data: { addonCredits: { increment: moving } },
+  });
+  logger.info(
+    `[AiCredit] Absorbed ${moving} paid add-on credits from free → ${targetContext} wallet for ${userId} (bug-156)`,
+  );
+  return moving;
+}
+
 // Grant initial team AI credits when a subscription is first activated.
 // Monthly: seats × 40, resets next month (cron). Yearly: the FULL year
 // upfront (seats × 500), resets at the yearly renewal (invoice.paid webhook).
@@ -422,16 +454,22 @@ async function grantTeamCredits(userId, seats, plan, expiresAt = null) {
           return d;
         })()
       : getNextResetDate();
-  await prisma.aiCreditBalance.upsert({
-    where: { userId_appContext: { userId, appContext: "team" } },
-    update: { planCredits: credits, planResetsAt: nextReset },
-    create: {
-      userId,
-      planCredits: credits,
-      addonCredits: 0,
-      planResetsAt: nextReset,
-      appContext: "team",
-    },
+  // One transaction: upsert the team wallet, then absorb the free wallet's paid
+  // add-on credits into it (bug-156). resetsAt only overwrites planCredits, never
+  // the add-on balance we just merged.
+  await prisma.$transaction(async (tx) => {
+    await tx.aiCreditBalance.upsert({
+      where: { userId_appContext: { userId, appContext: "team" } },
+      update: { planCredits: credits, planResetsAt: nextReset },
+      create: {
+        userId,
+        planCredits: credits,
+        addonCredits: 0,
+        planResetsAt: nextReset,
+        appContext: "team",
+      },
+    });
+    await absorbFreeAddonCredits(tx, userId, "team");
   });
   logger.info(
     `[AiCredit] Granted ${credits} team credits to owner ${userId} (${seats} seats, ${plan})`,
@@ -450,6 +488,7 @@ module.exports = {
   addAddonCredits,
   resetAllPlanCredits,
   grantTeamCredits,
+  absorbFreeAddonCredits,
   PLAN_CREDITS,
   TEAM_CREDITS_PER_SEAT_MONTHLY,
   TEAM_CREDITS_PER_SEAT_YEARLY,

@@ -1,5 +1,6 @@
 const router = require("express").Router();
 const c = require("../controllers/native.google.controller");
+const fb = require("../controllers/native.facebook.controller");
 const { biometricLimiter } = require("../middleware/rateLimiter");
 
 /**
@@ -58,5 +59,52 @@ const { biometricLimiter } = require("../middleware/rateLimiter");
  *       500: { description: GOOGLE_CLIENT_ID not configured }
  */
 router.post("/google", biometricLimiter, c.login);
+
+/**
+ * @swagger
+ * /api/v1/auth/native/facebook:
+ *   post:
+ *     summary: Turn a native Facebook access token into a one-time login ticket
+ *     description: >
+ *       Deliberately UNAUTHENTICATED — it runs before any session exists.
+ *       Unlike Google's signed ID token, Facebook's access token is opaque and
+ *       carries no signature, so it is verified by ASKING Facebook: /debug_token
+ *       confirms the token is valid AND was minted for THIS app (the audience
+ *       check — without it a token from any other Facebook app would be
+ *       accepted), then /me returns the profile.
+ *
+ *       Facebook does not guarantee an email; accounts without one are refused
+ *       with SOCIAL_NO_EMAIL rather than being created unreachable.
+ *     tags: [Native Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [accessToken]
+ *             properties:
+ *               accessToken: { type: string, description: Facebook-issued access token }
+ *               deviceId:    { type: string, description: Stable per-install id, for the audit trail }
+ *               appVariant:  { type: string, enum: [pro, team] }
+ *     responses:
+ *       200:
+ *         description: Ticket issued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     ott:       { type: string }
+ *                     expiresIn: { type: integer, example: 60 }
+ *       400: { description: Missing accessToken, or the account shares no email }
+ *       401: { description: Invalid token, token minted for another app, or account suspended/deleted }
+ *       500: { description: FACEBOOK_CLIENT_ID / SECRET not configured }
+ */
+router.post("/facebook", biometricLimiter, fb.login);
 
 module.exports = router;
