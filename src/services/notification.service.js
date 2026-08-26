@@ -39,6 +39,60 @@ const KNOWN_TYPES = new Set([
   "team_member_removed",
 ]);
 
+// bug-157: categories for which createNotification fans out PUSH + EMAIL by
+// itself (each still gated by the user's per-category preference). These are
+// the user-facing settings rows that previously had a PUSH/EMAIL toggle in the
+// UI but no backend send — so the toggle did nothing. Everything NOT listed
+// here (flow-pack/add-on, billing, security) already builds its own push/email
+// with richer, hand-written templates, so it is deliberately excluded to avoid
+// double-sending. A caller can still force a channel on with opts.push:true /
+// opts.email:true, or suppress the auto fan-out with opts.push:false /
+// opts.email:false when it sends that channel itself (e.g. the team-invite
+// email that carries the accept-token link).
+// NB: team_invite is deliberately NOT here — it already sends its own push
+// (with the accept-token deep-link) and its own invite email (with the accept
+// link), both of which AUTO_FANOUT's generic versions would duplicate.
+const AUTO_FANOUT = new Set([
+  "team_invite_declined",
+  "team_member_joined",
+  "team_member_removed",
+  "flow_updated",
+]);
+
+// Minimal HTML-escape — notification titles/messages interpolate user-supplied
+// names (team, member, flow), so they must never be dropped raw into an email.
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// A single branded template used for every auto fan-out email. Callers that
+// need something richer send their own mail and pass opts.email:false.
+function buildGenericEmail({ to, name, subject, message, actionUrl }) {
+  const base = (process.env.APP_URL || "").replace(/\/$/, "");
+  const link = actionUrl
+    ? `${base}${actionUrl.startsWith("/") ? "" : "/"}${actionUrl}`
+    : null;
+  const cta = link
+    ? `<p style="margin:24px 0"><a href="${escapeHtml(link)}" style="background:#16a34a;color:#ffffff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">View in ValueChart</a></p>`
+    : "";
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#1f2937;line-height:1.5">
+  <h2 style="color:#111827;margin:0 0 16px">${escapeHtml(subject)}</h2>
+  <p style="margin:0 0 12px">Hi ${escapeHtml(name || "there")},</p>
+  <p style="margin:0 0 12px">${escapeHtml(message)}</p>
+  ${cta}
+  <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0"/>
+  <p style="font-size:12px;color:#6b7280;margin:0">You're receiving this because email notifications are enabled for this activity. Manage it in ValueChart → Settings → Notifications.</p>
+</div>`;
+  const text = `${subject}\n\nHi ${name || "there"},\n\n${message}${
+    link ? `\n\n${link}` : ""
+  }\n\nManage email notifications in ValueChart → Settings → Notifications.`;
+  return { to, subject, html, text };
+}
+
 /**
  * Push a freshly-created notification to the user's live socket session(s).
  *
@@ -152,49 +206,57 @@ async function createNotification(
   // preference-lookup problem can never silently drop a real notification —
   // isChannelEnabled already fails open internally; the .catch here is
   // belt-and-suspenders for this specific call site.
-  const enabled = await notificationPreference
+  //
+  // bug-157: the three channels are INDEPENDENT. This gate covers ONLY the
+  // in-app bell row/emit; push and email are gated by their own preference
+  // below. Previously an in-app opt-out returned early and silently killed the
+  // other two channels too, so a user who muted the bell but kept push/email
+  // received nothing.
+  const inAppEnabled = await notificationPreference
     .isChannelEnabled(userId, type, "inApp", appContext)
     .catch(() => true);
-  if (!enabled) return null;
 
-  const notification = await prisma.notification.create({
-    data: {
-      userId,
-      type,
-      title,
-      message,
-      actionUrl,
-      metadata,
-      appContext,
-      // owner-as-workspace (2026-08-07): a personal notification carries the
-      // RECIPIENT'S OWN id, never null — `buildScope` reads personal rows with
-      // `workspaceId = userId`, so a null written here could never be matched
-      // and the notification would be invisible forever. Callers still pass
-      // null to mean "personal"; normalise it at this one choke point rather
-      // than at each of the ~40 call sites.
-      workspaceId: workspaceId || userId,
-    },
-  });
+  let notification = null;
+  if (inAppEnabled) {
+    notification = await prisma.notification.create({
+      data: {
+        userId,
+        type,
+        title,
+        message,
+        actionUrl,
+        metadata,
+        appContext,
+        // owner-as-workspace (2026-08-07): a personal notification carries the
+        // RECIPIENT'S OWN id, never null — `buildScope` reads personal rows with
+        // `workspaceId = userId`, so a null written here could never be matched
+        // and the notification would be invisible forever. Callers still pass
+        // null to mean "personal"; normalise it at this one choke point rather
+        // than at each of the ~40 call sites.
+        workspaceId: workspaceId || userId,
+      },
+    });
 
-  // P1: deliver in real time so the bell updates instantly instead of on the
-  // next 60s poll. Non-blocking, fail-open.
-  emitNotification(notification);
+    // P1: deliver in real time so the bell updates instantly instead of on the
+    // next 60s poll. Non-blocking, fail-open.
+    emitNotification(notification);
+  }
 
-  // ── Optional FCM push ───────────────────────────────────────────────────
-  // OPT-IN (`opts.push`), not automatic. The bell and the push are two
-  // deliberate channels: the bell is workspace-scoped by design (see
-  // buildScope) while a push reaches the user wherever they are, so five
-  // services already pair createNotification with an explicit
-  // push.sendPushToUser. Pushing unconditionally here would double-notify
-  // every one of them, and would also push ~17 other call sites that were
-  // never written expecting it. Enable it per type, on purpose.
+  // ── FCM push ──────────────────────────────────────────────────────────────
+  // Fires automatically for AUTO_FANOUT categories (bug-157) and for any caller
+  // that explicitly asks with opts.push:true; a caller that sends its own push
+  // suppresses this with opts.push:false. The bell and the push are two
+  // channels: the bell is workspace-scoped by design (see buildScope) while a
+  // push reaches the user wherever they are.
   //
   // ALWAYS via push.service, never fcm.service directly: only the facade
   // applies the user's per-category preference, quiet hours and rate limits.
   // `type` doubles as the preference category — that is the contract
   // isChannelEnabled documents ("the Notification.type / push category
   // string"), so passing anything else would silently bypass the opt-out.
-  if (opts.push) {
+  const pushWanted =
+    opts.push !== false && (opts.push === true || AUTO_FANOUT.has(type));
+  if (pushWanted) {
     try {
       const push = require("./push.service");
       const res = await push.sendPushToUser(
@@ -221,6 +283,44 @@ async function createNotification(
       // truth. A missing banner must not fail the caller's business logic.
       logger.error(
         `[Notification] push for "${type}" failed: ${err.message} — bell row unaffected`,
+      );
+    }
+  }
+
+  // ── Email ───────────────────────────────────────────────────────────────
+  // Generic branded email using the notification's own title/message, gated by
+  // the per-category EMAIL preference (bug-157). Fires for AUTO_FANOUT
+  // categories and for opts.email:true; suppressed by opts.email:false when the
+  // caller sends its own richer mail (e.g. the invite email with the accept
+  // link). Best-effort and non-blocking — the bell row is the source of truth.
+  const emailWanted =
+    opts.email !== false && (opts.email === true || AUTO_FANOUT.has(type));
+  if (emailWanted) {
+    try {
+      const allowed = await notificationPreference
+        .isChannelEnabled(userId, type, "email", appContext)
+        .catch(() => true);
+      if (allowed) {
+        const recipient = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { email: true, name: true },
+        });
+        if (recipient?.email) {
+          const { sendEmail } = require("../utils/email");
+          await sendEmail(
+            buildGenericEmail({
+              to: recipient.email,
+              name: recipient.name,
+              subject: opts.emailSubject || title,
+              message,
+              actionUrl,
+            }),
+          );
+        }
+      }
+    } catch (err) {
+      logger.error(
+        `[Notification] email for "${type}" failed: ${err.message} — bell row unaffected`,
       );
     }
   }

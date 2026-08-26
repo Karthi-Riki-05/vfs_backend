@@ -2,7 +2,7 @@ const { prisma } = require("../lib/prisma");
 const { resolveWorkspaceId } = require("../lib/workspaceScope");
 const AppError = require("../utils/AppError");
 const crypto = require("crypto");
-const { sendTeamInviteEmail, sendEmail } = require("../utils/email");
+const { sendTeamInviteEmail } = require("../utils/email");
 const notificationService = require("./notification.service");
 const logger = require("../utils/logger");
 // bug-093: a team's chat room is part of the team, so its lifecycle lives
@@ -763,21 +763,10 @@ class TeamService {
       logger.error(`[Team] removal notification failed: ${err.message}`);
     }
 
-    // 3. Email.
-    if (removedUser?.email) {
-      try {
-        await sendEmail({
-          to: removedUser.email,
-          subject: `You have been removed from ${teamName}`,
-          html: `<p>Hi ${removedUser.name || "there"},</p>
-<p>You have been removed from the team <strong>${teamName}</strong> on ValueChart.</p>
-<p>You no longer have access to that team's workspace. Your personal flows and data are unaffected.</p>`,
-          text: `You have been removed from the team "${teamName}" on ValueChart. Your personal flows and data are unaffected.`,
-        });
-      } catch (err) {
-        logger.error(`[Team] removal email failed: ${err.message}`);
-      }
-    }
+    // 3. Email + push now fan out from createNotification above (bug-157:
+    //    team_member_removed is an AUTO_FANOUT category), each gated by the
+    //    removed member's per-channel preference. The previous hand-rolled
+    //    sendEmail here is gone to avoid a double email.
   }
 
   /**
@@ -1265,32 +1254,10 @@ class TeamService {
       } catch {
         // never block invite acceptance on notification failure
       }
-
-      // FCM push so the owner is reached even when offline or viewing a
-      // different workspace (the in-app bell is strictly workspace-scoped
-      // by design — see notification.service buildScope). Same
-      // createNotification + sendPushToUser pairing as chat/subscription.
-      try {
-        const push = require("./push.service");
-        await push.sendPushToUser(
-          team.teamOwnerId,
-          {
-            title: "New Team Member",
-            body: `${acceptingUser.name || acceptingUser.email} joined "${
-              team.name || "your team"
-            }"`,
-            data: {
-              type: "team_member_joined",
-              teamId: team.id,
-              url: `/dashboard/teams/${team.id}`,
-            },
-          },
-          team.appContext || "team",
-          "team_member_joined",
-        );
-      } catch {
-        // never block invite acceptance on push failure
-      }
+      // bug-157: push + email now fan out from createNotification itself
+      // (team_member_joined is an AUTO_FANOUT category), each gated by the
+      // owner's per-channel preference. The previous hand-rolled
+      // push.sendPushToUser here is gone to avoid a double banner.
     }
 
     return { teamId: invite.teamId, appContext: memberAppContext };

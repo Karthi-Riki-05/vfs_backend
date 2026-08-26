@@ -1668,19 +1668,33 @@ class SubscriptionService {
       }
     }
 
-    // In-app notification (non-blocking). Credit amount is seat-scaled.
-    try {
-      const planName = dbPlan?.name || "Team";
-      await notificationService.createNotification(
-        userId,
-        "subscription_activated",
-        "Subscription Activated!",
-        `Your ${planName} plan is now active. You have ${teamPlanCredits} AI credits.`,
-        "/dashboard/subscription",
-        { planName, creditAmount: teamPlanCredits, expiresAt },
+    // In-app notification — FIRST purchase only, same rule as the push and the
+    // email above. Credit amount is seat-scaled.
+    //
+    // This was MISSED when the renewal guard was added for the other two
+    // channels: the push stopped repeating but the notification centre kept
+    // filling up, one "Subscription Activated!" per renewal. Reported on
+    // 2026-08-25 with three identical entries 5 minutes apart — which is
+    // exactly Google's LICENSE-TESTER renewal cadence, so it reproduces in
+    // minutes on a test account and monthly in production.
+    if (isRenewal) {
+      logger.info(
+        `[notify] subscription_activated suppressed for user ${userId} — renewal`,
       );
-    } catch (err) {
-      logger.warn(`[notify] subscription_activated skipped: ${err.message}`);
+    } else {
+      try {
+        const planName = dbPlan?.name || "Team";
+        await notificationService.createNotification(
+          userId,
+          "subscription_activated",
+          "Subscription Activated!",
+          `Your ${planName} plan is now active. You have ${teamPlanCredits} AI credits.`,
+          "/dashboard/subscription",
+          { planName, creditAmount: teamPlanCredits, expiresAt },
+        );
+      } catch (err) {
+        logger.warn(`[notify] subscription_activated skipped: ${err.message}`);
+      }
     }
   }
 
@@ -2229,7 +2243,21 @@ class SubscriptionService {
         status: { in: ["active", "cancelling"] },
         expiresAt: { not: null, lt: cutoff },
       },
-      select: { id: true, userId: true, expiresAt: true, productType: true },
+      select: {
+        id: true,
+        userId: true,
+        expiresAt: true,
+        productType: true,
+        // Needed to archive the plan into subscription_history below.
+        price: true,
+        currency: true,
+        isRecurring: true,
+        startedAt: true,
+        appContext: true,
+        provider: true,
+        status: true,
+        plan: { select: { name: true } },
+      },
     });
 
     let expired = 0;
@@ -2241,6 +2269,55 @@ class SubscriptionService {
           data: { status: "expired" },
         });
         expired += 1;
+
+        // Archive the plan that just ran out (bug-129).
+        //
+        // WHY: getHistory() shows ONLY rows with status "expired" — the
+        // Billing page's "past plans" list, per the owner decision of
+        // 2026-07-02. But this job previously updated `subscription.status`
+        // and wrote NOTHING here, so a team plan could expire without ever
+        // producing an "expired" history row. The row written at purchase
+        // time says "active" and is never revised. Net effect: the panel was
+        // permanently empty for every team subscriber, while Pro flow-addon
+        // users saw entries because pro.service logFlowAddonHistory() does
+        // record its own expiries.
+        //
+        // Non-blocking on purpose: a failure here must never stop the
+        // downgrade below, which is the part that actually protects
+        // entitlements.
+        try {
+          await prisma.subscriptionHistory.create({
+            data: {
+              userId: sub.userId,
+              planName:
+                sub.plan?.name ||
+                (sub.productType === "team_yearly"
+                  ? "Team Yearly"
+                  : sub.productType === "team_monthly"
+                    ? "Team Monthly"
+                    : sub.productType || "Subscription"),
+              productType: sub.productType || null,
+              status: "expired",
+              price: sub.price ?? 0,
+              currency: sub.currency || "usd",
+              isRecurring: sub.isRecurring ?? true,
+              source: sub.provider || "stripe",
+              startedAt: sub.startedAt || null,
+              expiresAt: sub.expiresAt || null,
+              appContext: sub.appContext,
+              archivedReason: "subscription_expiry",
+              snapshot: {
+                subscriptionId: sub.id,
+                previousStatus: sub.status,
+                expiredAt: new Date().toISOString(),
+              },
+            },
+          });
+        } catch (err) {
+          logger.error(
+            `[expireLapsedSubscriptions] history row failed for subscription ${sub.id}: ${err.message}`,
+          );
+        }
         try {
           await downgradeUser(sub.userId, { reason: "subscription_expiry" });
           downgraded += 1;
