@@ -77,6 +77,39 @@ function getPublisher() {
 
 /** Renewal orderIds are `GPA.xxxx..0`, `..1`, … — strip the suffix so every
  * renewal of one subscription shares a stable original id. */
+/**
+ * The recurring price Play reports for a subscription line item, as
+ * { price, currency } — or nulls when Play doesn't give one.
+ *
+ * WHY (bug-131): the two call sites below used to hardcode `price: null` with
+ * the comment "subscriptionsv2 does not expose the charged amount". That was
+ * wrong — `lineItems[].autoRenewingPlan.recurringPrice` is a Money
+ * ({ currencyCode, units, nanos }) and has been in the v3 API all along.
+ *
+ * The consequence was user-visible: with no price on the event,
+ * iapService._amountCents() fell back to OUR list price, so every renewal in
+ * the Billing "Transactions" list recorded $10.00 for a plan Google actually
+ * charged $9.99 for — and in a country whose Play tier isn't a straight
+ * conversion, the gap is far wider than a cent.
+ *
+ * Caveat carried from Google's own docs: recurringPrice excludes tax and
+ * discounts. It is much closer than a list-price guess, but the store receipt
+ * remains the authority on the exact amount debited.
+ */
+function recurringPriceOf(line) {
+  const money = line?.autoRenewingPlan?.recurringPrice;
+  if (!money) return { price: null, currency: null };
+  const units = Number(money.units || 0);
+  const nanos = Number(money.nanos || 0);
+  if (!Number.isFinite(units) || !Number.isFinite(nanos)) {
+    return { price: null, currency: null };
+  }
+  return {
+    price: units + nanos / 1e9,
+    currency: money.currencyCode ? String(money.currencyCode).toLowerCase() : null,
+  };
+}
+
 function baseOrderId(orderId) {
   return orderId ? orderId.replace(/\.\.\d+$/, "") : orderId;
 }
@@ -198,8 +231,7 @@ async function validatePurchase({
       product_id: lineProductId,
       transaction_id: orderId,
       original_transaction_id: baseOrderId(orderId),
-      price: null, // subscriptionsv2 does not expose the charged amount
-      currency: null,
+      ...recurringPriceOf(line),
       store: "PLAY_STORE",
       expiration_at_ms: expiryMs,
     };
@@ -328,8 +360,7 @@ async function normalizeRtdn(pushBody) {
       product_id: line.productId || subNote.subscriptionId,
       transaction_id: orderId,
       original_transaction_id: baseOrderId(orderId),
-      price: null,
-      currency: null,
+      ...recurringPriceOf(line),
       store: "PLAY_STORE",
       expiration_at_ms: line.expiryTime ? Date.parse(line.expiryTime) : null,
     };

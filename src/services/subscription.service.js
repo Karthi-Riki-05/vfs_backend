@@ -1557,6 +1557,13 @@ class SubscriptionService {
           currency: session.currency || getStripeCurrency(),
           status: "success",
           paymentMethod: session.payment_method_types?.[0] || "card",
+          // bug-131: this row is what the Billing "Transactions" list shows.
+          // It was the ONLY transactionLog.create in the file without a
+          // purchaseType, so every team purchase AND every store renewal
+          // appeared there as an unlabelled charge — six rows reading only
+          // "$10.00" for a sandbox run. The other writers already use
+          // "team_subscription"; match them.
+          purchaseType: "team_subscription",
           appType: "enterprise",
           appContext: "team",
         },
@@ -1611,6 +1618,26 @@ class SubscriptionService {
     // 5 minutes. A real renewal receipt is a separate, deliberate feature;
     // re-sending the NEW-PURCHASE receipt is simply wrong.
     const isRenewal = session?.metadata?.isRenewal === "true";
+
+    // Owner decision 2026-08-27: a YEARLY renewal notifies; a monthly one does
+    // not. A silent $9.99 monthly charge is unremarkable and the store emails
+    // its own receipt anyway, but a silent $499.99 annual charge is the one
+    // people are surprised by — and surprise is what generates refund
+    // requests. The 2026-08-25 "notification centre fills up" report was a
+    // MONTHLY (5-minute sandbox) cadence, so suppressing yearly too was
+    // broader than that bug required.
+    //
+    // The copy differs deliberately: re-sending "Subscription Activated!" for
+    // a renewal is simply wrong — nothing was activated, it continued.
+    const isYearlyRenewal =
+      isRenewal && String(plan || "").toLowerCase() === "yearly";
+    const renewalAmountLabel =
+      session?.amount_total != null
+        ? `${(session.amount_total / 100).toFixed(2)} ${String(
+            session.currency || "usd",
+          ).toUpperCase()}`
+        : null;
+
     if (isRenewal) {
       logger.info(
         `[Email] paymentSuccess suppressed for user ${userId} — renewal, not a new purchase`,
@@ -1647,10 +1674,28 @@ class SubscriptionService {
     // had never been delivered before, so renewals were simply never processed.
     //
     // Stripe sessions never carry this flag, so web checkout is unchanged.
-    if (isRenewal) {
+    if (isRenewal && !isYearlyRenewal) {
       logger.info(
-        `[push] paymentSuccess suppressed for user ${userId} — renewal, not a new purchase`,
+        `[push] paymentSuccess suppressed for user ${userId} — monthly renewal`,
       );
+    } else if (isYearlyRenewal) {
+      try {
+        const push = require("./push.service");
+        await push.sendPushToUser(
+          userId,
+          {
+            title: "Subscription renewed",
+            body: `Your ${dbPlan?.name || "Team"} plan renewed for another year${
+              renewalAmountLabel ? ` — ${renewalAmountLabel} charged` : ""
+            }.`,
+            data: { type: "subscription_activated", url: "/dashboard/subscription" },
+          },
+          "team",
+          "subscription_activated",
+        );
+      } catch (err) {
+        logger.warn(`[push] yearly renewal notify skipped: ${err.message}`);
+      }
     } else {
       try {
         const push = require("./push.service");
@@ -1677,10 +1722,26 @@ class SubscriptionService {
     // 2026-08-25 with three identical entries 5 minutes apart — which is
     // exactly Google's LICENSE-TESTER renewal cadence, so it reproduces in
     // minutes on a test account and monthly in production.
-    if (isRenewal) {
+    if (isRenewal && !isYearlyRenewal) {
       logger.info(
-        `[notify] subscription_activated suppressed for user ${userId} — renewal`,
+        `[notify] subscription_activated suppressed for user ${userId} — monthly renewal`,
       );
+    } else if (isYearlyRenewal) {
+      try {
+        const planName = dbPlan?.name || "Team";
+        await notificationService.createNotification(
+          userId,
+          "subscription_activated",
+          "Subscription renewed",
+          `Your ${planName} plan renewed for another year${
+            renewalAmountLabel ? ` — ${renewalAmountLabel} charged` : ""
+          }.`,
+          "/dashboard/subscription",
+          { planName, renewal: true, amount: renewalAmountLabel, expiresAt },
+        );
+      } catch (err) {
+        logger.warn(`[notify] yearly renewal skipped: ${err.message}`);
+      }
     } else {
       try {
         const planName = dbPlan?.name || "Team";
