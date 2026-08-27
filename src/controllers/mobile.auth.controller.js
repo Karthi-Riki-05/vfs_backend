@@ -7,7 +7,11 @@ const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const flowService = require("../services/flow.service");
-const { resolveSignupProvenance } = require("../lib/signupProvenance");
+const {
+  resolveSignupProvenance,
+  shellAppTypeFromUserAgent,
+  clientUserAgent,
+} = require("../lib/signupProvenance");
 
 function signAccessToken(userId) {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "7d" });
@@ -23,7 +27,29 @@ function signRefreshToken(userId) {
 // (including the legacy "free" some clients may still send) folds into
 // "team". Same X-App-Context header convention used across every other
 // controller (see notification.controller.js resolveContext).
+/**
+ * Which SHELL this device token belongs to — "pro" | "team".
+ *
+ * The shell's User-Agent tag is authoritative and is checked FIRST, because a
+ * token belongs to the app that produced it, not to whatever workspace the
+ * user happens to be viewing. `X-App-Context` and `currentVersion` describe
+ * the latter and are only fallbacks for a caller that sends no shell UA.
+ *
+ * WHY (bug-130): this used to read the header/currentVersion first. dev user
+ * cmt1l9khw… had currentVersion "pro", so when the TEAM app registered its
+ * token the row was stamped app_context "pro". Their team subscription then
+ * expired, iapService routed the push to "team", and fcm.sendToUser — which
+ * filters devices on `appContext IN (null, "team")` — matched nothing and sent
+ * nowhere. The user never learned their plan had ended.
+ *
+ * Pro and Team are separate installs with separate FCM tokens, so the UA is
+ * both stable and correct for the row's lifetime; the workspace the user is
+ * looking at is neither.
+ */
 function resolveDeviceAppContext(req) {
+  const fromShell = shellAppTypeFromUserAgent(clientUserAgent(req));
+  if (fromShell === "pro" || fromShell === "team") return fromShell;
+
   const raw = (
     req.headers["x-app-context"] ||
     req.user?.currentVersion ||

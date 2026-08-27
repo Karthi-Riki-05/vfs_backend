@@ -310,6 +310,36 @@ class IapService {
     const copy = COPY[kind];
     if (!copy) return;
 
+    // In-app notification FIRST, and independently of the push.
+    //
+    // WHY (bug-130): this method used to send ONLY a device push. A push can
+    // silently reach nobody — dev user cmt1l9khw…'s single FCM token was
+    // stamped app_context "pro" while their expiring TEAM plan routed the push
+    // to "team", so fcm.sendToUser matched zero devices and returned "No FCM
+    // token". Nothing was delivered and nothing was recorded, so the user had
+    // no way to learn their plan had ended. The cron path
+    // (subscription.service expireLapsedSubscriptions) always wrote an in-app
+    // row; the store path did not — same event, two different outcomes
+    // depending on whose clock ended the plan.
+    //
+    // The bell icon is the durable channel: it survives a missing token, a
+    // revoked notification permission and an uninstalled shell.
+    try {
+      const notificationService = require("./notification.service");
+      await notificationService.createNotification(
+        userId,
+        copy.category,
+        copy.title,
+        copy.body,
+        "/dashboard/subscription",
+        { reason: kind, productType: product.type, appContext },
+      );
+    } catch (err) {
+      logger.warn(
+        `[iap] in-app ${kind} notification skipped for ${userId}: ${err.message}`,
+      );
+    }
+
     try {
       const push = require("./push.service");
       const res = await push.sendPushToUser(
