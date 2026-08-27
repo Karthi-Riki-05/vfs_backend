@@ -81,7 +81,7 @@ class NativeGoogleAuthController {
    * we check the audience so a token minted for someone else's app is refused.
    */
   login = asyncHandler(async (req, res) => {
-    const { idToken, deviceId, appVariant } = req.body || {};
+    const { idToken, deviceId, appVariant, platform } = req.body || {};
 
     if (!idToken || typeof idToken !== "string") {
       throw new AppError("idToken is required", 400, "VALIDATION_ERROR");
@@ -140,6 +140,11 @@ class NativeGoogleAuthController {
       image: payload.picture,
       providerSub,
       tag: "native-google",
+      // Signup provenance, used only if this creates the account. The
+      // shell states its own platform: this endpoint is reached by a
+      // plain Dart http call, so there is no shell User-Agent to read.
+      platform,
+      appVariant,
     });
 
     assertUserLoginable(user, "native-google");

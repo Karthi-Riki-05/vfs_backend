@@ -177,10 +177,37 @@ class ProService {
         email: true,
         hasPro: true,
         proPurchasedAt: true,
+        proRefundedAt: true,
         currentVersion: true,
       },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
+
+    // REFUND TOMBSTONE. This endpoint grants Pro on the strength of "you are
+    // running the Pro app", because the store collected the money at download.
+    // A refunded user still HAS the app installed, so without this check the
+    // next launch silently re-granted what was just taken away — including
+    // after a web/Stripe refund, which is how a refund policy became
+    // unenforceable everywhere rather than only on mobile.
+    //
+    // Returned as a refusal (HTTP 200) rather than thrown: ProGuard's .catch()
+    // deliberately lets a FAILED grant through so a genuine paying customer is
+    // never stranded on the payment page, so a 4xx here would drop a refunded
+    // user into a Pro UI that the server then refuses to serve data to
+    // (enforceProContext). A refusal the client can read sends them to the
+    // upgrade page instead, which is the honest destination — they can re-buy.
+    if (user.proRefundedAt) {
+      logger.info(
+        `[ProService.grantFromMobile] refused for user ${userId} — Pro refunded at ${user.proRefundedAt.toISOString()}`,
+      );
+      return {
+        refused: "pro_refunded",
+        proRefundedAt: user.proRefundedAt,
+        hasPro: false,
+        message:
+          "This Pro purchase was refunded. Buy Pro again to restore access.",
+      };
+    }
 
     const [existingProTeam, existingBalance] = await Promise.all([
       prisma.team.findFirst({
@@ -484,7 +511,7 @@ class ProService {
     // Check if already activated.
     // IMPORTANT: check proPurchasedAt, NOT hasPro.
     // hasPro can be true from admin team grants without a real Pro purchase.
-    // Only skip activation if the user has explicitly purchased Pro ($1 product).
+    // Only skip activation if the user has explicitly purchased Pro ($5 one-time).
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: { hasPro: true, proPurchasedAt: true },
@@ -510,6 +537,8 @@ class ProService {
         proPurchasedAt: new Date(),
         currentVersion: "pro",
         isLegacyPro: false,
+        // A real purchase clears the refund tombstone: a refund is not a ban.
+        proRefundedAt: null,
       },
     });
 
@@ -554,6 +583,11 @@ class ProService {
           appContext: "pro",
           // bug-030: tag so a later charge.refunded can match & revoke Pro.
           purchaseType: "pro_upgrade",
+          withdrawalWaiverAt: session.metadata?.withdrawalWaiverAt
+            ? new Date(session.metadata.withdrawalWaiverAt)
+            : null,
+          withdrawalWaiverText:
+            session.metadata?.withdrawalWaiverText || null,
         },
       });
     }
@@ -577,17 +611,24 @@ class ProService {
         select: { proPurchasedAt: true },
       });
       if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
-      // Pro is a separate one-time $1 product. A team-plan subscriber
+      // Pro is a separate one-time $5 product. A team-plan subscriber
       // does NOT automatically own Pro — they have to buy it explicitly
       // (Team grants Pro-tier features within the Team workspace, but the
       // standalone Pro app is its own product).
+      //
+      // bug-158: send the user to the Pro FEATURES page (/upgrade-pro), not
+      // straight to Stripe. Two reasons: (1) UX — clicking the Pro tab should
+      // show what Pro is before asking for payment (this also matches ProGuard,
+      // which already routes a non-Pro user off /dashboard/pro to /upgrade-pro);
+      // (2) previously this eagerly created a Stripe Checkout session on EVERY
+      // Pro-tab click by a free user, littering the account with abandoned
+      // sessions. The real checkout is now created only when the user clicks
+      // Purchase on /upgrade-pro (purchasePro → createProPurchaseCheckout).
       if (!user.proPurchasedAt) {
-        const checkout = await this.createProPurchaseCheckout(userId);
         return {
           requiresPurchase: true,
-          message:
-            "Purchase Pro ($5 one-time) to access this app. Redirecting to checkout.",
-          ...checkout,
+          message: "Purchase Pro ($5 one-time) to access this app.",
+          redirect: "/upgrade-pro",
         };
       }
     }
@@ -600,7 +641,7 @@ class ProService {
     return { currentApp: app };
   }
 
-  async createProPurchaseCheckout(userId, pendingInviteToken = null) {
+  async createProPurchaseCheckout(userId, pendingInviteToken = null, waiver = null) {
     const stripe = getStripe();
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -612,7 +653,7 @@ class ProService {
       },
     });
     if (!user) throw new AppError("User not found", 404, "NOT_FOUND");
-    // Pro is a separate one-time $1 product. A team-plan subscriber has
+    // Pro is a separate one-time $5 product. A team-plan subscriber has
     // hasPro=true but proPurchasedAt=null — they still need to buy the
     // standalone Pro product. Only block if they've already purchased it
     // explicitly.
@@ -657,6 +698,20 @@ class ProService {
         purchaseType: "pro_upgrade",
         ...(pendingInviteToken
           ? { pendingInviteToken: String(pendingInviteToken).slice(0, 128) }
+          : {}),
+        // Withdrawal-right waiver, recorded ON THE PAYMENT rather than in our
+        // own tables: a card dispute is argued against the Stripe charge, and
+        // metadata set here is copied to the PaymentIntent and visible in the
+        // dispute-evidence view. Storing the exact sentence the buyer saw (not
+        // just a boolean) means later edits to the wording cannot rewrite what
+        // an earlier buyer actually agreed to. Stripe caps a metadata value at
+        // 500 characters, hence the slice.
+        ...(waiver && waiver.accepted === true
+          ? {
+              withdrawalWaiverAccepted: "true",
+              withdrawalWaiverAt: String(waiver.at || "").slice(0, 64),
+              withdrawalWaiverText: String(waiver.text || "").slice(0, 480),
+            }
           : {}),
       },
       // BUG-PAY-002: save card for future charges after one-time payment
@@ -822,6 +877,8 @@ class ProService {
           proPurchasedAt: new Date(),
           currentVersion: "pro",
           isLegacyPro: false,
+          // A real purchase clears the refund tombstone (see schema comment).
+          proRefundedAt: null,
         },
       });
 
@@ -837,6 +894,8 @@ class ProService {
           amountCharged: session.amount_total || 500,
           currency: session.currency || getStripeCurrency(),
           paymentMethod: session.payment_method_types?.[0] || "card",
+          waiverAt: session.metadata?.withdrawalWaiverAt || null,
+          waiverText: session.metadata?.withdrawalWaiverText || null,
         },
         tx,
       );
@@ -921,7 +980,7 @@ class ProService {
   }
 
   // Success-URL fallback for flow-pack purchases — same role as
-  // verifyPurchase() does for the $1 Pro upgrade. Idempotent: dedupes on
+  // verifyPurchase() does for the $5 Pro upgrade. Idempotent: dedupes on
   // ProFlowPurchase.stripePaymentIntentId so a webhook arriving later
   // won't double-credit. Used when the Stripe webhook hasn't reached
   // this backend yet (e.g. local dev without `stripe listen`).

@@ -14,6 +14,11 @@ const fcmService = require("../services/fcm.service");
 const aiCreditService = require("../services/aiCredit.service");
 const logger = require("../utils/logger");
 const notificationRateLimit = require("../services/notificationRateLimit.service");
+const {
+  PLATFORM,
+  APP_TYPE,
+  LOGIN_TYPE,
+} = require("../lib/signupProvenance");
 
 /**
  * Builds (but doesn't execute) the PrismaPromise that archives the given
@@ -535,11 +540,19 @@ class SuperAdminController {
           adminNote: adminNote || null,
           userStatus: "success",
           clientType: "web",
+          // Write-once signup provenance: an admin-created account was not
+          // signed up on any platform, so it is recorded honestly as such
+          // rather than inheriting the admin's own browser.
+          firstPlatform: PLATFORM.ADMIN,
+          firstAppType: normalizedPlan === "pro" ? APP_TYPE.PRO : APP_TYPE.TEAM,
+          firstLoginType: LOGIN_TYPE.ADMIN,
           userType: isPro ? "pro_user" : "free_user",
           emailVerified: isVerified === true ? new Date() : null,
           suspendedAt: normalizedStatus === "inactive" ? new Date() : null,
           suspendedBy: normalizedStatus === "inactive" ? req.user.id : null,
-          ...(isPro ? { proPurchasedAt: new Date() } : {}),
+          // An explicit admin grant clears the refund tombstone, so a
+          // previously-refunded user is not permanently locked out.
+          ...(isPro ? { proPurchasedAt: new Date(), proRefundedAt: null } : {}),
           ...(flowLimitFields || {}),
         },
         select: {
@@ -987,6 +1000,22 @@ class SuperAdminController {
       if (currentVersion === "free") {
         data.hasPro = false;
         data.userType = "free_user";
+        // An admin dropping someone to Free must STICK. Without these two the
+        // Pro shell undid it on the next launch: /pro/grant-from-mobile grants
+        // on "you are running the Pro app", and its already-provisioned check
+        // is `hasPro && proPurchasedAt`, so clearing hasPro alone made the user
+        // look partially provisioned and got them re-granted.
+        //
+        // This is the ONLY enforcement route for a store refund of the PAID
+        // Pro app: neither Apple nor Google reports those to us (Play's
+        // voidedpurchases type=1 is in-app + subscriptions, not apps), so an
+        // admin acting on what they learn is all there is. It has to hold.
+        //
+        // proPurchasedAt is cleared as well so the user can buy Pro again on
+        // the web — purchasePro throws ALREADY_PRO while it is set. Same shape
+        // as the Stripe refund path in payment.service.
+        data.proPurchasedAt = null;
+        data.proRefundedAt = new Date();
       }
     }
     if (adminNote !== undefined) data.adminNote = adminNote || null;
@@ -1487,6 +1516,9 @@ class SuperAdminController {
           hasPro: true,
           currentVersion: normalizedPlan,
           proPurchasedAt: now,
+          // Explicit admin grant overrides a prior refund (see
+          // prisma User.proRefundedAt).
+          proRefundedAt: null,
           ...(reason ? { adminNote: reason } : {}),
           ...(grantFlowLimitFields || {}),
         },

@@ -106,6 +106,20 @@ cd "$PROJECT_DIR"
 log "Step 3: Applying schema changes via psql..."
 $DC exec -T db psql -U admin -d value_charts_db << 'ENDSQL'
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_legacy_pro           BOOLEAN   NOT NULL DEFAULT false;
+-- Refund tombstone: /pro/grant-from-mobile refuses to grant Pro while set,
+-- so a refund is not undone the next time the user opens the Pro app.
+-- Nullable with no default: existing rows are correctly "never refunded".
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pro_refunded_at         TIMESTAMPTZ;
+-- Signup provenance (write-once): which platform/app/login the account was
+-- FIRST created with. Nullable with no default and NOT backfillable — the
+-- signal was never captured for existing rows, so NULL must always be read as
+-- "unknown" and fail open. Immutability is enforced by the trigger installed
+-- further down (users_freeze_signup_provenance), not by a constraint.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_platform   TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_app_type   TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_login_type TEXT;
+CREATE INDEX IF NOT EXISTS users_first_platform_first_app_type_idx
+  ON users (first_platform, first_app_type);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_stripe_sub_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_plan          TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_status        TEXT;
@@ -113,6 +127,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS flow_addon_current_period_end TIMESTA
 ALTER TABLE flow_shares ADD COLUMN IF NOT EXISTS requires_pro BOOLEAN NOT NULL DEFAULT false;
 -- Billing: label transactions by what was purchased (ai_addon_credits, etc.).
 ALTER TABLE transaction_logs ADD COLUMN IF NOT EXISTS purchase_type TEXT;
+-- EU/UK right-of-withdrawal waiver captured at Pro checkout. Written by
+-- lib/grantProCredits.js and services/pro.service.js on every Pro grant, so
+-- a missing column fails the purchase itself, not just the record.
+ALTER TABLE transaction_logs ADD COLUMN IF NOT EXISTS withdrawal_waiver_at   TIMESTAMPTZ;
+ALTER TABLE transaction_logs ADD COLUMN IF NOT EXISTS withdrawal_waiver_text TEXT;
 -- Team-context / private-buckets feature: new workspace columns + indexes (idempotent).
 -- prisma db push is skipped on prod, so these must be applied here.
 ALTER TABLE users        ADD COLUMN IF NOT EXISTS last_active_team_id TEXT;
@@ -189,8 +208,45 @@ CREATE UNIQUE INDEX IF NOT EXISTS chat_groups_team_id_app_context_key ON chat_gr
 DELETE FROM chat_group_users a USING chat_group_users b
   WHERE a.id > b.id AND a.group_id = b.group_id AND a.user_id = b.user_id;
 CREATE UNIQUE INDEX IF NOT EXISTS chat_group_users_group_id_user_id_key ON chat_group_users (group_id, user_id);
+-- LICENSE PROBE — TEMPORARY diagnostic table for the paid-app refund
+-- experiment (does Play Integrity's appLicensingVerdict flip after a refund?).
+-- Observation only: nothing reads it to decide access. No FK on user_id, by
+-- design — it is a scratch table and a relation would add another cascade path
+-- to reason about on account deletion.
+-- DROP TABLE license_probes; once the experiment concludes.
+CREATE TABLE IF NOT EXISTS license_probes (
+  id                      TEXT PRIMARY KEY,
+  label                   TEXT,
+  device_id               TEXT,
+  user_id                 TEXT,
+  platform                TEXT NOT NULL,
+  app_variant             TEXT,
+  package_name            TEXT,
+  app_licensing_verdict   TEXT,
+  app_recognition_verdict TEXT,
+  device_verdicts         TEXT,
+  token_timestamp_ms      TEXT,
+  request_hash            TEXT,
+  ok                      BOOLEAN NOT NULL DEFAULT false,
+  error                   TEXT,
+  raw                     JSONB,
+  created_at              TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS license_probes_device_id_created_at_idx ON license_probes (device_id, created_at);
+CREATE INDEX IF NOT EXISTS license_probes_created_at_idx           ON license_probes (created_at);
 ENDSQL
 log "Schema changes applied OK"
+
+# ---------------------------------------------------------------
+# 3a — Triggers. Prisma does not manage these, so `prisma db push`
+# neither creates nor drops them; they must be applied here. Each
+# file is idempotent (CREATE OR REPLACE + DROP TRIGGER IF EXISTS).
+# ---------------------------------------------------------------
+log "Step 3a: Applying database triggers..."
+$DC exec -T db psql -U admin -d value_charts_db -v ON_ERROR_STOP=1 \
+  < "$BACKEND_DIR/prisma/sql/freeze_signup_provenance.sql" \
+  && log "Trigger users_freeze_signup_provenance applied OK" \
+  || { log "FATAL: trigger apply failed"; exit 1; }
 
 # ---------------------------------------------------------------
 # 3b — One-time data migration (idempotent)

@@ -2037,7 +2037,14 @@ class SubscriptionService {
           source: sub.provider || "stripe",
           startedAt: sub.startedAt || null,
           expiresAt: sub.expiresAt || null,
-          appContext: sub.appContext,
+          // "team", NOT sub.appContext: this function early-returns unless
+          // _isTeamSub(sub), and the subscription row's own app_context is not
+          // trustworthy — dev row cmt1l9khw…'s team_monthly plan carried
+          // app_context "free", which made the archived row invisible to the
+          // Billing panel (getHistory filters userId+appContext+status, and
+          // the team app asks for "team"). The purchase path at
+          // _handleCheckoutComplete hardcodes "team" for the same reason.
+          appContext: "team",
           archivedReason: "subscription_deleted",
           snapshot: {
             subscriptionId: sub.id,
@@ -2354,7 +2361,13 @@ class SubscriptionService {
               source: sub.provider || "stripe",
               startedAt: sub.startedAt || null,
               expiresAt: sub.expiresAt || null,
-              appContext: sub.appContext,
+              // Derived from productType, not copied: a subscription row's
+              // own app_context can be stale/wrong (see the note in
+              // _handleSubscriptionDeleted), and a mismatched value hides the
+              // row from the Billing panel's appContext filter.
+              appContext: String(sub.productType || "").startsWith("team")
+                ? "team"
+                : sub.appContext,
               archivedReason: "subscription_expiry",
               snapshot: {
                 subscriptionId: sub.id,

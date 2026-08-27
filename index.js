@@ -206,6 +206,14 @@ app.use(
 // a one-time ticket redeemed at /native?ott=. See docs/be-auth-native-google.md.
 app.use("/api/v1/auth/native", require("./src/routes/native.auth.routes"));
 
+// LICENSE PROBE — temporary diagnostic harness (Play Integrity refund
+// experiment). Inert unless LICENSE_PROBE_TOKEN is set in the backend env;
+// without it every request answers 503 PROBE_DISABLED. Grants nothing, revokes
+// nothing. Delete with its controller/service/model once the experiment
+// concludes — see controllers/licenseProbe.controller.js.
+app.use("/api/v1/license", require("./src/routes/licenseProbe.routes"));
+app.use("/api/license", require("./src/routes/licenseProbe.routes"));
+
 // Backwards-compatible aliases (old /api/ routes -> /api/v1/)
 app.use("/api/auth/mobile", require("./src/routes/mobile.auth.routes"));
 app.use("/api/auth/biometric", require("./src/routes/biometric.auth.routes"));

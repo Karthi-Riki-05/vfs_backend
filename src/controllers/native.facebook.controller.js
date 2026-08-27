@@ -76,7 +76,7 @@ class NativeFacebookAuthController {
    * after Facebook itself confirms both its validity and its audience.
    */
   login = asyncHandler(async (req, res) => {
-    const { accessToken, deviceId, appVariant } = req.body || {};
+    const { accessToken, deviceId, appVariant, platform } = req.body || {};
 
     if (!accessToken || typeof accessToken !== "string") {
       throw new AppError("accessToken is required", 400, "VALIDATION_ERROR");
@@ -164,6 +164,11 @@ class NativeFacebookAuthController {
       image: null,
       providerSub,
       tag: "native-facebook",
+      // Signup provenance, used only if this creates the account. The
+      // shell states its own platform: this endpoint is reached by a
+      // plain Dart http call, so there is no shell User-Agent to read.
+      platform,
+      appVariant,
     });
 
     assertUserLoginable(user, "native-facebook");

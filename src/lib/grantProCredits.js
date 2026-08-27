@@ -12,7 +12,7 @@ const logger = require("../utils/logger");
  * When tx is omitted the helper starts its own transaction.
  *
  * @param {string} userId
- * @param {{ txnId?: string, amountCharged?: number, currency?: string, paymentMethod?: string }} [options]
+ * @param {{ txnId?: string, amountCharged?: number, currency?: string, paymentMethod?: string, waiverAt?: string|null, waiverText?: string|null }} [options]
  * @param {import('@prisma/client').Prisma.TransactionClient|null} [tx]
  */
 async function grantProCredits(userId, options = {}, tx = null) {
@@ -21,6 +21,10 @@ async function grantProCredits(userId, options = {}, tx = null) {
     amountCharged = 500,
     currency = "usd",
     paymentMethod = "card",
+    // Withdrawal-right waiver from the Stripe session metadata. Null on the
+    // IAP path — Apple/Google are the merchant of record there.
+    waiverAt = null,
+    waiverText = null,
   } = options;
 
   const _run = async (db) => {
@@ -65,6 +69,8 @@ async function grantProCredits(userId, options = {}, tx = null) {
             // bug-030: tag so a later charge.refunded can identify this as the
             // one-time Pro purchase and revoke Pro (vs an AI-credit/flow charge).
             purchaseType: "pro_upgrade",
+            withdrawalWaiverAt: waiverAt ? new Date(waiverAt) : null,
+            withdrawalWaiverText: waiverText || null,
           },
         });
       }

@@ -218,6 +218,10 @@ class PaymentService {
         where: { id: user.id },
         data: {
           proPurchasedAt: null,
+          // Tombstone so /pro/grant-from-mobile cannot hand Pro straight back
+          // the next time this user opens the Pro app they still have
+          // installed. Without it this revoke was cosmetic.
+          proRefundedAt: new Date(),
           proFlowLimit: 10,
           proUnlimitedFlows: false,
           ...(hasLiveTeam ? {} : { hasPro: false, currentVersion: "free" }),

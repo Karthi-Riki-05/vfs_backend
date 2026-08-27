@@ -38,7 +38,9 @@ router.put(
   proController.switchApp,
 );
 
-// Purchase Pro ($1 one-time)
+// Purchase Pro (one-time, PRO_LIFETIME_PRICE_CENTS = $5). Web/Stripe path
+// only — in the apps the $5 is collected by the store at download and
+// entitlement comes from /grant-from-mobile, so there is no IAP product.
 router.post("/purchase", authenticate, proController.purchasePro);
 // Alias: tests and older clients may use /checkout
 router.post("/checkout", authenticate, proController.purchasePro);

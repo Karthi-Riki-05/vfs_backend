@@ -14,7 +14,13 @@
  *    resolveIapProduct(), never by direct map lookup.
  *
  * Entitlement types (dispatched in services/iap.service.js):
- *  - pro_lifetime : one-time Pro unlock (non-consumable)
+ *  - pro_lifetime : the Pro entitlement. NOT a store product — Pro is a PAID
+ *                   APP ($5 at download on both stores; $5 one-time via
+ *                   Stripe on the web). Owner decision 2026-08-26; see
+ *                   flutter_webview-main/IAP_PRODUCT_LIST.md. Earlier
+ *                   revisions listed it as a non-consumable to create,
+ *                   which is why it kept reading as "the one product
+ *                   missing from both stores". Do not create it.
  *  - flow_pack    : 30-day flow pack (consumable) — mirrors handleExtraFlowsWebhook
  *  - flow_addon   : monthly flow subscription — mirrors handleFlowAddonCheckoutWebhook
  *  - ai_credits   : credit top-up (consumable) — mirrors payment.service ai_addon_credits
@@ -32,7 +38,10 @@
 const TEAM_SEAT_TIERS = [5, 10, 15, 20, 25];
 
 const IAP_PRODUCTS = {
-  // ── Pro (one-time lifetime unlock) ─────────────────────────────────────
+  // ── Pro entitlement ────────────────────────────────────────────────────
+  // Kept as a mapping so a receipt carrying this id still resolves, but no
+  // store product exists under it and none should be created — Pro is a
+  // paid app, not an in-app purchase.
   pro_lifetime: { type: "pro_lifetime" },
   // Legacy product IDs from the original (RevenueCat-era) integration — kept
   // as plain string mappings so any historical purchase/restore still

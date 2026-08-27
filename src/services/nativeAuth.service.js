@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { prisma } = require("../lib/prisma");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
+const { resolveSignupProvenance } = require("../lib/signupProvenance");
 
 /**
  * Shared machinery for the native sign-in surface (`/api/v1/auth/native/*`).
@@ -58,7 +59,19 @@ function assertUserLoginable(user, tag) {
  * account imported from the old app may carry a fabricated address, so a miss
  * on email is not proof this is a new person.
  */
-async function resolveSocialUser({ provider, email, name, image, providerSub, tag }) {
+async function resolveSocialUser({
+  provider,
+  email,
+  name,
+  image,
+  providerSub,
+  tag,
+  // Signup provenance, only used when this call CREATES the account. These
+  // endpoints exist solely for the native shell, so platform and variant are
+  // known facts here rather than a User-Agent guess.
+  platform,
+  appVariant,
+}) {
   let user = await prisma.user.findUnique({ where: { email } });
 
   if (!user && providerSub) {
@@ -84,6 +97,11 @@ async function resolveSocialUser({ provider, email, name, image, providerSub, ta
         // The provider has verified this address, so the new account starts
         // email-verified — consistent with the credentials gate.
         emailVerified: new Date(),
+        ...resolveSignupProvenance({
+          platform,
+          appVariant,
+          loginType: String(provider || "").toLowerCase(),
+        }),
       },
     });
     logger.info(`[${tag}] user created: ${user.id}`);

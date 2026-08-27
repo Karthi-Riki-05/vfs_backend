@@ -168,16 +168,16 @@ model VerificationToken {
 // ============================================================
 
 model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String?   @unique
-  emailVerified DateTime?
-  verifyToken           String?   @map("verify_token")
-  verifyTokenExpiresAt  DateTime? @map("verify_token_expires_at")
-  image         String?
-  password      String?
-  rememberToken String?   @map("remember_token")
-  role          String    @default("Viewer") // App-level role (Viewer, Editor, Admin)
+  id                   String    @id @default(cuid())
+  name                 String?
+  email                String?   @unique
+  emailVerified        DateTime?
+  verifyToken          String?   @map("verify_token")
+  verifyTokenExpiresAt DateTime? @map("verify_token_expires_at")
+  image                String?
+  password             String?
+  rememberToken        String?   @map("remember_token")
+  role                 String    @default("Viewer") // App-level role (Viewer, Editor, Admin)
 
   // --- Legacy migration traceability ---
   legacyVsId  Int? @map("legacy_vs_id") // Original value_stream.users.id
@@ -190,6 +190,35 @@ model User {
   userType         UserType   @default(free_user) @map("user_type")
   userStatus       UserStatus @default(success) @map("user_status")
   clientType       ClientType @default(web) @map("client_type")
+
+  // ── SIGNUP PROVENANCE (write-once) ────────────────────────────────────
+  /// WHERE and HOW this account was FIRST created. Never updated afterwards:
+  /// the Postgres trigger `users_freeze_signup_provenance` rejects any UPDATE
+  /// that changes an already-set value. Enforced in the database rather than
+  /// in code because `users` has 5 create sites and ~40 services that write
+  /// to it — "non-changeable by convention" is not non-changeable.
+  ///
+  /// ⚠️ NULL means "created before these columns existed" and is NOT
+  /// reconstructable — the signal was never captured, and no backfill can
+  /// invent it. Every consumer MUST treat NULL as unknown and FAIL OPEN, or
+  /// the entire pre-existing user base is locked out of its own accounts.
+  ///
+  /// ⚠️ This is PROVENANCE, not proof of purchase. All three values derive
+  /// from the client's User-Agent (see lib/signupProvenance.js), which is
+  /// client-controllable exactly like `X-App-Source` — so per the
+  /// server-is-authoritative rule these must never, on their own, grant an
+  /// entitlement. They answer "which app did this person sign up in?", which
+  /// is a support/analytics question, and they are the precondition for a
+  /// real store attestation (Play Integrity / StoreKit AppTransaction) that
+  /// CAN be trusted. See docs/xc-security.md.
+  ///
+  /// Deliberately separate from `clientType` above, which is dead data: it is
+  /// written only by utils/migrate-data.js and hardcoded "web" at
+  /// superAdmin.controller.js, so every live row reads "web" and the admin
+  /// filter on it matches everyone.
+  firstPlatform        String?   @map("first_platform") // web | android | ios | admin
+  firstAppType         String?   @map("first_app_type") // pro | team | free
+  firstLoginType       String?   @map("first_login_type") // email | google | facebook | apple | linkedin | admin
   welcomeUser      Boolean    @default(true) @map("welcome_user")
   companyId        Int?       @map("company_id") // From ind_value_chart.users
   stripeCustomerId String?    @map("stripe_customer_id")
@@ -197,6 +226,20 @@ model User {
   // --- ValueChart Pro fields ---
   hasPro                      Boolean     @default(false) @map("has_pro")
   proPurchasedAt              DateTime?   @map("pro_purchased_at")
+  /// Set when a Pro purchase is refunded (Stripe full refund of a pro_upgrade
+  /// charge, or a store refund of a one-time Pro product). It is a TOMBSTONE,
+  /// not a log: `grantFromMobile` refuses to grant Pro while it is set.
+  ///
+  /// Without it, every refund undid itself. The Pro shell calls
+  /// /pro/grant-from-mobile on any launch where the user is not entitled, and
+  /// that endpoint granted unconditionally — so a refunded user re-acquired
+  /// Pro the next time they opened the app they still had installed. That
+  /// defeated the WEB refund path too, not just the store ones.
+  ///
+  /// Cleared by every genuine re-acquisition (a new Stripe purchase, a store
+  /// purchase, an explicit super-admin grant) so a refund is not a permanent
+  /// ban. Deliberately NOT cleared by grantFromMobile — that is the whole point.
+  proRefundedAt               DateTime?   @map("pro_refunded_at")
   proFlowLimit                Int         @default(10) @map("pro_flow_limit")
   proAdditionalFlowsPurchased Int         @default(0) @map("pro_additional_flows_purchased")
   proUnlimitedFlows           Boolean     @default(false) @map("pro_unlimited_flows")
@@ -210,11 +253,11 @@ model User {
   activeFlowPackId            String?     @map("active_flow_pack_id")
   flowPackExpiresAt           DateTime?   @map("flow_pack_expires_at")
   isInFlowPickerPhase         Boolean     @default(false) @map("is_in_flow_picker_phase")
-  isInTeamPickerPhase Boolean @default(false) @map("is_in_team_picker_phase")
+  isInTeamPickerPhase         Boolean     @default(false) @map("is_in_team_picker_phase")
   // Recurring flow add-on subscription (separate from one-time flow packs)
   flowAddonStripeSubId        String?     @map("flow_addon_stripe_sub_id")
-  flowAddonPlan               String?     @map("flow_addon_plan")              // 'standard_100' | 'unlimited'
-  flowAddonStatus             String?     @map("flow_addon_status")            // 'active' | 'cancelling' | 'cancelled' | 'past_due'
+  flowAddonPlan               String?     @map("flow_addon_plan") // 'standard_100' | 'unlimited'
+  flowAddonStatus             String?     @map("flow_addon_status") // 'active' | 'cancelling' | 'cancelled' | 'past_due'
   flowAddonCurrentPeriodEnd   DateTime?   @map("flow_addon_current_period_end")
   // 3-day grace window after a flow-addon payment fails (past_due). Set by
   // the Stripe subscription.updated webhook; enforced by checkPastDueGrace
@@ -266,75 +309,77 @@ model User {
   lastSeen  DateTime? @map("last_seen")
 
   // --- Relations ---
-  accounts             Account[]
-  sessions             Session[]
+  accounts                Account[]
+  sessions                Session[]
   // Content living in THIS user's workspace. Under the owner-as-workspace
   // model these replace the old Team back-relations.
-  flows                Flow[]                @relation("FlowWorkspace")
-  workspaceShapes      Shape[]               @relation("ShapeWorkspace")
-  workspaceShapeGroups ShapeGroup[]          @relation("ShapeGroupWorkspace")
-  workspaceChatGroups  ChatGroup[]           @relation("ChatGroupWorkspace")
-  workspaceIssues      IssueItem[]           @relation("IssueItemWorkspace")
-  workspaceProjects    Project[]             @relation("ProjectWorkspace")
-  workspaceNotifications Notification[]      @relation("NotificationWorkspace")
-  flowsCreated         Flow[]                @relation("FlowCreator")
-  flowsLastModified    Flow[]                @relation("FlowLastModifiedBy")
-  shapeGroups          ShapeGroup[]
-  shapes               Shape[]
-  subscription         Subscription?
-  firebaseUsers        FirebaseUser[]
-  usersApps            UserApp[]
-  ownedTeams           Team[]
-  teamMemberships      TeamMember[]
+  flows                   Flow[]                   @relation("FlowWorkspace")
+  workspaceShapes         Shape[]                  @relation("ShapeWorkspace")
+  workspaceShapeGroups    ShapeGroup[]             @relation("ShapeGroupWorkspace")
+  workspaceChatGroups     ChatGroup[]              @relation("ChatGroupWorkspace")
+  workspaceIssues         IssueItem[]              @relation("IssueItemWorkspace")
+  workspaceProjects       Project[]                @relation("ProjectWorkspace")
+  workspaceNotifications  Notification[]           @relation("NotificationWorkspace")
+  flowsCreated            Flow[]                   @relation("FlowCreator")
+  flowsLastModified       Flow[]                   @relation("FlowLastModifiedBy")
+  shapeGroups             ShapeGroup[]
+  shapes                  Shape[]
+  subscription            Subscription?
+  firebaseUsers           FirebaseUser[]
+  usersApps               UserApp[]
+  ownedTeams              Team[]
+  teamMemberships         TeamMember[]
   // CHANGE-001: the people who belong to THIS user's workspace.
-  workspaceMembers     TeamMember[]          @relation("TeamMemberWorkspace")
-  flowGroupUsers       FlowGroupUser[]       @relation("FlowGroupUserUser")
-  flowGroupCreated     FlowGroupUser[]       @relation("FlowGroupUserCreator")
-  flowLimits           FlowLimit[]
-  flowPublishes        FlowPublish[]
-  chatGroupsCreated    ChatGroup[]
-  chatGroupMembers     ChatGroupUser[]
-  chatMessagesSent     ChatMessage[]
-  chatMsgSender        ChatMessageUser[]     @relation("ChatMsgSender")
-  chatMsgReceiver      ChatMessageUser[]     @relation("ChatMsgReceiver")
-  messageReactions     MessageReaction[]
-  conversations        ConversationUser[]
-  messages             Message[]
-  messageNotifications MessageNotification[]
-  userActions          UserAction[]
-  userInterests        UserInterest[]
-  userFreeTrial        UserFreeTrial?
-  feedbackQueries      FeedbackQuery[]
-  vsmOptions           VsmOption[]
-  issuesCreated        IssueItem[]
-  subQueue             SubscriptionQueue[]
-  addUserSubs          AddUserSubscription[]
-  projects             Project[]
-  proFlowPurchases     ProFlowPurchase[]
-  notifications        Notification[]
+  workspaceMembers        TeamMember[]             @relation("TeamMemberWorkspace")
+  flowGroupUsers          FlowGroupUser[]          @relation("FlowGroupUserUser")
+  flowGroupCreated        FlowGroupUser[]          @relation("FlowGroupUserCreator")
+  flowLimits              FlowLimit[]
+  flowPublishes           FlowPublish[]
+  chatGroupsCreated       ChatGroup[]
+  chatGroupMembers        ChatGroupUser[]
+  chatMessagesSent        ChatMessage[]
+  chatMsgSender           ChatMessageUser[]        @relation("ChatMsgSender")
+  chatMsgReceiver         ChatMessageUser[]        @relation("ChatMsgReceiver")
+  messageReactions        MessageReaction[]
+  conversations           ConversationUser[]
+  messages                Message[]
+  messageNotifications    MessageNotification[]
+  userActions             UserAction[]
+  userInterests           UserInterest[]
+  userFreeTrial           UserFreeTrial?
+  feedbackQueries         FeedbackQuery[]
+  vsmOptions              VsmOption[]
+  issuesCreated           IssueItem[]
+  subQueue                SubscriptionQueue[]
+  addUserSubs             AddUserSubscription[]
+  projects                Project[]
+  proFlowPurchases        ProFlowPurchase[]
+  notifications           Notification[]
   notificationPreferences NotificationPreference[]
   notificationQuietHours  NotificationQuietHours?
-  teamInvitesSent      TeamInvite[]          @relation("TeamInviteSender")
-  teamInvitesAccepted  TeamInvite[]          @relation("TeamInviteAcceptor")
-  flowSharesGiven      FlowShare[]           @relation("FlowShareSharedBy")
-  flowSharesReceived   FlowShare[]           @relation("FlowShareSharedWith")
-  aiConsent            AiConsent?
-  aiConversations      AiConversation[]
-  aiJobs               AiJob[]
-  aiCreditBalances     AiCreditBalance[]
-  aiCreditUsages       AiCreditUsage[]
-  flowVersions         FlowVersion[]         @relation("FlowVersionSavedBy")
-  adminLogsGiven       AdminLog[]            @relation("AdminLogAdmin")
-  adminLogsReceived    AdminLog[]            @relation("AdminLogTarget")
-  subscriptionHistory  SubscriptionHistory[]
-  transactionLogs      TransactionLog[]
-  devices              UserDevice[]
-  biometricDevices     BiometricDevice[]
-  iapTransactions      IapTransaction[]
+  teamInvitesSent         TeamInvite[]             @relation("TeamInviteSender")
+  teamInvitesAccepted     TeamInvite[]             @relation("TeamInviteAcceptor")
+  flowSharesGiven         FlowShare[]              @relation("FlowShareSharedBy")
+  flowSharesReceived      FlowShare[]              @relation("FlowShareSharedWith")
+  aiConsent               AiConsent?
+  aiConversations         AiConversation[]
+  aiJobs                  AiJob[]
+  aiCreditBalances        AiCreditBalance[]
+  aiCreditUsages          AiCreditUsage[]
+  flowVersions            FlowVersion[]            @relation("FlowVersionSavedBy")
+  adminLogsGiven          AdminLog[]               @relation("AdminLogAdmin")
+  adminLogsReceived       AdminLog[]               @relation("AdminLogTarget")
+  subscriptionHistory     SubscriptionHistory[]
+  transactionLogs         TransactionLog[]
+  devices                 UserDevice[]
+  biometricDevices        BiometricDevice[]
+  iapTransactions         IapTransaction[]
 
   @@index([legacyVsId])
   @@index([companyId])
   @@index([suspendedAt])
+  // Powers the "who signed up in which app" admin report.
+  @@index([firstPlatform, firstAppType])
   @@map("users")
 }
 
@@ -427,7 +472,6 @@ model BiometricOtt {
   @@map("biometric_otts")
 }
 
-
 // ============================================================
 // 3. ROLE (Legacy roles table)
 // Source: value_stream.roles
@@ -470,22 +514,22 @@ model Permission {
 // shared across users. Upserts key on the composite; per-user sends fan out
 // over every row for the userId.
 model FirebaseUser {
-  id          String    @id @default(cuid())
-  userId      String    @map("user_id")
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  fcmUsername String?   @map("fcm_username")
-  fcmPassword String?   @map("fcm_password")
-  fcmUserId   String?   @map("fcm_user_id")
-  fcmToken    String?   @map("fcm_token") @db.Text
+  id          String       @id @default(cuid())
+  userId      String       @map("user_id")
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fcmUsername String?      @map("fcm_username")
+  fcmPassword String?      @map("fcm_password")
+  fcmUserId   String?      @map("fcm_user_id")
+  fcmToken    String?      @map("fcm_token") @db.Text
   // Which app registered this device: "pro" or "team" only — there is no
   // "free" value here (a free user is simply a team-context user with no
   // active subscription). NULL = registered before this column existed;
   // treated as "send regardless of context" (fail-open) by fcm.service so no
   // existing device silently stops receiving push after this migration.
   appContext  UserVersion? @map("app_context")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime? @map("updated_at")
-  deletedAt   DateTime? @map("deleted_at")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime?    @map("updated_at")
+  deletedAt   DateTime?    @map("deleted_at")
 
   @@unique([userId, fcmToken])
   @@index([userId])
@@ -678,27 +722,27 @@ model AddUserSubscription {
 // ============================================================
 
 model Team {
-  id          String       @id @default(cuid())
-  legacyId    Int?         @map("legacy_id")
-  name        String?
-  description String?
-  teamOwnerId String       @map("team_owner_id")
-  owner       User         @relation(fields: [teamOwnerId], references: [id], onDelete: Cascade)
-  teamMem     Int          @default(0) @map("team_mem") // Max members allowed
-  countMem    Int          @default(0) @map("count_mem") // Current member count
-  appType     AppType?     @map("app_type")
-  appContext  UserVersion  @default(free) @map("app_context")
-  verifyTeam  String?      @map("verify_team")
-  status      PlanStatus   @default(active)
+  id               String       @id @default(cuid())
+  legacyId         Int?         @map("legacy_id")
+  name             String?
+  description      String?
+  teamOwnerId      String       @map("team_owner_id")
+  owner            User         @relation(fields: [teamOwnerId], references: [id], onDelete: Cascade)
+  teamMem          Int          @default(0) @map("team_mem") // Max members allowed
+  countMem         Int          @default(0) @map("count_mem") // Current member count
+  appType          AppType?     @map("app_type")
+  appContext       UserVersion  @default(free) @map("app_context")
+  verifyTeam       String?      @map("verify_team")
+  status           PlanStatus   @default(active)
   // CHANGE-001: `members` is GONE. Membership lives on TeamMember.teamIds (a
   // scalar array), and Prisma cannot model a relation through one — so a team's
   // roster is a query (`teamMember.findMany({ where: { teamIds: { has: id } } })`),
   // never a nested include or a `members: { some: ... }` filter.
-  invites     TeamInvite[]
-  associatedShapes Shape[] @relation("ShapeAssociatedTeam")
-  createdAt   DateTime     @default(now()) @map("created_at")
-  updatedAt   DateTime?    @map("updated_at")
-  deletedAt   DateTime?    @map("deleted_at")
+  invites          TeamInvite[]
+  associatedShapes Shape[]      @relation("ShapeAssociatedTeam")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime?    @map("updated_at")
+  deletedAt        DateTime?    @map("deleted_at")
 
   @@index([teamOwnerId])
   @@index([appContext])
@@ -755,19 +799,19 @@ model TeamInvite {
 /// team MUST strip the id in application code (same transaction as the delete) or
 /// a ghost id is left behind. This is the one durability cost of the change.
 model TeamMember {
-  id          String    @id @default(cuid())
-  userId      String    @map("user_id")
-  workspaceId String    @map("workspace_id")
-  teamIds     String[]  @default([]) @map("team_ids")
+  id          String      @id @default(cuid())
+  userId      String      @map("user_id")
+  workspaceId String      @map("workspace_id")
+  teamIds     String[]    @default([]) @map("team_ids")
   /// DEPRECATED — CHANGE-001 step 8, not yet executed. The column is retained,
   /// nullable and UNUSED, purely so `prisma db push` (which runs on every boot
   /// WITHOUT --accept-data-loss) does not try to drop it and fail. Nothing reads
   /// or writes it. Dropping it is the one irreversible step and needs an
   /// explicit go-ahead; do that and delete this field in the same change.
-  teamId      String?   @map("team_id")
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workspace   User      @relation("TeamMemberWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
-  role        String    @default("MEMBER")
+  teamId      String?     @map("team_id")
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   User        @relation("TeamMemberWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  role        String      @default("MEMBER")
   /// Which app this seat belongs to (owner decision, 2026-08-08). Buying a plan
   /// creates the row for that plan's app; an invite stamps the app it was sent
   /// from. The workspace switcher filters on it directly — `where { userId,
@@ -778,9 +822,9 @@ model TeamMember {
   /// grant it in the Pro app. Two apps = two rows, which is why the unique key
   /// below is three-part.
   appContext  UserVersion @default(team) @map("app_context")
-  appType     AppType?  @map("app_type")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime? @map("updated_at")
+  appType     AppType?    @map("app_type")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime?   @map("updated_at")
 
   @@unique([userId, workspaceId, appContext])
   @@index([userId])
@@ -797,43 +841,43 @@ model TeamMember {
 // ============================================================
 
 model Flow {
-  id             String          @id @default(cuid())
-  legacyId       Int?            @map("legacy_id")
-  legacySource   String?         @map("legacy_source") // ent_value_chart or ind_value_chart
-  name           String
-  description    String?
-  thumbnail      String?
-  diagramData    String?         @default("") @map("diagram_data") @db.Text // was flow_data
-  isPublic       Boolean         @default(false) @map("is_public")
-  isFavorite     Boolean         @default(false) @map("is_favorite")
+  id                 String          @id @default(cuid())
+  legacyId           Int?            @map("legacy_id")
+  legacySource       String?         @map("legacy_source") // ent_value_chart or ind_value_chart
+  name               String
+  description        String?
+  thumbnail          String?
+  diagramData        String?         @default("") @map("diagram_data") @db.Text // was flow_data
+  isPublic           Boolean         @default(false) @map("is_public")
+  isFavorite         Boolean         @default(false) @map("is_favorite")
   // The WORKSPACE this flow lives in = the tenant owner's user id. Teams are
   // no longer data boundaries (owner decision 2026-08-07): membership decides
   // which workspace you may ENTER, everything inside one is shared.
-  workspaceId    String          @map("workspace_id")
-  workspace      User            @relation("FlowWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId        String          @map("workspace_id")
+  workspace          User            @relation("FlowWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   // Original creator — separate from ownerId (which becomes tenantOwnerId in
   // the multi-tenant model). Null on legacy flows; backfilled = ownerId.
-  creatorId        String?       @map("creator_id")
-  creator          User?         @relation("FlowCreator", fields: [creatorId], references: [id], onDelete: SetNull)
+  creatorId          String?         @map("creator_id")
+  creator            User?           @relation("FlowCreator", fields: [creatorId], references: [id], onDelete: SetNull)
   // Last actor (owner or collaborator) to persist diagram data on this flow.
-  lastModifiedById String?       @map("last_modified_by_id")
-  lastModifiedBy   User?         @relation("FlowLastModifiedBy", fields: [lastModifiedById], references: [id], onDelete: SetNull)
-  projectId      String?         @map("project_id")
-  project        Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  appType        AppType?        @map("app_type")
-  appContext     UserVersion     @default(free) @map("app_context")
+  lastModifiedById   String?         @map("last_modified_by_id")
+  lastModifiedBy     User?           @relation("FlowLastModifiedBy", fields: [lastModifiedById], references: [id], onDelete: SetNull)
+  projectId          String?         @map("project_id")
+  project            Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  appType            AppType?        @map("app_type")
+  appContext         UserVersion     @default(free) @map("app_context")
   // Flagged true when an expired flow pack pushes the flow into the
   // 30-day trash queue. Cleared on plan renewal (auto-restore) or user
   // selection in the flow picker.
-  markedForDowngrade Boolean    @default(false) @map("marked_for_downgrade")
-  version        Int             @default(1)
-  flowGroupUsers FlowGroupUser[]
-  flowPublishes  FlowPublish[]
-  flowShares     FlowShare[]
-  versions       FlowVersion[]
-  createdAt      DateTime        @default(now()) @map("created_at")
-  updatedAt      DateTime        @updatedAt @map("updated_at")
-  deletedAt      DateTime?       @map("deleted_at")
+  markedForDowngrade Boolean         @default(false) @map("marked_for_downgrade")
+  version            Int             @default(1)
+  flowGroupUsers     FlowGroupUser[]
+  flowPublishes      FlowPublish[]
+  flowShares         FlowShare[]
+  versions           FlowVersion[]
+  createdAt          DateTime        @default(now()) @map("created_at")
+  updatedAt          DateTime        @updatedAt @map("updated_at")
+  deletedAt          DateTime?       @map("deleted_at")
 
   @@index([workspaceId])
   @@index([creatorId])
@@ -986,7 +1030,7 @@ model ShapeGroup {
   legacyTeamId   Int             @default(0) @map("team_id") // legacy MySQL int, unused for routing
   // Workspace scoping (private team buckets): null = personal, non-null = team.
   workspaceId    String?         @map("workspace_id")
-  workspace           User?           @relation("ShapeGroupWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace      User?           @relation("ShapeGroupWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   appType        AppType?        @map("app_type")
   appContext     UserVersion     @default(free) @map("app_context")
   shapes         Shape[]
@@ -1007,38 +1051,38 @@ model ShapeGroup {
 // ============================================================
 
 model Shape {
-  id            String      @id @default(cuid())
-  legacyId      Int?        @map("legacy_id")
-  legacySource  String?     @map("legacy_source")
-  name          String
-  type          String      @default("stencil")
-  content       String?     @db.Text // SVG/HTML/Base64 (was 'shape' in MySQL)
-  textAlignment String      @default("bottom") @map("text_alignment")
-  ratioLock     Boolean     @default(true) @map("ratio_lock")
-  shapeType     ShapeType   @default(img) @map("shape_type")
-  groupId       String?     @map("group_id")
-  group         ShapeGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
-  ownerId       String      @map("owner_id")
-  owner         User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  id                    String      @id @default(cuid())
+  legacyId              Int?        @map("legacy_id")
+  legacySource          String?     @map("legacy_source")
+  name                  String
+  type                  String      @default("stencil")
+  content               String?     @db.Text // SVG/HTML/Base64 (was 'shape' in MySQL)
+  textAlignment         String      @default("bottom") @map("text_alignment")
+  ratioLock             Boolean     @default(true) @map("ratio_lock")
+  shapeType             ShapeType   @default(img) @map("shape_type")
+  groupId               String?     @map("group_id")
+  group                 ShapeGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  ownerId               String      @map("owner_id")
+  owner                 User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   // Workspace scoping (private team buckets): null = personal, non-null = team.
-  workspaceId   String?     @map("workspace_id")
-  workspace          User?       @relation("ShapeWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
-  appType       AppType?    @map("app_type")
-  appContext    UserVersion @default(free) @map("app_context")
-  category      String?
-  xmlContent    String?     @map("xml_content") @db.Text // Legacy
-  thumbnail     String?
-  isPublic      Boolean     @default(false) @map("is_public")
+  workspaceId           String?     @map("workspace_id")
+  workspace             User?       @relation("ShapeWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  appType               AppType?    @map("app_type")
+  appContext            UserVersion @default(free) @map("app_context")
+  category              String?
+  xmlContent            String?     @map("xml_content") @db.Text // Legacy
+  thumbnail             String?
+  isPublic              Boolean     @default(false) @map("is_public")
   // Shape → Team / Chat Group association (exclusive: one OR the other).
   // associationType: 'team' | 'group' — mirrors which FK is set.
-  associatedTeamId      String?    @map("associated_team_id")
-  associatedTeam        Team?      @relation("ShapeAssociatedTeam", fields: [associatedTeamId], references: [id], onDelete: SetNull)
-  associatedChatGroupId String?    @map("associated_chat_group_id")
-  associatedChatGroup   ChatGroup? @relation("ShapeAssociatedGroup", fields: [associatedChatGroupId], references: [id], onDelete: SetNull)
-  associationType       String?    @map("association_type")
-  createdAt     DateTime    @default(now()) @map("created_at")
-  updatedAt     DateTime?   @map("updated_at")
-  deletedAt     DateTime?   @map("deleted_at")
+  associatedTeamId      String?     @map("associated_team_id")
+  associatedTeam        Team?       @relation("ShapeAssociatedTeam", fields: [associatedTeamId], references: [id], onDelete: SetNull)
+  associatedChatGroupId String?     @map("associated_chat_group_id")
+  associatedChatGroup   ChatGroup?  @relation("ShapeAssociatedGroup", fields: [associatedChatGroupId], references: [id], onDelete: SetNull)
+  associationType       String?     @map("association_type")
+  createdAt             DateTime    @default(now()) @map("created_at")
+  updatedAt             DateTime?   @map("updated_at")
+  deletedAt             DateTime?   @map("deleted_at")
 
   @@index([groupId])
   @@index([appContext])
@@ -1054,14 +1098,14 @@ model Shape {
 // ============================================================
 
 model ChatGroup {
-  id           String            @id @default(cuid())
-  legacyId     Int?              @map("legacy_id")
-  legacySource String?           @map("legacy_source")
-  title        String
-  picture      String?
-  userId       String            @map("user_id")
-  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workspaceId  String?           @map("workspace_id")
+  id               String            @id @default(cuid())
+  legacyId         Int?              @map("legacy_id")
+  legacySource     String?           @map("legacy_source")
+  title            String
+  picture          String?
+  userId           String            @map("user_id")
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId      String?           @map("workspace_id")
   /// bug-096: the TEAM this room belongs to. NULL for DMs and named groups.
   ///
   /// Rooms used to be keyed on the workspace alone, so every team an owner ran
@@ -1072,27 +1116,23 @@ model ChatGroup {
   /// `onDelete: SetNull` FK here — deleting a team blanked the column and the
   /// room silently became "personal". Team deletion now soft-deletes the room
   /// explicitly (team.service.deleteTeam), which is a decision, not a cascade.
-  teamId       String?           @map("team_id")
+  teamId           String?           @map("team_id")
   // true = this is a canonical team/workspace room; NULL = an ordinary group/DM.
-  isWorkspaceRoom Boolean?       @map("is_workspace_room")
-  workspace         User?             @relation("ChatGroupWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
-  companyId    Int?              @map("company_id")
-  flowId       Int               @default(0) @map("flow_id")
-  flowItemId   String            @default("") @map("flow_item_id")
-  appType      AppType?          @map("app_type")
-  appContext   UserVersion       @default(free) @map("app_context")
-  members      ChatGroupUser[]
-  messages     ChatMessage[]
-  msgUsers     ChatMessageUser[]
-  associatedShapes Shape[]      @relation("ShapeAssociatedGroup")
-  createdAt    DateTime?         @map("created_at")
-  updatedAt    DateTime?         @map("updated_at")
-  deletedAt    DateTime?         @map("deleted_at")
+  isWorkspaceRoom  Boolean?          @map("is_workspace_room")
+  workspace        User?             @relation("ChatGroupWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  companyId        Int?              @map("company_id")
+  flowId           Int               @default(0) @map("flow_id")
+  flowItemId       String            @default("") @map("flow_item_id")
+  appType          AppType?          @map("app_type")
+  appContext       UserVersion       @default(free) @map("app_context")
+  members          ChatGroupUser[]
+  messages         ChatMessage[]
+  msgUsers         ChatMessageUser[]
+  associatedShapes Shape[]           @relation("ShapeAssociatedGroup")
+  createdAt        DateTime?         @map("created_at")
+  updatedAt        DateTime?         @map("updated_at")
+  deletedAt        DateTime?         @map("deleted_at")
 
-  @@index([userId])
-  @@index([appContext])
-  @@index([workspaceId])
-  @@index([teamId])
   // bug-096: at most one canonical room per (workspace, TEAM, app context).
   // `teamId` joined this key so a second team in the same workspace gets its
   // own room instead of colliding onto the first one's.
@@ -1101,6 +1141,10 @@ model ChatGroup {
   // NULL != NULL rule leaves DMs and named groups unconstrained, exactly as the
   // old null-workspace trick did before every row carried a workspace.
   @@unique([workspaceId, teamId, appContext, isWorkspaceRoom])
+  @@index([userId])
+  @@index([appContext])
+  @@index([workspaceId])
+  @@index([teamId])
   @@map("chat_groups")
 }
 
@@ -1120,12 +1164,12 @@ model ChatGroupUser {
   createdAt  DateTime? @map("created_at")
   updatedAt  DateTime? @map("updated_at")
 
-  @@index([userId])
-  @@index([groupId])
   // bug-058: `skipDuplicates: true` calls throughout chat.service.js rely on
   // this constraint to actually detect duplicates — without it they were
   // silent no-ops, letting the same user get added to a group twice.
   @@unique([groupId, userId])
+  @@index([userId])
+  @@index([groupId])
   @@map("chat_group_users")
 }
 
@@ -1287,19 +1331,19 @@ model MessageNotification {
 // ============================================================
 
 model IssueItem {
-  id           String   @id @default(cuid())
-  legacyId     Int?     @map("legacy_id")
-  legacySource String?  @map("legacy_source")
+  id           String      @id @default(cuid())
+  legacyId     Int?        @map("legacy_id")
+  legacySource String?     @map("legacy_source")
   title        String
-  flowId       Int      @map("flow_id")
-  flowItemId   String   @default("") @map("flow_item_id")
-  companyId    Int?     @map("company_id")
-  isChecked    Boolean  @default(false) @map("is_checked")
-  createdById  String?  @map("created_by")
-  createdBy    User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  flowId       Int         @map("flow_id")
+  flowItemId   String      @default("") @map("flow_item_id")
+  companyId    Int?        @map("company_id")
+  isChecked    Boolean     @default(false) @map("is_checked")
+  createdById  String?     @map("created_by")
+  createdBy    User?       @relation(fields: [createdById], references: [id], onDelete: SetNull)
   // Workspace scoping (private team buckets): null = personal, non-null = team.
   workspaceId  String?     @map("workspace_id")
-  workspace         User?       @relation("IssueItemWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace    User?       @relation("IssueItemWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   appType      AppType?    @map("app_type")
   appContext   UserVersion @default(free) @map("app_context")
   createdAt    DateTime    @default(now()) @map("created_at")
@@ -1316,27 +1360,38 @@ model IssueItem {
 // ============================================================
 
 model TransactionLog {
-  id            String      @id @default(cuid())
-  legacyId      Int?        @map("legacy_id")
-  legacySource  String?     @map("legacy_source")
-  userId        String?     @map("user_id")
-  user          User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
-  chargeId      String?     @map("charge_id")
-  txnId         String?     @map("txn_id")
-  amountCharged Int?        @map("amount_charged") // In cents
-  paymentMethod String?     @map("payment_method")
-  holderName    String?     @map("holder_name")
-  currency      String?
-  status        String?
+  id                   String      @id @default(cuid())
+  legacyId             Int?        @map("legacy_id")
+  legacySource         String?     @map("legacy_source")
+  userId               String?     @map("user_id")
+  user                 User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  chargeId             String?     @map("charge_id")
+  txnId                String?     @map("txn_id")
+  amountCharged        Int?        @map("amount_charged") // In cents
+  paymentMethod        String?     @map("payment_method")
+  holderName           String?     @map("holder_name")
+  currency             String?
+  status               String?
   // What was purchased: ai_addon_credits | pro_upgrade | pro_extra_flows |
   // team_subscription | flow_addon. Lets the billing UI label each row
   // correctly (frontend reads `purchaseType` and falls back to appType).
-  purchaseType  String?     @map("purchase_type")
-  appType       AppType?    @map("app_type")
-  appContext    UserVersion @default(free) @map("app_context")
-  createdAt     DateTime    @default(now()) @map("created_at")
-  updatedAt     DateTime?   @map("updated_at")
-  deletedAt     DateTime?   @map("deleted_at")
+  purchaseType         String?     @map("purchase_type")
+  // Consumer waiver of the 14-day withdrawal right, captured at checkout for
+  // immediately-delivered digital content. The AUTHORITATIVE copy lives on the
+  // Stripe charge metadata (that is what Stripe shows as dispute evidence);
+  // this is our own searchable copy, so support can answer "did they accept?"
+  // without opening the Stripe dashboard, and so the record survives us ever
+  // leaving Stripe. Storing the exact sentence, not just a flag: if the wording
+  // is edited later, an older buyer's row still shows what THEY agreed to.
+  // Null is normal — store (IAP) purchases never carry one, because Apple and
+  // Google are the merchant of record and run their own refund process.
+  withdrawalWaiverAt   DateTime?   @map("withdrawal_waiver_at")
+  withdrawalWaiverText String?     @map("withdrawal_waiver_text")
+  appType              AppType?    @map("app_type")
+  appContext           UserVersion @default(free) @map("app_context")
+  createdAt            DateTime    @default(now()) @map("created_at")
+  updatedAt            DateTime?   @map("updated_at")
+  deletedAt            DateTime?   @map("deleted_at")
 
   @@unique([txnId])
   @@index([chargeId])
@@ -1454,7 +1509,7 @@ model UserAction {
   action      String
   actionModel String?     @map("action_model")
   actionId    Int?        @map("action_id")
-  details     Json?       // structured audit context (flowId is a cuid, won't fit Int actionId)
+  details     Json? // structured audit context (flowId is a cuid, won't fit Int actionId)
   userId      String?     @map("user_id")
   user        User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
   appContext  UserVersion @default(free) @map("app_context")
@@ -1586,7 +1641,7 @@ model Project {
   createdBy   String      @map("created_by")
   creator     User        @relation(fields: [createdBy], references: [id], onDelete: Cascade)
   workspaceId String?     @map("workspace_id")
-  workspace        User?       @relation("ProjectWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace   User?       @relation("ProjectWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   appContext  UserVersion @default(free) @map("app_context")
   flows       Flow[]
   createdAt   DateTime    @default(now()) @map("created_at")
@@ -1605,27 +1660,27 @@ model Project {
 // ============================================================
 
 model ProFlowPurchase {
-  id                    String   @id @default(cuid())
-  userId                String   @map("user_id")
-  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  flowCount             Int      @map("flow_count")
-  amountCents           Int      @map("amount_cents")
-  stripePaymentIntentId String?  @map("stripe_payment_intent_id")
+  id                    String            @id @default(cuid())
+  userId                String            @map("user_id")
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flowCount             Int               @map("flow_count")
+  amountCents           Int               @map("amount_cents")
+  stripePaymentIntentId String?           @map("stripe_payment_intent_id")
   // Lifecycle: 30-day pack with 3-day grace period.
   // status: active | grace | expired | renewed
-  packType              String   @default("fifty_flows") @map("pack_type")
-  isUnlimited           Boolean  @default(false) @map("is_unlimited")
-  expiresAt             DateTime? @map("expires_at")
-  gracePeriodEndsAt     DateTime? @map("grace_period_ends_at")
-  status                String   @default("active") @map("status")
-  notified7Days         Boolean  @default(false) @map("notified_7_days")
-  notified3Days         Boolean  @default(false) @map("notified_3_days")
-  notified1Day          Boolean  @default(false) @map("notified_1_day")
-  renewedFromId         String?  @map("renewed_from_id")
+  packType              String            @default("fifty_flows") @map("pack_type")
+  isUnlimited           Boolean           @default(false) @map("is_unlimited")
+  expiresAt             DateTime?         @map("expires_at")
+  gracePeriodEndsAt     DateTime?         @map("grace_period_ends_at")
+  status                String            @default("active") @map("status")
+  notified7Days         Boolean           @default(false) @map("notified_7_days")
+  notified3Days         Boolean           @default(false) @map("notified_3_days")
+  notified1Day          Boolean           @default(false) @map("notified_1_day")
+  renewedFromId         String?           @map("renewed_from_id")
   renewedFrom           ProFlowPurchase?  @relation("PackRenewal", fields: [renewedFromId], references: [id], onDelete: SetNull)
   renewals              ProFlowPurchase[] @relation("PackRenewal")
-  createdAt             DateTime @default(now()) @map("created_at")
-  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
+  createdAt             DateTime          @default(now()) @map("created_at")
+  updatedAt             DateTime          @default(now()) @updatedAt @map("updated_at")
 
   @@index([userId])
   @@index([status])
@@ -1640,26 +1695,26 @@ model ProFlowPurchase {
 // ============================================================
 
 model Notification {
-  id        String    @id @default(cuid())
-  userId    String    @map("user_id")
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id          String      @id @default(cuid())
+  userId      String      @map("user_id")
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   // Workspace boundary. NULL = a personal notification (scoped by appContext);
   // non-null = belongs to that team's workspace. SetNull on team delete so the
   // notification survives as a personal one rather than vanishing.
-  workspaceId String? @map("workspace_id")
-  workspace      User?     @relation("NotificationWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String?     @map("workspace_id")
+  workspace   User?       @relation("NotificationWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   // Examples: flow_pack_7day, flow_pack_3day, flow_pack_1day,
   //           flow_pack_grace, flow_pack_expired, flow_picker_required,
   //           flows_restored.
-  type      String
-  title     String
-  message   String      @db.Text
-  isRead    Boolean     @default(false) @map("is_read")
-  actionUrl String?     @map("action_url")
-  metadata  Json?
-  appContext UserVersion @default(free) @map("app_context")
-  createdAt DateTime    @default(now()) @map("created_at")
-  expiresAt DateTime?   @map("expires_at")
+  type        String
+  title       String
+  message     String      @db.Text
+  isRead      Boolean     @default(false) @map("is_read")
+  actionUrl   String?     @map("action_url")
+  metadata    Json?
+  appContext  UserVersion @default(free) @map("app_context")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  expiresAt   DateTime?   @map("expires_at")
 
   // Primary access path: a user's notifications within one workspace, by read
   // state. Mirrors the { ownerId, workspaceId } boundary used across the app.
@@ -1761,7 +1816,7 @@ model AiConversation {
   userId     String       @map("user_id")
   user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   title      String?
-  appContext  UserVersion? @map("app_context")
+  appContext UserVersion? @map("app_context")
   createdAt  DateTime     @default(now()) @map("created_at")
   updatedAt  DateTime     @updatedAt @map("updated_at")
   messages   AiMessage[]
@@ -1798,23 +1853,23 @@ model AiMessage {
 // ============================================================
 
 model AiJob {
-  id             String    @id @default(cuid())
-  userId         String    @map("user_id")
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  status         String    @default("pending") // pending | processing | done | error
-  prompt         String?   @db.Text
-  conversationId String?   @map("conversation_id")
-  messageId      String?   @map("message_id")
-  appContext     String?   @map("app_context")
-  workspaceId    String?   @map("workspace_id")
-  existingXml    String?   @db.Text @map("existing_xml") // canvas XML when editing an existing diagram
-  result         String?   @db.Text // generated mxGraph XML
-  model          String?
-  remainingCredits Int?    @map("remaining_credits")
-  error          String?   @db.Text
-  completedAt    DateTime? @map("completed_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  id               String    @id @default(cuid())
+  userId           String    @map("user_id")
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status           String    @default("pending") // pending | processing | done | error
+  prompt           String?   @db.Text
+  conversationId   String?   @map("conversation_id")
+  messageId        String?   @map("message_id")
+  appContext       String?   @map("app_context")
+  workspaceId      String?   @map("workspace_id")
+  existingXml      String?   @map("existing_xml") @db.Text // canvas XML when editing an existing diagram
+  result           String?   @db.Text // generated mxGraph XML
+  model            String?
+  remainingCredits Int?      @map("remaining_credits")
+  error            String?   @db.Text
+  completedAt      DateTime? @map("completed_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   @@index([userId])
   @@index([status])
@@ -1908,4 +1963,82 @@ model ContactSubmission {
   @@index([createdAt])
   @@index([source])
   @@map("contact_submissions")
+}
+
+// ============================================================
+// LICENSE PROBE — DIAGNOSTIC HARNESS, NOT PRODUCT CODE.
+//
+// Exists to answer ONE empirical question that no documentation answers:
+//
+//   "When a user REFUNDS an upfront paid app, does Play Integrity's
+//    appLicensingVerdict flip from LICENSED to UNLICENSED — and how long
+//    does it take?"
+//
+// Google documents appLicensingVerdict as an ENTITLEMENT check ("The user has
+// an app entitlement"), and a refund revokes the Play entitlement, so it
+// SHOULD flip. Google does not document that it does, nor the latency, and
+// explicitly warns that on older devices a user "may retain the app
+// entitlement after uninstalling". The whole 14-day-lease architecture rests
+// on this flip, so it is measured before anything is built on it.
+//
+// ⚠️ THIS TABLE NEVER DRIVES AN ENTITLEMENT. Nothing reads it to decide
+// access; it is append-only observation. See licenseProbe.controller.js.
+//
+// ⚠️ NO FOREIGN KEY on userId, deliberately. This is a scratch table with a
+// finite life (drop it once the question is answered), and a real relation
+// would add another cascade path to reason about on account deletion. The id
+// is recorded for correlation only and may point at a deleted user.
+//
+// Delete the model, the table, the route and the Kotlin channel once the
+// experiment concludes — a diagnostic left in the codebase becomes folklore.
+// ============================================================
+model LicenseProbe {
+  id String @id @default(cuid())
+
+  /// Free-text tag set from the device so the timeline reads itself, e.g.
+  /// "before-refund", "refund-requested", "t+1h". This is what turns a pile
+  /// of rows into an experiment.
+  label      String?
+  /// Stable per-install id — the experiment's real subject is the
+  /// device+Play-account pair, not our own user account.
+  deviceId   String? @map("device_id")
+  /// Correlation only; may be null (the probe does not require a session) and
+  /// may reference a deleted user (see the no-FK note above).
+  userId     String? @map("user_id")
+
+  platform    String  // android | ios
+  appVariant  String? @map("app_variant")  // pro | team
+  packageName String? @map("package_name")
+
+  // ── The verdict fields under test ──────────────────────────────────────
+  /// LICENSED | UNLICENSED | UNEVALUATED — the field the whole architecture
+  /// depends on.
+  appLicensingVerdict   String? @map("app_licensing_verdict")
+  /// PLAY_RECOGNIZED | UNRECOGNIZED_VERSION | UNEVALUATED. Recorded to tell a
+  /// licensing change apart from the app simply not being recognised.
+  appRecognitionVerdict String? @map("app_recognition_verdict")
+  /// Joined deviceRecognitionVerdict labels. Not load-bearing for licensing —
+  /// kept so a confusing result can be explained rather than guessed at.
+  deviceVerdicts        String? @map("device_verdicts")
+
+  /// Google's own token timestamp, as a STRING: it is milliseconds-since-epoch
+  /// and would need BigInt, which serialises badly through JSON.
+  tokenTimestampMs String? @map("token_timestamp_ms")
+  requestHash      String? @map("request_hash")
+
+  /// false when decoding failed — an error is a RESULT here, not a bug to
+  /// swallow. A run of failures is itself a finding.
+  ok    Boolean @default(false)
+  error String?
+
+  /// The complete decoded payload. The parsed columns above are for querying;
+  /// this is so a later question can be answered without re-running a $5
+  /// refund.
+  raw Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([deviceId, createdAt])
+  @@index([createdAt])
+  @@map("license_probes")
 }

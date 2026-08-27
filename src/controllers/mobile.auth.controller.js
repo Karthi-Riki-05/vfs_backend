@@ -7,6 +7,7 @@ const asyncHandler = require("../utils/asyncHandler");
 const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 const flowService = require("../services/flow.service");
+const { resolveSignupProvenance } = require("../lib/signupProvenance");
 
 function signAccessToken(userId) {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "7d" });
@@ -197,7 +198,7 @@ class MobileAuthController {
   });
 
   socialLogin = asyncHandler(async (req, res) => {
-    const { provider, idToken } = req.body;
+    const { provider, idToken, appVariant, platform } = req.body;
 
     if (!provider || !idToken) {
       throw new AppError(
@@ -304,6 +305,14 @@ class MobileAuthController {
           name: name || email.split("@")[0],
           image: image || null,
           role: "Viewer",
+          // Write-once signup provenance. This endpoint only ever serves the
+          // native shell, and the shell states its own platform/variant — the
+          // request carries no shell User-Agent to infer them from.
+          ...resolveSignupProvenance({
+            platform,
+            appVariant,
+            loginType: String(provider || "").toLowerCase(),
+          }),
           // Issue 4: the provider has verified this email (Google
           // email_verified===true, or Apple signature-verified), so the new
           // account is email-verified — consistent with the credentials gate.

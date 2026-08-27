@@ -458,6 +458,8 @@ class IapService {
           hasPro: true,
           currentVersion: "pro",
           proPurchasedAt: new Date(),
+          // A real store purchase clears the refund tombstone.
+          proRefundedAt: null,
         },
       });
       await grantProCredits(
@@ -720,7 +722,14 @@ class IapService {
       // Credits already granted stay (mirrors the legacy webhook decision).
       await prisma.user.update({
         where: { id: userId },
-        data: { hasPro: false, proPurchasedAt: null, currentVersion: "free" },
+        data: {
+          hasPro: false,
+          proPurchasedAt: null,
+          currentVersion: "free",
+          // Tombstone — see prisma User.proRefundedAt. The Pro shell would
+          // otherwise re-grant on next launch.
+          proRefundedAt: new Date(),
+        },
       });
       logger.info(`[iap] Pro revoked for user ${userId} (store refund)`);
       return { updated: "pro_revoked" };
@@ -769,7 +778,14 @@ class IapService {
     if (product.type === "pro_lifetime") {
       await prisma.user.update({
         where: { id: userId },
-        data: { hasPro: false, proPurchasedAt: null, currentVersion: "free" },
+        data: {
+          hasPro: false,
+          proPurchasedAt: null,
+          currentVersion: "free",
+          // Tombstone — see prisma User.proRefundedAt. The Pro shell would
+          // otherwise re-grant on next launch.
+          proRefundedAt: new Date(),
+        },
       });
       return { updated: "pro_revoked" };
     }

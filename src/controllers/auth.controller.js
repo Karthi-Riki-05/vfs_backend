@@ -9,6 +9,11 @@ const { sendVerificationEmail } = require("../utils/email");
 const securityAlert = require("../services/securityAlert.service");
 const { verifyUserPassword } = require("../utils/verifyUserPassword");
 const userService = require("../services/user.service");
+const {
+  resolveSignupProvenance,
+  clientUserAgent,
+  LOGIN_TYPE,
+} = require("../lib/signupProvenance");
 
 const VERIFY_OTP_TTL_MIN = 15;
 
@@ -35,6 +40,14 @@ exports.register = asyncHandler(async (req, res) => {
   const hashedPassword = await argon2.hash(password);
   const { otp, expiresAt } = generateOtp();
 
+  // Write-once signup provenance. The client UA arrives as X-Client-User-Agent
+  // because this endpoint is called by the Next.js server, not the browser —
+  // see lib/signupProvenance.js. Absent header => "web", the safe default.
+  const provenance = resolveSignupProvenance({
+    userAgent: clientUserAgent(req),
+    loginType: LOGIN_TYPE.EMAIL,
+  });
+
   const user = await prisma.user.create({
     data: {
       name,
@@ -43,6 +56,7 @@ exports.register = asyncHandler(async (req, res) => {
       role: "Viewer",
       verifyToken: otp,
       verifyTokenExpiresAt: expiresAt,
+      ...provenance,
     },
   });
 
@@ -218,6 +232,13 @@ exports.oauthSync = asyncHandler(async (req, res) => {
         // Only a provider-vouched email counts as verified; otherwise the row
         // stays subject to the OTP gate like any credentials registration.
         emailVerified: providerVerifiedEmail ? new Date() : null,
+        // Write-once signup provenance. `provider` is NextAuth's own id
+        // ("google" | "facebook" | "apple" | "linkedin"); an unrecognised one
+        // records null rather than a guess.
+        ...resolveSignupProvenance({
+          userAgent: clientUserAgent(req),
+          loginType: String(provider || "").toLowerCase(),
+        }),
       },
     });
     logger.info(`OAuth user created via ${provider}: ${user.id}`);

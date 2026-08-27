@@ -29,9 +29,14 @@ class ProController {
 
   purchasePro = asyncHandler(async (req, res) => {
     const inviteToken = req.body?.inviteToken || req.query?.inviteToken || null;
+    // Withdrawal-right waiver agreed at checkout. Passed straight through to
+    // the Stripe session metadata so the consent is attached to the payment
+    // itself — that is what gets shown as evidence if the charge is disputed.
+    const waiver = req.body?.waiver || null;
     const result = await proService.createProPurchaseCheckout(
       req.user.id,
       inviteToken,
+      waiver,
     );
     res.json({ success: true, data: result });
   });
