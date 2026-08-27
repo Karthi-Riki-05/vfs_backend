@@ -1984,6 +1984,7 @@ class SubscriptionService {
       where: { paymentId: subscription.id },
       include: {
         user: { select: { id: true, name: true, email: true } },
+        plan: { select: { name: true } },
       },
     });
     if (!sub || !this._isTeamSub(sub)) {
@@ -2001,6 +2002,55 @@ class SubscriptionService {
       data: { status: "cancelled", deletedAt: new Date() },
     });
     logger.info(`Subscription cancelled for user ${sub.userId}`);
+
+    // Archive the plan that just ended (bug-129, second path).
+    //
+    // WHY HERE TOO: expireLapsedSubscriptions() archives plans that lapse on
+    // OUR clock, but a store-driven end never reaches it. Play RTDN
+    // EXPIRATION / Apple's equivalent land in iapService._revoke(), which
+    // delegates here — and this function marks the row `cancelled` AND sets
+    // deletedAt, so the daily sweep (status IN active|cancelling, deletedAt
+    // null) can never pick it up afterwards. Without this write, a store
+    // subscription that ends leaves NO "expired" history row at all, and
+    // getHistory() — which filters on exactly that status — shows the user an
+    // empty "past plans" panel forever. Observed on dev 2026-08-26: user
+    // test4321 ran a full sandbox lifecycle (purchase → 6 renewals →
+    // CANCELLATION → EXPIRATION) and every history row still said "active".
+    //
+    // Status is "expired", not "cancelled": the panel means "plans that ran
+    // out" (owner decision 2026-07-02), and from the user's side this plan
+    // ran out. The subscription row keeps its own `cancelled` status.
+    //
+    // Non-blocking — the downgrade below is what protects entitlements.
+    try {
+      await prisma.subscriptionHistory.create({
+        data: {
+          userId: sub.userId,
+          planName:
+            sub.plan?.name ||
+            (sub.productType === "team_yearly" ? "Team Yearly" : "Team Monthly"),
+          productType: sub.productType || null,
+          status: "expired",
+          price: sub.price ?? 0,
+          currency: sub.currency || "usd",
+          isRecurring: sub.isRecurring ?? true,
+          source: sub.provider || "stripe",
+          startedAt: sub.startedAt || null,
+          expiresAt: sub.expiresAt || null,
+          appContext: sub.appContext,
+          archivedReason: "subscription_deleted",
+          snapshot: {
+            subscriptionId: sub.id,
+            paymentId: sub.paymentId,
+            endedAt: new Date().toISOString(),
+          },
+        },
+      });
+    } catch (err) {
+      logger.error(
+        `[_handleSubscriptionDeleted] history row failed for subscription ${sub.id}: ${err.message}`,
+      );
+    }
 
     // CRITICAL: revoke team access (Pro lifetime preserved if proPurchasedAt set)
     await downgradeUser(sub.userId, { reason: "subscription_deleted" });
