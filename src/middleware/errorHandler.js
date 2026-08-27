@@ -4,15 +4,31 @@ const AppError = require("../utils/AppError");
 const errorHandler = (err, req, res, _next) => {
   const requestId = req.headers["x-request-id"] || "unknown";
 
-  // Log full error details server-side
-  logger.error(`${err.message}`, {
+  // Log full error details server-side.
+  //
+  // Level is chosen from the status, not the fact that we are in an error
+  // handler: an expected client denial is not an incident. A working
+  // entitlement gate used to emit `level:"error"` once a minute per polling
+  // client (403 UPGRADE_REQUIRED on /chat/unread-count, 2026-08-27), which
+  // both hid real 5xx in the noise and bloated the journal. 4xx is the
+  // client's problem and belongs at `warn`; 5xx (and anything with no status)
+  // is ours and stays at `error`.
+  const status = err.statusCode || 500;
+  const meta = {
     requestId,
     method: req.method,
     url: req.originalUrl,
-    statusCode: err.statusCode || 500,
+    statusCode: status,
     userId: req.user?.id,
     stack: process.env.NODE_ENV === "production" ? undefined : err.stack,
-  });
+  };
+  // Called through the logger (not via a detached `const log = logger.warn`)
+  // because winston's level methods are `this`-bound to the logger instance.
+  if (status >= 500) {
+    logger.error(`${err.message}`, meta);
+  } else {
+    logger.warn(`${err.message}`, meta);
+  }
 
   // Prisma known request errors
   if (err.code === "P2002") {
